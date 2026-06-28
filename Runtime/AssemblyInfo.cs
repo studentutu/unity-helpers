@@ -4,7 +4,15 @@
 using System.Runtime.CompilerServices;
 
 [assembly: InternalsVisibleTo("WallstopStudios.UnityHelpers.Editor")]
+// First-party integration assemblies (compiled only when the matching DI package is
+// present) extend the runtime and consume shared internal helpers such as
+// UnityObjectExtensions (the FindObjectsByType version shim), so they are granted the
+// same internals access as the Editor assembly.
+[assembly: InternalsVisibleTo("WallstopStudios.UnityHelpers.Integration.Reflex")]
+[assembly: InternalsVisibleTo("WallstopStudios.UnityHelpers.Integration.VContainer")]
+[assembly: InternalsVisibleTo("WallstopStudios.UnityHelpers.Integration.Zenject")]
 [assembly: InternalsVisibleTo("WallstopStudios.UnityHelpers.Tests.Core")]
+[assembly: InternalsVisibleTo("WallstopStudios.UnityHelpers.Tests.Core.Editor")]
 [assembly: InternalsVisibleTo("WallstopStudios.UnityHelpers.Tests.Editor")]
 [assembly: InternalsVisibleTo("WallstopStudios.UnityHelpers.Tests.Editor.AssetProcessors")]
 [assembly: InternalsVisibleTo("WallstopStudios.UnityHelpers.Tests.Editor.Attributes")]

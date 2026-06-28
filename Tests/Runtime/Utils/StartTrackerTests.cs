@@ -150,10 +150,17 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
                 "Should have exactly one StartTracker before attempting to add another"
             );
 
-            // Suppress the expected Unity error log to keep test output clean
-            LogAssert.ignoreFailingMessages = true;
-            StartTracker second = go.AddComponent<StartTracker>();
-            LogAssert.ignoreFailingMessages = false;
+            StartTracker second;
+            bool previousIgnoreFailingMessages = LogAssert.ignoreFailingMessages;
+            try
+            {
+                LogAssert.ignoreFailingMessages = true;
+                second = go.AddComponent<StartTracker>();
+            }
+            finally
+            {
+                LogAssert.ignoreFailingMessages = previousIgnoreFailingMessages;
+            }
 
             // Verify the actual behavior: second component was not added
             Assert.IsTrue(
@@ -191,8 +198,8 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             Assert.IsTrue(tracker.Started, "Initial tracker should be Started");
 
             // Destroy the component
-            Object.DestroyImmediate(tracker); // UNH-SUPPRESS: Test verifies new tracker state after component destruction
-            yield return null;
+            Object.Destroy(tracker); // UNH-SUPPRESS: Test verifies new tracker state after component destruction
+            yield return WaitUntilDestroyed(tracker);
 
             // Add a new tracker
             StartTracker newTracker = go.AddComponent<StartTracker>();

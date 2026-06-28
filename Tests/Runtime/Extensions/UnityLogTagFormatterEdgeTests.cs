@@ -23,6 +23,14 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
         [TestCase(false)]
         public void UnknownTagFallsBack(bool pretty)
         {
+            // go.Log(...) routes through WallstopStudiosLogger, whose body is compiled out in a
+            // non-development player; with no log emitted the logCount assertions below are
+            // meaningless, so skip the case there.
+            if (!WallstopLoggingCompiledIn)
+            {
+                Assert.Ignore("Package logging is compiled out in this build.");
+            }
+
             GameObject go = Track(
                 new GameObject(nameof(UnknownTagFallsBack), typeof(SpriteRenderer))
             );
@@ -49,6 +57,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
                     }
                 };
 
+                ExpectLogContaining("Hello world");
                 go.Log($"Hello {"world":does_not_exist}", pretty: pretty);
                 Assert.AreEqual(++expectedLogCount, logCount);
                 Assert.IsTrue(exception == null, exception?.ToString());
@@ -79,6 +88,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
         [TestCase(false)]
         public void RepeatedSeparatorsAreIgnored(bool pretty)
         {
+            if (!WallstopLoggingCompiledIn)
+            {
+                Assert.Ignore("Package logging is compiled out in this build.");
+            }
+
             GameObject go = Track(
                 new GameObject(nameof(RepeatedSeparatorsAreIgnored), typeof(SpriteRenderer))
             );
@@ -108,6 +122,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
                     }
                 };
 
+                ExpectLogContaining("<b>value</b>");
                 go.Log($"{"value":b,,,,,}", pretty: pretty);
                 Assert.AreEqual(++expectedLogCount, logCount);
                 Assert.IsTrue(exception == null, exception?.ToString());
@@ -138,72 +153,41 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
         public void ExceptionLoggingFormatsOutput()
         {
             UnityLogTagFormatter formatter = new();
-            Exception testException = new("Boom");
+            string message = nameof(ExceptionLoggingFormatsOutput);
+            Exception testException = new($"{nameof(ExceptionLoggingFormatsOutput)}Boom");
 
-            int logCount = 0;
-            Exception exception = null;
-            Action<string, LogType> assertion = null;
-            Application.logMessageReceived += HandleMessageReceived;
+            LogAssert.Expect(LogType.Log, new Regex($"(?s).*{message}.*{testException.Message}.*"));
+            string logged = formatter.Log(
+                $"{message}Log",
+                context: null,
+                e: testException,
+                pretty: true
+            );
+            Assert.IsTrue(logged.Contains("NO_NAME[NO_TYPE]"), logged);
+            Assert.IsTrue(logged.Contains($"{message}Log"), logged);
+            Assert.IsTrue(logged.Contains(testException.Message), logged);
 
-            try
-            {
-                int expectedLogCount = 0;
+            ExpectError(LogType.Warning, new Regex($"(?s).*{message}.*{testException.Message}.*"));
+            string warned = formatter.LogWarn(
+                $"{message}Warning",
+                context: null,
+                e: testException,
+                pretty: false
+            );
+            Assert.IsTrue(warned.Contains($"{message}Warning"), warned);
+            Assert.IsTrue(warned.Contains(testException.Message), warned);
 
-                assertion = (message, type) =>
-                {
-                    Assert.AreEqual(LogType.Log, type);
-                    Assert.IsTrue(message.Contains("NO_NAME[NO_TYPE]"), message);
-                    Assert.IsTrue(message.Contains("Hello"), message);
-                    Assert.IsTrue(message.Contains("Boom"), message);
-                };
-                formatter.Log($"Hello", context: null, e: testException, pretty: true);
-                Assert.AreEqual(++expectedLogCount, logCount);
-                Assert.IsTrue(exception == null, exception?.ToString());
+            ExpectError(LogType.Error, new Regex($"(?s).*{message}.*{testException.Message}.*"));
+            string errored = formatter.LogError(
+                $"{message}Error",
+                context: null,
+                e: testException,
+                pretty: false
+            );
+            Assert.IsTrue(errored.Contains($"{message}Error"), errored);
+            Assert.IsTrue(errored.Contains(testException.Message), errored);
 
-                assertion = (message, type) =>
-                {
-                    Assert.AreEqual(LogType.Warning, type);
-                    Assert.IsTrue(message.Contains("Hello"), message);
-                    Assert.IsTrue(message.Contains("Boom"), message);
-                };
-                // Mark the upcoming warning log as expected so the test runner doesn't flag it.
-                LogAssert.Expect(LogType.Warning, new Regex("Hello[\n\r]+.*Boom"));
-                formatter.LogWarn($"Hello", context: null, e: testException, pretty: false);
-                Assert.AreEqual(++expectedLogCount, logCount);
-                Assert.IsTrue(exception == null, exception?.ToString());
-
-                assertion = (message, type) =>
-                {
-                    Assert.AreEqual(LogType.Error, type);
-                    Assert.IsTrue(message.Contains("Hello"), message);
-                    Assert.IsTrue(message.Contains("Boom"), message);
-                };
-                // Mark the upcoming error log as expected so the test runner doesn't flag it.
-                LogAssert.Expect(LogType.Error, new Regex("Hello[\n\r]+.*Boom"));
-                formatter.LogError($"Hello", context: null, e: testException, pretty: false);
-                Assert.AreEqual(++expectedLogCount, logCount);
-                Assert.IsTrue(exception == null, exception?.ToString());
-            }
-            finally
-            {
-                Application.logMessageReceived -= HandleMessageReceived;
-            }
-
-            return;
-
-            void HandleMessageReceived(string message, string stackTrace, LogType type)
-            {
-                ++logCount;
-                try
-                {
-                    assertion?.Invoke(message, type);
-                }
-                catch (Exception e)
-                {
-                    exception = e;
-                    throw;
-                }
-            }
+            LogAssert.NoUnexpectedReceived();
         }
 
         [Test]
@@ -229,6 +213,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
                 force: true
             );
 
+            ExpectLogContaining("<A><B>value</B></A>");
             string formatted = formatter.Log($"{"value":x}", pretty: false);
             Assert.AreEqual("<A><B>value</B></A>", formatted);
         }
@@ -246,6 +231,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
                 editorOnly: false,
                 force: true
             );
+            ExpectLogContaining("<P5>value</P5>");
             string formatted = formatter.Log($"{"value":demo}", pretty: false);
             Assert.AreEqual("<P5>value</P5>", formatted);
 
@@ -257,6 +243,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
                 editorOnly: false,
                 force: true
             );
+            ExpectLogContaining("<P1>value</P1>");
             formatted = formatter.Log($"{"value":demo}", pretty: false);
             Assert.AreEqual("<P1>value</P1>", formatted);
         }
@@ -283,6 +270,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
                 force: true
             );
 
+            ExpectLogContaining("<Updated>value</Updated>");
             string formatted = formatter.Log($"{"value":demo}", pretty: false);
             Assert.AreEqual("<Updated>value</Updated>", formatted);
         }
@@ -312,6 +300,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
             );
             Assert.IsFalse(secondResult);
 
+            ExpectLogContaining("<Initial>value</Initial>");
             string formatted = formatter.Log($"{"value":demo}", pretty: false);
             Assert.AreEqual("<Initial>value</Initial>", formatted);
         }
@@ -338,6 +327,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
             Assert.IsTrue(removed);
             Assert.AreEqual("Demo", removedDecoration.Tag);
 
+            ExpectLogContaining("value");
             string formatted = formatter.Log($"{"value":demo}", pretty: false);
             Assert.AreEqual("value", formatted);
         }
@@ -347,44 +337,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
         {
             UnityLogTagFormatter formatter = new();
 
-            int logCount = 0;
-            Exception exception = null;
-            Action<string> assertion = null;
-            Application.logMessageReceived += HandleMessageReceived;
+            ExpectLogContaining("Hello");
+            string logged = formatter.Log($"Hello", pretty: true);
 
-            try
-            {
-                int expectedLogCount = 0;
-                assertion = message =>
-                {
-                    StringAssert.DoesNotMatch(@"\|(unity|editor)-main#\d+\|", message);
-                    StringAssert.IsMatch(@"^\d+(\.\d+)?\|NO_NAME\[NO_TYPE\]\|Hello$", message);
-                };
-
-                formatter.Log($"Hello", pretty: true);
-                Assert.AreEqual(++expectedLogCount, logCount);
-                Assert.IsTrue(exception == null, exception?.ToString());
-            }
-            finally
-            {
-                Application.logMessageReceived -= HandleMessageReceived;
-            }
-
-            return;
-
-            void HandleMessageReceived(string message, string stackTrace, LogType type)
-            {
-                ++logCount;
-                try
-                {
-                    assertion?.Invoke(message);
-                }
-                catch (Exception e)
-                {
-                    exception = e;
-                    throw;
-                }
-            }
+            StringAssert.DoesNotMatch(@"\|(unity|editor)-main#\d+\|", logged);
+            StringAssert.IsMatch(@"^\d+(\.\d+)?\|NO_NAME\[NO_TYPE\]\|Hello$", logged);
         }
 
         [Test]
@@ -394,6 +351,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
 
             string loggedMessage = null;
             int workerThreadId = -1;
+            ExpectLogContaining("Worker");
             Thread worker = new(() =>
             {
                 UnityLogTagFormatter workerFormatter = new();
@@ -424,6 +382,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
                     worker.Join();
                 }
             }
+        }
+
+        private static void ExpectLogContaining(string value)
+        {
+            LogAssert.Expect(LogType.Log, new Regex(Regex.Escape(value)));
         }
     }
 }

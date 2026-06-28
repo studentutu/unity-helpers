@@ -76,9 +76,11 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
             string[] source = { null, "valid" };
             set._items = source;
 
-            LogAssert.Expect(
-                LogType.Error,
-                "SerializableSet<System.String> skipped serialized entry at index 0 because the value reference was null."
+            ExpectError(
+                LogType.Warning,
+                System.Text.RegularExpressions.Regex.Escape(
+                    "SerializableSet<System.String> skipped serialized entry at index 0 because the value reference was null."
+                )
             );
 
             set.OnAfterDeserialize();
@@ -106,9 +108,11 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
             string[] source = { null, "valid" };
             set._items = source;
 
-            LogAssert.Expect(
-                LogType.Error,
-                "SerializableSet<System.String> skipped serialized entry at index 0 because the value reference was null."
+            ExpectError(
+                LogType.Warning,
+                System.Text.RegularExpressions.Regex.Escape(
+                    "SerializableSet<System.String> skipped serialized entry at index 0 because the value reference was null."
+                )
             );
 
             set.OnAfterDeserialize();
@@ -676,7 +680,10 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
 
             string expectedMessage =
                 $"SerializableSet<{typeof(DummyAsset).FullName}> skipped serialized entry at index 0 because the value reference was null.";
-            LogAssert.Expect(LogType.Error, expectedMessage);
+            ExpectError(
+                LogType.Warning,
+                System.Text.RegularExpressions.Regex.Escape(expectedMessage)
+            );
 
             set.OnAfterDeserialize();
 
@@ -703,6 +710,7 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
         }
 
         [Test]
+        [WallstopStudios.UnityHelpers.Tests.Core.SkipUnderIL2CPP]
         public void ProtoSerializationRoundTripsValues()
         {
             SerializableHashSet<int> original = new(new[] { 1, 3, 5 });
@@ -866,6 +874,7 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
         }
 
         [Test]
+        [WallstopStudios.UnityHelpers.Tests.Core.SkipUnderIL2CPP]
         public void JsonRoundTripPreservesUserDefinedOrder()
         {
             SerializableHashSet<int> original = new(new[] { 9, 4, 7 });
@@ -1021,6 +1030,7 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
         }
 
         [Test]
+        [WallstopStudios.UnityHelpers.Tests.Core.SkipUnderIL2CPP]
         public void ProtoSerializationProducesIndependentCopy()
         {
             SerializableHashSet<int> original = new(new[] { 2, 4, 6 });

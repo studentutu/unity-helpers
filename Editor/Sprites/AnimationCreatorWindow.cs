@@ -13,11 +13,11 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
     using UnityEditor;
     using UnityEngine;
     using CustomEditors;
-    using Utils;
     using WallstopStudios.UnityHelpers.Core.Animation;
     using WallstopStudios.UnityHelpers.Core.Extension;
     using WallstopStudios.UnityHelpers.Core.Helper;
     using WallstopStudios.UnityHelpers.Core.Serialization;
+    using WallstopStudios.UnityHelpers.Editor.Utils;
     using WallstopStudios.UnityHelpers.Utils;
     using Object = UnityEngine.Object;
 
@@ -1747,6 +1747,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
                         string finalPath = AssetDatabase.GenerateUniqueAssetPath(
                             $"{assetPath}{animationName}.anim"
                         );
+                        AssetDatabaseBatchHelper.EnsureAssetParentFolder(finalPath);
                         AssetDatabase.CreateAsset(animationClip, finalPath);
                         this.Log($"Created animation at '{finalPath}'.");
                     }
@@ -2088,12 +2089,12 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
 
             return Objects.EnumerableHashCode(EnumerateSourceHashes());
 
-            IEnumerable<(int id, string path)> EnumerateSourceHashes()
+            IEnumerable<(long id, string path)> EnumerateSourceHashes()
             {
                 for (int i = 0; i < animationSources.Count; i++)
                 {
                     Object src = animationSources[i];
-                    int id = src != null ? src.GetInstanceID() : 0;
+                    long id = src != null ? src.GetUnityObjectId() : 0;
                     string path = src != null ? AssetDatabase.GetAssetPath(src) : string.Empty;
                     yield return (id, path);
                 }

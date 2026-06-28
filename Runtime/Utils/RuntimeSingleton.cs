@@ -27,7 +27,8 @@ namespace WallstopStudios.UnityHelpers.Utils
     /// - In <see cref="Awake"/>, sets the static instance and, when <see cref="Preserve"/> is true and in play mode,
     ///   detaches and calls <see cref="Object.DontDestroyOnLoad(Object)"/> to persist across scene loads.
     /// - In <see cref="Start"/>, detects duplicate instances and destroys the newer one.
-    /// - Instance cache is cleared on domain reload before scene load.
+    /// - Instance cache is cleared on domain reload before scene load via <see cref="RuntimeSingletonRegistry"/>.
+    /// - Call <see cref="ClearInstance"/> to manually drop a stale reference in editor tooling or at runtime.
     ///
     /// ODIN compatibility: When the <c>ODIN_INSPECTOR</c> symbol is defined, this class derives from
     /// <c>Sirenix.OdinInspector.SerializedMonoBehaviour</c> for richer serialization; otherwise it derives from
@@ -56,7 +57,12 @@ namespace WallstopStudios.UnityHelpers.Utils
 
         static RuntimeSingleton()
         {
-            RuntimeSingletonRegistry.Register(ClearInstance);
+            RuntimeSingletonRegistry.Register(
+                typeof(T),
+                ClearInstance,
+                () => _instance,
+                () => Resources.FindObjectsOfTypeAll<T>()
+            );
         }
 
         /// <summary>
@@ -111,9 +117,44 @@ namespace WallstopStudios.UnityHelpers.Utils
             }
         }
 
-        internal static void ClearInstance()
+        /// <summary>
+        /// Clears the cached singleton instance, destroying its <see cref="GameObject"/> when present.
+        /// Safe to call unconditionally; no-op when <see cref="HasInstance"/> is false.
+        /// </summary>
+        /// <remarks>
+        /// Use when editor tooling or runtime code needs to drop a stale reference and force a fresh
+        /// instance on the next <see cref="Instance"/> access. Automatic clearing on domain reload is
+        /// handled by <see cref="RuntimeSingletonRegistry"/> because Unity disallows
+        /// <c>[RuntimeInitializeOnLoadMethod]</c> on methods in generic classes.
+        /// </remarks>
+        public static void ClearInstance()
         {
-            _instance.Destroy();
+            // Sweep EVERY live instance of T, not just the cached _instance. The singleton spawns
+            // on the fly the moment anything touches Instance (e.g. a logger/dispatcher access from
+            // a leaked coroutine), and Start()'s duplicate-destroy is deferred, so a PlayMode test
+            // can leave behind extra or inactive instances that _instance no longer points at. Those
+            // survivors keep HasInstance/activeInHierarchy lying and pollute later tests. Use the
+            // version-safe shim (FindObjectsByType is 2022.2+) and include inactive so a deactivated
+            // survivor is caught. StopAllCoroutines before the (deferred) destroy so a coroutine
+            // hosted on the singleton cannot tick once more and log/throw past the test boundary.
+            T[] liveInstances = UnityObjectExtensions.FindObjectsOfTypeShim<T>(true);
+            for (int i = 0; i < liveInstances.Length; i++)
+            {
+                T inst = liveInstances[i];
+                if (inst == null)
+                {
+                    continue;
+                }
+
+                inst.StopAllCoroutines();
+                // Destroy the whole GameObject, not just the component: the Instance getter creates a
+                // dedicated "<Type>-Singleton" GameObject and Start()'s duplicate-detection path also
+                // destroys the GameObject. Destroying only the component leaked an empty GameObject
+                // (into DontDestroyOnLoad for Preserve singletons), which both failed
+                // ClearInstanceDestroysGameObjectAndClearsReference and polluted later PlayMode tests.
+                inst.gameObject.Destroy();
+            }
+
             Interlocked.Exchange(ref _initializeCount, 0);
             _instance = null;
         }

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# cspell:ignore Eiq Fooa Fxq
 # =============================================================================
 # Test Script: Pre-push changed-file detection
 # =============================================================================
@@ -40,43 +41,14 @@ run_test() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PRE_PUSH="$REPO_ROOT/.githooks/pre-push"
+PRE_PUSH_IMPL="$REPO_ROOT/.githooks/pre-push.ps1"
 
-extract_pre_push_helpers() {
-    local helper_script="$1"
-    awk '
-        /^while read -r _local_ref local_sha _remote_ref remote_sha; do$/ { exit }
-        { print }
-    ' "$PRE_PUSH" > "$helper_script"
-}
-
-run_pre_push_helper_script() {
-    local script_body="$1"
-    local helper_script
-    local runner_script
-
-    helper_script=$(mktemp)
-    runner_script=$(mktemp)
-
-    if ! extract_pre_push_helpers "$helper_script"; then
-        rm -f "$helper_script" "$runner_script"
-        return 1
-    fi
-
-    cat > "$runner_script" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-source "$helper_script"
-trap - EXIT INT TERM
-$script_body
-EOF
-
-    if bash "$runner_script"; then
-        rm -f "$helper_script" "$runner_script"
-        return 0
-    fi
-
-    rm -f "$helper_script" "$runner_script"
-    return 1
+install_pre_push_fixture() {
+    local sandbox="$1"
+    mkdir -p "$sandbox/.githooks"
+    cp "$PRE_PUSH" "$sandbox/.githooks/pre-push"
+    cp "$PRE_PUSH_IMPL" "$sandbox/.githooks/pre-push.ps1"
+    chmod +x "$sandbox/.githooks/pre-push" "$sandbox/.githooks/pre-push.ps1"
 }
 
 # =============================================================================
@@ -99,6 +71,13 @@ else
     fail "Pre-push hook is executable" "executable" "not executable"
 fi
 
+run_test
+if [ -f "$PRE_PUSH_IMPL" ]; then
+    pass "Pre-push PowerShell implementation exists"
+else
+    fail "Pre-push PowerShell implementation exists" "file exists" "file not found"
+fi
+
 # =============================================================================
 # Test: Pre-push hook reads stdin
 # =============================================================================
@@ -106,31 +85,31 @@ echo ""
 echo "=== Testing pre-push hook reads stdin ==="
 
 run_test
-if grep -q 'while read' "$PRE_PUSH"; then
-    pass "Hook contains stdin read loop"
+if grep -Fq '[Console]::In.ReadToEnd' "$PRE_PUSH_IMPL"; then
+    pass "Hook reads stdin"
 else
-    fail "Hook contains stdin read loop" "'while read' present" "not found"
+    fail "Hook reads stdin" "[Console]::In.ReadToEnd present" "not found"
 fi
 
 run_test
-if grep -q 'local_sha' "$PRE_PUSH"; then
-    pass "Hook parses local_sha"
+if grep -q 'localSha' "$PRE_PUSH_IMPL"; then
+    pass "Hook parses local SHA"
 else
-    fail "Hook parses local_sha" "'local_sha' present" "not found"
+    fail "Hook parses local SHA" "localSha present" "not found"
 fi
 
 run_test
-if grep -q 'remote_sha' "$PRE_PUSH"; then
-    pass "Hook parses remote_sha"
+if grep -q 'remoteSha' "$PRE_PUSH_IMPL"; then
+    pass "Hook parses remote SHA"
 else
-    fail "Hook parses remote_sha" "'remote_sha' present" "not found"
+    fail "Hook parses remote SHA" "remoteSha present" "not found"
 fi
 
 run_test
-if grep -q 'ZERO_SHA' "$PRE_PUSH"; then
-    pass "Hook handles zero SHA (new branch/delete)"
+if grep -q 'Test-ZeroObjectId' "$PRE_PUSH_IMPL" && grep -Fq "'^0+$'" "$PRE_PUSH_IMPL"; then
+    pass "Hook handles zero object IDs (new branch/delete)"
 else
-    fail "Hook handles zero SHA" "'ZERO_SHA' present" "not found"
+    fail "Hook handles zero object IDs" "Test-ZeroObjectId predicate present" "not found"
 fi
 
 # =============================================================================
@@ -140,87 +119,258 @@ echo ""
 echo "=== Testing changed-file collection and safe transport ==="
 
 run_test
-if grep -q 'ALL_CHANGED_FILES' "$PRE_PUSH"; then
-    pass "Hook collects changed files into ALL_CHANGED_FILES array"
+if grep -q 'allChanged' "$PRE_PUSH_IMPL"; then
+    pass "Hook collects changed files into a set"
 else
-    fail "Hook collects changed files into ALL_CHANGED_FILES array" "ALL_CHANGED_FILES present" "not found"
+    fail "Hook collects changed files into a set" "allChanged present" "not found"
 fi
 
 run_test
-if grep -q 'collect_changed_files' "$PRE_PUSH"; then
-    pass "Hook uses collect_changed_files helper"
+if grep -q 'Get-RegionChangedPathsForRefUpdate' "$PRE_PUSH_IMPL"; then
+    pass "Hook uses region changed-path helper"
 else
-    fail "Hook uses collect_changed_files helper" "collect_changed_files present" "not found"
+    fail "Hook uses region changed-path helper" "Get-RegionChangedPathsForRefUpdate present" "not found"
 fi
 
 run_test
-if grep -q -- '--name-only -z' "$PRE_PUSH"; then
+if grep -Fq "'--name-only'," "$PRE_PUSH_IMPL" && grep -Fq "'-z'," "$PRE_PUSH_IMPL"; then
     pass "Hook requests null-delimited git file lists"
 else
-    fail "Hook requests null-delimited git file lists" "--name-only -z present" "not found"
+    fail "Hook requests null-delimited git file lists" "'--name-only' and '-z' present" "not found"
 fi
 
 run_test
-if grep -q "read -r -d ''" "$PRE_PUSH"; then
-    pass "Hook reads changed files with null-delimited loop"
+diff_filter_count=$(grep -c -- '--diff-filter=ACMRTUXB' "$PRE_PUSH_IMPL" || true)
+if [ "$diff_filter_count" -ge 1 ]; then
+    pass "Hook excludes deleted paths from region-change validation"
 else
-    fail "Hook reads changed files with null-delimited loop" "read -r -d '' present" "not found"
+    fail "Hook excludes deleted paths from region-change validation" "diff-filter=ACMRTUXB on git diff calls" "found $diff_filter_count occurrence(s)"
 fi
 
 run_test
-if grep -qE 'trap.*cleanup|trap.*rm' "$PRE_PUSH"; then
-    pass "Hook has cleanup trap"
+if grep -Fq "'-G'," "$PRE_PUSH_IMPL" && grep -Fq '$script:RegionPattern' "$PRE_PUSH_IMPL"; then
+    pass "Hook uses Git-native region-diff pickaxe"
 else
-    fail "Hook has cleanup trap" "cleanup trap present" "not found"
+    fail "Hook uses Git-native region-diff pickaxe" "git diff -G with shared region pattern" "not found"
 fi
 
 run_test
-if run_pre_push_helper_script '
-ALL_CHANGED_FILES=()
-array_contains_exact "-plugin=evil.js" "normal.txt" "-plugin=evil.js"
-array_contains_exact "file with spaces.cs" "file with spaces.cs"
-if array_contains_exact "missing.txt" "normal.txt" "-plugin=evil.js"; then
-    exit 1
-fi
-if array_contains_exact "anything"; then
-    exit 1
-fi
-'; then
-    pass "array_contains_exact handles spaces, leading dashes, and empty arrays"
+if grep -q 'Split-NulList' "$PRE_PUSH_IMPL"; then
+    pass "Hook parses null-delimited changed files"
 else
-    fail "array_contains_exact handles spaces, leading dashes, and empty arrays" "helper returns correct exact-match results" "helper returned unexpected result"
+    fail "Hook parses null-delimited changed files" "Split-NulList present" "not found"
 fi
 
 run_test
-if run_pre_push_helper_script '
-ALL_CHANGED_FILES=()
-add_changed_file "file with spaces.cs"
-add_changed_file "-plugin=evil.js"
-add_changed_file "file with spaces.cs"
-[[ ${#ALL_CHANGED_FILES[@]} -eq 2 ]]
-[[ "${ALL_CHANGED_FILES[0]}" == "file with spaces.cs" ]]
-[[ "${ALL_CHANGED_FILES[1]}" == "-plugin=evil.js" ]]
-'; then
-    pass "add_changed_file preserves exact filenames and deduplicates"
+if ! grep -q 'PID_NODE' "$PRE_PUSH_IMPL" && ! grep -q 'Start-Job' "$PRE_PUSH_IMPL"; then
+    pass "Hook has no stale background-process cleanup path"
 else
-    fail "add_changed_file preserves exact filenames and deduplicates" "two unique files preserved in insertion order" "deduplication or exact storage failed"
+    fail "Hook has no stale background-process cleanup path" "no background PID cleanup" "found stale background cleanup markers"
 fi
 
 run_test
-if run_pre_push_helper_script '
-ALL_CHANGED_FILES=()
-input_file=$(mktemp)
-printf "file with spaces.cs\0-plugin=evil.js\0file with spaces.cs\0" > "$input_file"
-collect_changed_files < "$input_file"
-rm -f "$input_file"
-[[ ${#ALL_CHANGED_FILES[@]} -eq 2 ]]
-[[ "${ALL_CHANGED_FILES[0]}" == "file with spaces.cs" ]]
-[[ "${ALL_CHANGED_FILES[1]}" == "-plugin=evil.js" ]]
-'; then
-    pass "collect_changed_files parses NUL-delimited input safely"
+sandbox=$(mktemp -d)
+cleanup_output_file=$(mktemp)
+git -C "$sandbox" init -q
+install_pre_push_fixture "$sandbox"
+printf "pre-push.txt*\n" > "$sandbox/.gitignore"
+printf "redirected output\n" > "$sandbox/pre-push.txt"
+if (cd "$sandbox" && .githooks/pre-push </dev/null >"$cleanup_output_file" 2>&1) && [ ! -e "$sandbox/pre-push.txt" ]; then
+    pass "pre-push cleanup runs before no-ref early exit"
 else
-    fail "collect_changed_files parses NUL-delimited input safely" "two unique files parsed from NUL-delimited stream" "parser failed for deduplication or special filenames"
+    cleanup_output=$(cat "$cleanup_output_file" 2>/dev/null || true)
+    fail "pre-push cleanup runs before no-ref early exit" "artifact removed and hook exits zero" "$cleanup_output"
 fi
+rm -rf "$sandbox" "$cleanup_output_file"
+
+run_test
+sandbox=$(mktemp -d)
+subdir_output_file=$(mktemp)
+git -C "$sandbox" init -q
+git -C "$sandbox" config user.email "test@example.com"
+git -C "$sandbox" config user.name "Test User"
+install_pre_push_fixture "$sandbox"
+mkdir -p "$sandbox/Runtime" "$sandbox/subdir"
+printf "public sealed class RegionGuard\n{\n#region Bad\n}\n" > "$sandbox/Runtime/RegionGuard.cs"
+git -C "$sandbox" add Runtime/RegionGuard.cs
+git -C "$sandbox" commit -q -m "Add region guard fixture"
+local_sha=$(git -C "$sandbox" rev-parse HEAD)
+zero_sha="0000000000000000000000000000000000000000"
+if (cd "$sandbox/subdir" && printf "refs/heads/main %s refs/heads/main %s\n" "$local_sha" "$zero_sha" | ../.githooks/pre-push >"$subdir_output_file" 2>&1); then
+    subdir_output=$(cat "$subdir_output_file" 2>/dev/null || true)
+    fail "pre-push anchors execution to repo root for repo-relative changed paths" "hook fails on forbidden #region from subdirectory" "$subdir_output"
+else
+    subdir_output=$(cat "$subdir_output_file" 2>/dev/null || true)
+    if printf "%s" "$subdir_output" | grep -q "RegionGuard.cs" && printf "%s" "$subdir_output" | grep -q "#region"; then
+        pass "pre-push anchors execution to repo root for repo-relative changed paths"
+    else
+        fail "pre-push anchors execution to repo root for repo-relative changed paths" "region violation reported for Runtime/RegionGuard.cs" "$subdir_output"
+    fi
+fi
+rm -rf "$sandbox" "$subdir_output_file"
+
+run_test
+sandbox=$(mktemp -d)
+commit_output_file=$(mktemp)
+git -C "$sandbox" init -q
+git -C "$sandbox" config user.email "test@example.com"
+git -C "$sandbox" config user.name "Test User"
+install_pre_push_fixture "$sandbox"
+mkdir -p "$sandbox/Runtime"
+printf "public sealed class RegionGuard\n{\n#region Bad\n}\n" > "$sandbox/Runtime/RegionGuard.cs"
+git -C "$sandbox" add Runtime/RegionGuard.cs
+git -C "$sandbox" commit -q -m "Commit region violation"
+local_sha=$(git -C "$sandbox" rev-parse HEAD)
+printf "public sealed class RegionGuard\n{\n}\n" > "$sandbox/Runtime/RegionGuard.cs"
+zero_sha="0000000000000000000000000000000000000000"
+if (cd "$sandbox" && printf "refs/heads/main %s refs/heads/main %s\n" "$local_sha" "$zero_sha" | .githooks/pre-push >"$commit_output_file" 2>&1); then
+    commit_output=$(cat "$commit_output_file" 2>/dev/null || true)
+    fail "pre-push scans pushed commit when worktree removes #region" "hook fails on committed #region" "$commit_output"
+else
+    commit_output=$(cat "$commit_output_file" 2>/dev/null || true)
+    if printf "%s" "$commit_output" | grep -q "RegionGuard.cs" && printf "%s" "$commit_output" | grep -q "#region"; then
+        pass "pre-push scans pushed commit when worktree removes #region"
+    else
+        fail "pre-push scans pushed commit when worktree removes #region" "committed region violation reported" "$commit_output"
+    fi
+fi
+run_test
+commit_path_list="$sandbox/.git/pre-push-agent-preflight-paths.bin"
+commit_path_payload=$(tr '\0' '\n' < "$commit_path_list" 2>/dev/null || true)
+if printf "%s\n" "$commit_path_payload" | grep -Fxq "Runtime/RegionGuard.cs"; then
+    pass "pre-push no-base fallback writes offending path-scoped recovery list"
+else
+    fail "pre-push no-base fallback writes offending path-scoped recovery list" "Runtime/RegionGuard.cs in pre-push-agent-preflight-paths.bin" "$commit_path_payload"
+fi
+rm -rf "$sandbox" "$commit_output_file"
+
+run_test
+sandbox=$(mktemp -d)
+worktree_output_file=$(mktemp)
+git -C "$sandbox" init -q
+git -C "$sandbox" config user.email "test@example.com"
+git -C "$sandbox" config user.name "Test User"
+install_pre_push_fixture "$sandbox"
+mkdir -p "$sandbox/Runtime"
+printf "public sealed class RegionGuard\n{\n}\n" > "$sandbox/Runtime/RegionGuard.cs"
+git -C "$sandbox" add Runtime/RegionGuard.cs
+git -C "$sandbox" commit -q -m "Commit clean region guard fixture"
+local_sha=$(git -C "$sandbox" rev-parse HEAD)
+printf "public sealed class RegionGuard\n{\n#region DirtyWorktreeOnly\n}\n" > "$sandbox/Runtime/RegionGuard.cs"
+zero_sha="0000000000000000000000000000000000000000"
+if (cd "$sandbox" && printf "refs/heads/main %s refs/heads/main %s\n" "$local_sha" "$zero_sha" | .githooks/pre-push >"$worktree_output_file" 2>&1); then
+    pass "pre-push ignores uncommitted worktree #region not in pushed commit"
+else
+    worktree_output=$(cat "$worktree_output_file" 2>/dev/null || true)
+    fail "pre-push ignores uncommitted worktree #region not in pushed commit" "hook passes because pushed commit is clean" "$worktree_output"
+fi
+rm -rf "$sandbox" "$worktree_output_file"
+
+run_test
+sandbox=$(mktemp -d)
+cleanup_region_output_file=$(mktemp)
+git -C "$sandbox" init -q
+git -C "$sandbox" config user.email "test@example.com"
+git -C "$sandbox" config user.name "Test User"
+install_pre_push_fixture "$sandbox"
+mkdir -p "$sandbox/Runtime"
+printf "public sealed class RegionCleanup\n{\n#region RemoveMe\n#endregion\n}\n" > "$sandbox/Runtime/RegionCleanup.cs"
+git -C "$sandbox" add Runtime/RegionCleanup.cs
+git -C "$sandbox" commit -q -m "Base commit with region to remove"
+remote_sha=$(git -C "$sandbox" rev-parse HEAD)
+printf "public sealed class RegionCleanup\n{\n}\n" > "$sandbox/Runtime/RegionCleanup.cs"
+git -C "$sandbox" add Runtime/RegionCleanup.cs
+git -C "$sandbox" commit -q -m "Remove region directives"
+local_sha=$(git -C "$sandbox" rev-parse HEAD)
+if (cd "$sandbox" && printf "refs/heads/main %s refs/heads/main %s\n" "$local_sha" "$remote_sha" | .githooks/pre-push >"$cleanup_region_output_file" 2>&1); then
+    pass "pre-push allows pushed cleanup commits that remove #region directives"
+else
+    cleanup_region_output=$(cat "$cleanup_region_output_file" 2>/dev/null || true)
+    fail "pre-push allows pushed cleanup commits that remove #region directives" "hook passes because final pushed file is clean" "$cleanup_region_output"
+fi
+rm -rf "$sandbox" "$cleanup_region_output_file"
+
+run_test
+sandbox=$(mktemp -d)
+sha256_output_file=$(mktemp)
+if git init --object-format=sha256 -q "$sandbox" 2>/dev/null; then
+    git -C "$sandbox" config user.email "test@example.com"
+    git -C "$sandbox" config user.name "Test User"
+    install_pre_push_fixture "$sandbox"
+    mkdir -p "$sandbox/Runtime"
+    printf "public sealed class RegionGuard\n{\n#region Bad\n}\n" > "$sandbox/Runtime/RegionGuard.cs"
+    git -C "$sandbox" add Runtime/RegionGuard.cs
+    git -C "$sandbox" commit -q -m "Commit SHA-256 region violation"
+    local_sha=$(git -C "$sandbox" rev-parse HEAD)
+    zero_sha=$(printf '%*s' "${#local_sha}" '' | tr ' ' '0')
+    if (cd "$sandbox" && printf "refs/heads/main %s refs/heads/main %s\n" "$local_sha" "$zero_sha" | .githooks/pre-push >"$sha256_output_file" 2>&1); then
+        sha256_output=$(cat "$sha256_output_file" 2>/dev/null || true)
+        fail "pre-push handles SHA-256 zero object IDs" "hook fails on SHA-256 new-branch #region" "$sha256_output"
+    else
+        sha256_output=$(cat "$sha256_output_file" 2>/dev/null || true)
+        if printf "%s" "$sha256_output" | grep -q "RegionGuard.cs" && printf "%s" "$sha256_output" | grep -q "#region"; then
+            pass "pre-push handles SHA-256 zero object IDs"
+        else
+            fail "pre-push handles SHA-256 zero object IDs" "SHA-256 region violation reported" "$sha256_output"
+        fi
+    fi
+else
+    pass "pre-push handles SHA-256 zero object IDs (git lacks SHA-256 support)"
+fi
+rm -rf "$sandbox" "$sha256_output_file"
+
+run_test
+sandbox=$(mktemp -d)
+colon_output_file=$(mktemp)
+    git -C "$sandbox" init -q
+    git -C "$sandbox" config user.email "test@example.com"
+    git -C "$sandbox" config user.name "Test User"
+    install_pre_push_fixture "$sandbox"
+    mkdir -p "$sandbox/Runtime"
+if printf "public sealed class ColonRegion\n{\n#region Bad\n}\n" > "$sandbox/Runtime/Foo:Bar.cs" 2>/dev/null && \
+   git -C "$sandbox" add "Runtime/Foo:Bar.cs" 2>/dev/null; then
+    git -C "$sandbox" commit -q -m "Commit colon path region violation"
+    local_sha=$(git -C "$sandbox" rev-parse HEAD)
+    zero_sha="0000000000000000000000000000000000000000"
+    if (cd "$sandbox" && printf "refs/heads/main %s refs/heads/main %s\n" "$local_sha" "$zero_sha" | .githooks/pre-push >"$colon_output_file" 2>&1); then
+        colon_output=$(cat "$colon_output_file" 2>/dev/null || true)
+        fail "pre-push detects #region in changed C# paths containing colon" "hook fails on Runtime/Foo:Bar.cs" "$colon_output"
+    else
+        colon_output=$(cat "$colon_output_file" 2>/dev/null || true)
+        if printf "%s" "$colon_output" | grep -q "Runtime/Foo:Bar.cs" && printf "%s" "$colon_output" | grep -q "#region"; then
+            pass "pre-push detects #region in changed C# paths containing colon"
+        else
+            fail "pre-push detects #region in changed C# paths containing colon" "colon path region violation reported" "$colon_output"
+        fi
+    fi
+else
+    pass "pre-push detects #region in changed C# paths containing colon (filesystem unsupported)"
+fi
+rm -rf "$sandbox" "$colon_output_file"
+
+run_test
+sandbox=$(mktemp -d)
+bracket_output_file=$(mktemp)
+git -C "$sandbox" init -q
+git -C "$sandbox" config user.email "test@example.com"
+git -C "$sandbox" config user.name "Test User"
+install_pre_push_fixture "$sandbox"
+mkdir -p "$sandbox/Runtime"
+printf "public sealed class Fooa\n{\n#region ExistingBaseViolation\n}\n" > "$sandbox/Runtime/Fooa.cs"
+git -C "$sandbox" add Runtime/Fooa.cs
+git -C "$sandbox" commit -q -m "Base commit with unrelated existing region"
+remote_sha=$(git -C "$sandbox" rev-parse HEAD)
+printf "public sealed class FooBracket { }\n" > "$sandbox/Runtime/Foo[abc].cs"
+git -C "$sandbox" add "Runtime/Foo[abc].cs"
+git -C "$sandbox" commit -q -m "Add clean bracket path"
+local_sha=$(git -C "$sandbox" rev-parse HEAD)
+if (cd "$sandbox" && printf "refs/heads/main %s refs/heads/main %s\n" "$local_sha" "$remote_sha" | .githooks/pre-push >"$bracket_output_file" 2>&1); then
+    pass "pre-push treats changed C# paths with [] as literal pathspecs"
+else
+    bracket_output=$(cat "$bracket_output_file" 2>/dev/null || true)
+    fail "pre-push treats changed C# paths with [] as literal pathspecs" "hook passes because changed Foo[abc].cs is clean" "$bracket_output"
+fi
+rm -rf "$sandbox" "$bracket_output_file"
 
 # =============================================================================
 # Test: New branch handling (merge-base fallback)
@@ -229,10 +379,17 @@ echo ""
 echo "=== Testing new branch handling ==="
 
 run_test
-if grep -qE 'merge-base|merge_base' "$PRE_PUSH"; then
+if grep -qE 'merge-base|mergeBase' "$PRE_PUSH_IMPL"; then
     pass "Hook uses merge-base for new branches"
 else
     fail "Hook uses merge-base for new branches" "merge-base present" "not found"
+fi
+
+run_test
+if ! grep -q "ls-tree" "$PRE_PUSH_IMPL"; then
+    pass "Hook avoids broad new-branch tree scans"
+else
+    fail "Hook avoids broad new-branch tree scans" "no git ls-tree fallback" "found ls-tree"
 fi
 
 # =============================================================================
@@ -244,79 +401,79 @@ echo "=== Testing validation-only behavior ==="
 run_test
 # Check that the hook does not EXECUTE Prettier with --write (auto-fix)
 # Mentioning it in user-facing hints is fine.
-if grep -v '^[[:space:]]*echo' "$PRE_PUSH" | grep -Eiq '(prettier|run-prettier\.js).*--write'; then
+if grep -v '^[[:space:]]*#' "$PRE_PUSH_IMPL" | grep -Eiq '(prettier|run-prettier\.js).*--write'; then
     fail "No prettier --write execution in pre-push" "no auto-fix" "prettier --write found"
 else
     pass "No prettier --write execution in pre-push (validation-only)"
 fi
 
 run_test
-if grep -q 'normalize-eol' "$PRE_PUSH"; then
+if grep -q 'normalize-eol' "$PRE_PUSH_IMPL"; then
     fail "No normalize-eol in pre-push" "no EOL auto-fix" "normalize-eol found"
 else
     pass "No normalize-eol in pre-push (validation-only)"
 fi
 
 # =============================================================================
-# Test: Parallel execution
+# Test: Fast execution model
 # =============================================================================
 echo ""
-echo "=== Testing parallel execution ==="
+echo "=== Testing fast execution model ==="
 
 run_test
-if grep -q 'run_node_checks &' "$PRE_PUSH"; then
-    pass "Node checks run in background"
+if grep -q 'Test-RegionChangesInPushedCSharp' "$PRE_PUSH_IMPL"; then
+    pass "Hook uses fast local check function"
 else
-    fail "Node checks run in background" "background execution" "not found"
+    fail "Hook uses fast local check function" "Test-RegionChangesInPushedCSharp present" "not found"
 fi
 
 run_test
-if grep -q 'run_pwsh_checks &' "$PRE_PUSH"; then
-    pass "PowerShell checks run in background"
+if grep -v '^[[:space:]]*#' "$PRE_PUSH_IMPL" | grep -Eq '(^|[[:space:]])node([[:space:]]|$)'; then
+    fail "No direct Node execution in pre-push implementation" "no node commands" "found direct dependency"
 else
-    fail "PowerShell checks run in background" "background execution" "not found"
+    pass "No direct Node execution in pre-push implementation"
 fi
 
 run_test
-if grep -q 'run_bash_checks &' "$PRE_PUSH"; then
-    pass "Bash checks run in background"
+if ! grep -q 'audit-license-years.sh' "$PRE_PUSH_IMPL"; then
+    pass "License audit is delegated outside pre-push"
 else
-    fail "Bash checks run in background" "background execution" "not found"
+    fail "License audit is delegated outside pre-push" "no audit-license-years.sh invocation" "found license audit in pre-push"
 fi
 
 run_test
-if grep -q 'wait.*PID' "$PRE_PUSH"; then
-    pass "Hook waits for background PIDs"
+if grep -q 'Pre-push checks FAILED' "$PRE_PUSH_IMPL" && grep -q 'exit 1' "$PRE_PUSH_IMPL"; then
+    pass "Hook tracks failure status"
 else
-    fail "Hook waits for background PIDs" "wait for PIDs" "not found"
-fi
-
-run_test
-if grep -q 'HOOK_FAILED' "$PRE_PUSH"; then
-    pass "Hook tracks failure status across parallel groups"
-else
-    fail "Hook tracks failure status" "HOOK_FAILED tracking" "not found"
+    fail "Hook tracks failure status" "failure message and exit 1" "not found"
 fi
 
 # =============================================================================
-# Test: Bash compatibility
+# Test: Launcher compatibility
 # =============================================================================
 echo ""
-echo "=== Testing bash compatibility ==="
+echo "=== Testing launcher compatibility ==="
 
 run_test
 SHEBANG=$(head -1 "$PRE_PUSH")
-if [ "$SHEBANG" = "#!/usr/bin/env bash" ]; then
-    pass "Shebang is #!/usr/bin/env bash"
+if [ "$SHEBANG" = "#!/usr/bin/env sh" ]; then
+    pass "Pre-push launcher uses POSIX sh trampoline"
 else
-    fail "Shebang is #!/usr/bin/env bash" "#!/usr/bin/env bash" "$SHEBANG"
+    fail "Pre-push launcher uses POSIX sh trampoline" "#!/usr/bin/env sh" "$SHEBANG"
 fi
 
 run_test
-if bash -n "$PRE_PUSH"; then
-    pass "Pre-push hook has valid bash syntax"
+if sh -n "$PRE_PUSH"; then
+    pass "Pre-push launcher parses as POSIX shell"
 else
-    fail "Pre-push hook has valid bash syntax" "bash -n passes" "bash -n failed"
+    fail "Pre-push launcher parses as POSIX shell" "sh -n success" "parse failed"
+fi
+
+run_test
+if grep -q -- '-File "$hook_script"' "$PRE_PUSH" && grep -q '\.ps1' "$PRE_PUSH"; then
+    pass "Pre-push launcher delegates to .ps1 implementation"
+else
+    fail "Pre-push launcher delegates to .ps1 implementation" 'pwsh -File "$hook_script" with .ps1 impl' "not found"
 fi
 
 # =============================================================================
@@ -326,7 +483,7 @@ echo ""
 echo "=== Testing emergency skip documentation ==="
 
 run_test
-if grep -q 'no-verify' "$PRE_PUSH"; then
+if grep -q 'no-verify' "$PRE_PUSH_IMPL"; then
     pass "Hook documents --no-verify escape hatch"
 else
     fail "Hook documents --no-verify" "--no-verify mentioned" "not found"
@@ -403,46 +560,6 @@ else
     fail "Tests regex matches only Tests/ paths" "2 matches" "$TESTS_RESULT matches"
 fi
 
-# Test CHANGED_WIKI regex
-run_test
-printf 'scripts/wiki/build.py\nscripts/tests/test-wiki-generation.sh\n.github/workflows/deploy-wiki.yml\nscripts/wiki-helper.py\n' > "$TEST_FILE"
-WIKI_RESULT=$(grep -Ec '^(scripts/wiki/.*|scripts/tests/test-wiki-generation\.sh|\.github/workflows/deploy-wiki\.yml)$' "$TEST_FILE" 2>/dev/null || echo "0")
-if [ "$WIKI_RESULT" = "3" ]; then
-    pass "Wiki regex matches only wiki-related paths ($WIKI_RESULT/3)"
-else
-    fail "Wiki regex matches only wiki-related paths" "3 matches" "$WIKI_RESULT matches"
-fi
-
-# Test CHANGED_HOOK_FILES regex
-run_test
-printf '.githooks/pre-push\n.githooks/sub/hook.sh\nscripts/tests/test-hook-patterns.sh\nscripts/tests/test-hook-patterns.sh.bak\n' > "$TEST_FILE"
-HOOK_FILES_RESULT=$(grep -Ec '^(\.githooks/.*|scripts/tests/test-hook-patterns\.sh)$' "$TEST_FILE" 2>/dev/null || echo "0")
-if [ "$HOOK_FILES_RESULT" = "3" ]; then
-    pass "Hook-file regex matches hook paths and exact test script ($HOOK_FILES_RESULT/3)"
-else
-    fail "Hook-file regex matches hook paths and exact test script" "3 matches" "$HOOK_FILES_RESULT matches"
-fi
-
-# Test CHANGED_LINT_TEST regex
-run_test
-printf 'scripts/lint-tests.ps1\nscripts/tests/test-lint-tests.ps1\nscripts/lint-tests.ps1-backup\n' > "$TEST_FILE"
-LINT_TEST_RESULT=$(grep -Ec '^(scripts/lint-tests\.ps1|scripts/tests/test-lint-tests\.ps1)$' "$TEST_FILE" 2>/dev/null || echo "0")
-if [ "$LINT_TEST_RESULT" = "2" ]; then
-    pass "Lint-test regex matches only the exact lint test files ($LINT_TEST_RESULT/2)"
-else
-    fail "Lint-test regex matches only the exact lint test files" "2 matches" "$LINT_TEST_RESULT matches"
-fi
-
-# Test CHANGED_GITIGNORE_DOCS_LINT regex
-run_test
-printf 'scripts/lint-gitignore-docs.ps1\nscripts/tests/test-gitignore-docs.ps1\nscripts/tests/test-gitignore-docs.ps1.disabled\n' > "$TEST_FILE"
-GITIGNORE_DOCS_RESULT=$(grep -Ec '^(scripts/lint-gitignore-docs\.ps1|scripts/tests/test-gitignore-docs\.ps1)$' "$TEST_FILE" 2>/dev/null || echo "0")
-if [ "$GITIGNORE_DOCS_RESULT" = "2" ]; then
-    pass "Gitignore-docs regex matches only the exact lint files ($GITIGNORE_DOCS_RESULT/2)"
-else
-    fail "Gitignore-docs regex matches only the exact lint files" "2 matches" "$GITIGNORE_DOCS_RESULT matches"
-fi
-
 # Cleanup test temp file
 rm -f "$TEST_FILE"
 
@@ -453,7 +570,7 @@ echo ""
 echo "=== Testing pre-push safety invariants ==="
 
 run_test
-UNSAFE_XARGS_COUNT=$(grep -v '^[[:space:]]*#' "$PRE_PUSH" | grep -Ec 'echo[[:space:]]+"\$[A-Z_][A-Z0-9_]*"[[:space:]]*\|[[:space:]]*xargs' 2>/dev/null || true)
+UNSAFE_XARGS_COUNT=$(grep -v '^[[:space:]]*#' "$PRE_PUSH" "$PRE_PUSH_IMPL" | grep -Ec 'echo[[:space:]]+"\$[A-Z_][A-Z0-9_]*"[[:space:]]*\|[[:space:]]*xargs' 2>/dev/null || true)
 if [ "$UNSAFE_XARGS_COUNT" = "0" ]; then
     pass "No unsafe echo-to-xargs file transport remains"
 else
@@ -461,12 +578,62 @@ else
 fi
 
 run_test
-if grep -Fq -- '"${CHANGED_PRETTIER[@]}"' "$PRE_PUSH" && \
-   grep -Fq -- '"${CHANGED_MD[@]}"' "$PRE_PUSH" && \
-   grep -Fq -- '"${CHANGED_CS[@]}"' "$PRE_PUSH"; then
-    pass "Tool invocations consume quoted arrays"
+if grep -Fq -- "'diff'," "$PRE_PUSH_IMPL" && \
+   grep -Fq -- "'-G'," "$PRE_PUSH_IMPL" && \
+   grep -Fq -- 'Test-RegionChangesInPushedCSharp' "$PRE_PUSH_IMPL" && \
+   grep -Fq -- 'Test-RegionsInPushedCSharpTree' "$PRE_PUSH_IMPL" && \
+   ! grep -Fq -- "Invoke-Git -Arguments @('show'" "$PRE_PUSH_IMPL"; then
+    pass "Region guard checks pushed region changes without per-file blob reads"
 else
-    fail "Tool invocations consume quoted arrays" "quoted array expansions present" "one or more array expansions missing"
+    fail "Region guard checks pushed region changes without per-file blob reads" "git diff -G plus no per-file git show" "missing diff pickaxe, fallback tree check, or still using per-file git show"
+fi
+
+run_test
+if ! grep -q 'run-doc-link-lint' "$PRE_PUSH_IMPL" && \
+   ! grep -q 'cspell lint' "$PRE_PUSH_IMPL" && \
+   ! grep -q 'lint-meta-files' "$PRE_PUSH_IMPL"; then
+    pass "Slow validation is delegated outside pre-push"
+else
+    fail "Slow validation is delegated outside pre-push" "no doc-link/cspell/meta commands" "found slow command in pre-push"
+fi
+
+run_test
+if ! grep -q 'run_conditional_tests' "$PRE_PUSH_IMPL" && \
+   ! grep -q 'scripts/tests/test-lint-tests\.ps1' "$PRE_PUSH_IMPL" && \
+   ! grep -q 'scripts/tests/test-validate-lint-error-codes\.ps1' "$PRE_PUSH_IMPL"; then
+    pass "Pre-push hook does not run heavyweight regression suites"
+else
+    fail "Pre-push hook does not run heavyweight regression suites" "no heavyweight test-suite calls" "found regression-suite call in pre-push"
+fi
+
+run_test
+HOOK_IGNORE_FAILURES=0
+while IFS= read -r hook_path; do
+    hook_name="${hook_path##*/}"
+    case "$hook_name" in
+        *.sample|*.txt|*.log|*.out|*.err|*.tmp)
+            continue
+            ;;
+    esac
+    if [[ "$hook_name" == *.* ]]; then
+        hook_name="${hook_name%.*}"
+    fi
+    for ext in txt out err; do
+        if ! git -C "$REPO_ROOT" check-ignore -q -- "$hook_name.$ext"; then
+            HOOK_IGNORE_FAILURES=$((HOOK_IGNORE_FAILURES + 1))
+        fi
+    done
+    for ext in txt log out err tmp; do
+        if ! git -C "$REPO_ROOT" check-ignore -q -- ".githooks/$hook_name.$ext"; then
+            HOOK_IGNORE_FAILURES=$((HOOK_IGNORE_FAILURES + 1))
+        fi
+    done
+done < <(git -C "$REPO_ROOT" ls-files .githooks)
+
+if [ "$HOOK_IGNORE_FAILURES" -eq 0 ]; then
+    pass "All hook artifact patterns are gitignored for auto-recovery"
+else
+    fail "All hook artifact patterns are gitignored for auto-recovery" "0 missing ignore patterns" "$HOOK_IGNORE_FAILURES missing pattern(s)"
 fi
 
 # Verify no \s escape sequences in grep patterns (non-POSIX)
@@ -490,12 +657,12 @@ else
     fail "No GNU BRE \\| in non-comment lines" "0 occurrences" "$BRE_ALT_COUNT occurrences"
 fi
 
-# Verify grep -E used (not plain grep) for alternation patterns
+# Verify the PowerShell implementation is syntactically valid.
 run_test
-if grep -q 'grep -E' "$PRE_PUSH"; then
-    pass "Uses grep -E for extended regex (POSIX ERE)"
+if pwsh -NoProfile -Command "\$tokens=\$null; \$errs=\$null; \$null=[System.Management.Automation.Language.Parser]::ParseFile('$PRE_PUSH_IMPL',[ref]\$tokens,[ref]\$errs); if(\$errs){ exit 1 }" >/dev/null 2>&1; then
+    pass "Pre-push PowerShell implementation parses"
 else
-    fail "Uses grep -E" "grep -E present" "not found"
+    fail "Pre-push PowerShell implementation parses" "PowerShell parser success" "parse failed"
 fi
 
 # =============================================================================

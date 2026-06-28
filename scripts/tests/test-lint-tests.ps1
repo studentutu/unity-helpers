@@ -271,6 +271,27 @@ if ($allowlistPaths.Count -gt 0) {
   Write-TestResult "Allowlist.NonMatchReturnsFalse" (-not $result4) "Expected false for non-allowlisted path"
 }
 
+# ── Test 6b: Relative paths normalize separators before rule matching ───────
+Write-Host "`n  Section: Relative path normalization" -ForegroundColor White
+
+$relativeFuncPattern = '(?s)(function Get-RelativePath\([^)]*\)\s*\{.*?\n\})'
+if ($lintContent -match $relativeFuncPattern) {
+  Invoke-Expression $Matches[1]
+  try {
+    Push-Location $tempDir
+    $root = (Get-Location).Path
+    $windowsStylePath = "$root\Tests\Editor\EditorTreeRef.cs"
+    $relative = Get-RelativePath $windowsStylePath
+    Pop-Location
+    Write-TestResult "RelativePath.BackslashNormalized" ($relative -eq 'Tests/Editor/EditorTreeRef.cs') "Expected POSIX-style relative path, got '$relative'"
+  } catch {
+    Pop-Location
+    Write-TestResult "RelativePath.BackslashNormalized" $false "Exception: $_"
+  }
+} else {
+  Write-TestResult "RelativePath.FunctionExtracted" $false "Could not extract Get-RelativePath function"
+}
+
 # ── Test 7: UNH-SUPPRESS comment skips violation ────────────────────────────
 Write-Host "`n  Section: UNH-SUPPRESS handling" -ForegroundColor White
 
@@ -382,6 +403,559 @@ try {
 } catch {
   Pop-Location
   Write-TestResult "UNH005.DetectsAssertIsNotNull" $false "Exception: $_"
+}
+
+$fixOnlyDir = Join-Path $tempDir 'Tests' 'Runtime'
+New-Item -ItemType Directory -Path $fixOnlyDir -Force | Out-Null
+$fixOnlyFile = Join-Path $fixOnlyDir 'FixOnlyWithOtherViolation.cs'
+Set-Content -Path $fixOnlyFile -Value @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using NUnit.Framework;
+    using UnityEditor;
+    using UnityEngine;
+
+    public sealed class FixOnlyWithOtherViolation : CommonTestBase
+    {
+        [Test]
+        public void MyTest()
+        {
+            var go = Track(new GameObject("test"));
+            Assert.IsNotNull(go);
+        }
+    }
+}
+'@ -NoNewline
+
+try {
+  Push-Location $tempDir
+  $fixOutput = & $lintScriptPath -FixNullChecks -Paths (Join-Path 'Tests' 'Runtime' 'FixOnlyWithOtherViolation.cs') *>&1
+  $fixExit = $LASTEXITCODE
+  $lintOutput = & $lintScriptPath -Paths (Join-Path 'Tests' 'Runtime' 'FixOnlyWithOtherViolation.cs') *>&1
+  $lintExit = $LASTEXITCODE
+  Pop-Location
+  $fixedText = Get-Content -Path $fixOnlyFile -Raw
+  Write-TestResult "UNH005.FixOnlyIgnoresOtherRules" ($fixExit -eq 0) "Expected fix-only exit 0. Exit: $fixExit, Output: $($fixOutput | Out-String)"
+  Write-TestResult "UNH005.FixOnlyRewritesNullAssert" ($fixedText -match 'Assert\.IsTrue\(go != null\);') "Expected Assert.IsNotNull to be rewritten. Content: $fixedText"
+  Write-TestResult "UNH005.NormalLintStillRunsOtherRules" (($lintExit -ne 0) -and (($lintOutput | Out-String) -match 'UNH011')) "Expected normal lint to still fail with UNH011. Exit: $lintExit, Output: $($lintOutput | Out-String)"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH005.FixOnlyIgnoresOtherRules" $false "Exception: $_"
+  Write-TestResult "UNH005.FixOnlyRewritesNullAssert" $false "Exception: $_"
+  Write-TestResult "UNH005.NormalLintStillRunsOtherRules" $false "Exception: $_"
+}
+
+$nestedFixFile = Join-Path $fixOnlyDir 'FixOnlyNestedExpression.cs'
+Set-Content -Path $nestedFixFile -Value @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using NUnit.Framework;
+
+    public sealed class FixOnlyNestedExpression
+    {
+        private static object GetObject()
+        {
+            return new object();
+        }
+
+        [Test]
+        public void MyTest()
+        {
+            Assert.IsNotNull(GetObject());
+        }
+    }
+}
+'@ -NoNewline
+
+try {
+  Push-Location $tempDir
+  $nestedFixOutput = & $lintScriptPath -FixNullChecks -Paths (Join-Path 'Tests' 'Runtime' 'FixOnlyNestedExpression.cs') *>&1
+  $nestedFixExit = $LASTEXITCODE
+  Pop-Location
+  $nestedFixedText = Get-Content -Path $nestedFixFile -Raw
+  Write-TestResult "UNH005.FixOnlyHandlesNestedExpression" ($nestedFixExit -eq 0 -and $nestedFixedText -match 'Assert\.IsTrue\(GetObject\(\) != null\);') "Expected nested expression to be rewritten. Exit: $nestedFixExit, Output: $($nestedFixOutput | Out-String), Content: $nestedFixedText"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH005.FixOnlyHandlesNestedExpression" $false "Exception: $_"
+}
+
+$genericFixFile = Join-Path $fixOnlyDir 'FixOnlyGenericCommaExpression.cs'
+Set-Content -Path $genericFixFile -Value @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using System.Collections.Generic;
+    using NUnit.Framework;
+
+    public sealed class FixOnlyGenericCommaExpression
+    {
+        private static T Create<T>()
+        {
+            return default;
+        }
+
+        [Test]
+        public void MyTest()
+        {
+            Assert.IsNotNull(Create<Dictionary<string, object>>());
+        }
+    }
+}
+'@ -NoNewline
+
+try {
+  Push-Location $tempDir
+  $genericFixOutput = & $lintScriptPath -FixNullChecks -Paths (Join-Path 'Tests' 'Runtime' 'FixOnlyGenericCommaExpression.cs') *>&1
+  $genericFixExit = $LASTEXITCODE
+  Pop-Location
+  $genericFixedText = Get-Content -Path $genericFixFile -Raw
+  Write-TestResult "UNH005.FixOnlyHandlesGenericCommaExpression" ($genericFixExit -eq 0 -and $genericFixedText -match 'Assert\.IsTrue\(Create<Dictionary<string, object>>\(\) != null\);') "Expected generic expression to be rewritten without splitting type-argument commas. Exit: $genericFixExit, Output: $($genericFixOutput | Out-String), Content: $genericFixedText"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH005.FixOnlyHandlesGenericCommaExpression" $false "Exception: $_"
+}
+
+$comparisonFixFile = Join-Path $fixOnlyDir 'FixOnlyComparisonMessage.cs'
+Set-Content -Path $comparisonFixFile -Value @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using NUnit.Framework;
+
+    public sealed class FixOnlyComparisonMessage
+    {
+        [Test]
+        public void MyTest()
+        {
+            var left = 1;
+            var right = 2;
+            Assert.IsNotNull(left<right, "message");
+        }
+    }
+}
+'@ -NoNewline
+
+try {
+  Push-Location $tempDir
+  $comparisonFixOutput = & $lintScriptPath -FixNullChecks -Paths (Join-Path 'Tests' 'Runtime' 'FixOnlyComparisonMessage.cs') *>&1
+  $comparisonFixExit = $LASTEXITCODE
+  Pop-Location
+  $comparisonFixedText = Get-Content -Path $comparisonFixFile -Raw
+  Write-TestResult "UNH005.FixOnlyHandlesNoWhitespaceComparisonMessage" ($comparisonFixExit -eq 0 -and $comparisonFixedText -match 'Assert\.IsTrue\(left<right != null, "message"\);') "Expected no-whitespace comparison comma to remain an assertion argument separator. Exit: $comparisonFixExit, Output: $($comparisonFixOutput | Out-String), Content: $comparisonFixedText"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH005.FixOnlyHandlesNoWhitespaceComparisonMessage" $false "Exception: $_"
+}
+
+$mixedGenericComparisonFixFile = Join-Path $fixOnlyDir 'FixOnlyMixedGenericComparisonMessage.cs'
+Set-Content -Path $mixedGenericComparisonFixFile -Value @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using NUnit.Framework;
+
+    public sealed class FixOnlyMixedGenericComparisonMessage
+    {
+        private static TFirst Get<TFirst, TSecond>()
+        {
+            return default;
+        }
+
+        [Test]
+        public void MyTest()
+        {
+            var right = 2;
+            Assert.IsNotNull(Get<int, int>()<right, "message");
+        }
+    }
+}
+'@ -NoNewline
+
+try {
+  Push-Location $tempDir
+  $mixedGenericComparisonFixOutput = & $lintScriptPath -FixNullChecks -Paths (Join-Path 'Tests' 'Runtime' 'FixOnlyMixedGenericComparisonMessage.cs') *>&1
+  $mixedGenericComparisonFixExit = $LASTEXITCODE
+  Pop-Location
+  $mixedGenericComparisonFixedText = Get-Content -Path $mixedGenericComparisonFixFile -Raw
+  Write-TestResult "UNH005.FixOnlyHandlesMixedGenericComparisonMessage" ($mixedGenericComparisonFixExit -eq 0 -and $mixedGenericComparisonFixedText -match 'Assert\.IsTrue\(Get<int, int>\(\)<right != null, "message"\);') "Expected real generic type-argument comma to stay inside expression while comparison comma remains an assertion argument separator. Exit: $mixedGenericComparisonFixExit, Output: $($mixedGenericComparisonFixOutput | Out-String), Content: $mixedGenericComparisonFixedText"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH005.FixOnlyHandlesMixedGenericComparisonMessage" $false "Exception: $_"
+}
+
+$balancedComparisonFixFile = Join-Path $fixOnlyDir 'FixOnlyBalancedComparisonMessage.cs'
+Set-Content -Path $balancedComparisonFixFile -Value @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using NUnit.Framework;
+
+    public sealed class FixOnlyBalancedComparisonMessage
+    {
+        [Test]
+        public void MyTest()
+        {
+            var left = 1;
+            var right = 2;
+            Assert.IsNotNull(left<right, right>0 ? "message" : "fallback");
+        }
+    }
+}
+'@ -NoNewline
+
+try {
+  Push-Location $tempDir
+  $balancedComparisonFixOutput = & $lintScriptPath -FixNullChecks -Paths (Join-Path 'Tests' 'Runtime' 'FixOnlyBalancedComparisonMessage.cs') *>&1
+  $balancedComparisonFixExit = $LASTEXITCODE
+  Pop-Location
+  $balancedComparisonFixedText = Get-Content -Path $balancedComparisonFixFile -Raw
+  Write-TestResult "UNH005.FixOnlyHandlesBalancedComparisonMessage" ($balancedComparisonFixExit -eq 0 -and $balancedComparisonFixedText -match 'Assert\.IsTrue\(left<right != null, right>0 \? "message" : "fallback"\);') "Expected comparison angle before comma not to be balanced by a later message expression. Exit: $balancedComparisonFixExit, Output: $($balancedComparisonFixOutput | Out-String), Content: $balancedComparisonFixedText"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH005.FixOnlyHandlesBalancedComparisonMessage" $false "Exception: $_"
+}
+
+$genericTriviaFixFile = Join-Path $fixOnlyDir 'FixOnlyGenericTriviaExpression.cs'
+Set-Content -Path $genericTriviaFixFile -Value @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using System.Collections.Generic;
+    using NUnit.Framework;
+
+    public sealed class FixOnlyGenericTriviaExpression
+    {
+        [Test]
+        public void MyTest()
+        {
+            Assert.IsNotNull(new Dictionary<string, object> /* comment */ (), "message");
+        }
+    }
+}
+'@ -NoNewline
+
+try {
+  Push-Location $tempDir
+  $genericTriviaFixOutput = & $lintScriptPath -FixNullChecks -Paths (Join-Path 'Tests' 'Runtime' 'FixOnlyGenericTriviaExpression.cs') *>&1
+  $genericTriviaFixExit = $LASTEXITCODE
+  Pop-Location
+  $genericTriviaFixedText = Get-Content -Path $genericTriviaFixFile -Raw
+  Write-TestResult "UNH005.FixOnlyHandlesGenericTriviaExpression" ($genericTriviaFixExit -eq 0 -and $genericTriviaFixedText -match 'Assert\.IsTrue\(new Dictionary<string, object> /\* comment \*/ \(\) != null, "message"\);') "Expected generic expression with trailing comment trivia to preserve type-argument comma. Exit: $genericTriviaFixExit, Output: $($genericTriviaFixOutput | Out-String), Content: $genericTriviaFixedText"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH005.FixOnlyHandlesGenericTriviaExpression" $false "Exception: $_"
+}
+
+$genericInnerCommentFixFile = Join-Path $fixOnlyDir 'FixOnlyGenericInnerCommentExpression.cs'
+Set-Content -Path $genericInnerCommentFixFile -Value @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using System.Collections.Generic;
+    using NUnit.Framework;
+
+    public sealed class FixOnlyGenericInnerCommentExpression
+    {
+        [Test]
+        public void MyTest()
+        {
+            Assert.IsNotNull(new Dictionary<string /* key > value */, object>(), "message");
+        }
+    }
+}
+'@ -NoNewline
+
+try {
+  Push-Location $tempDir
+  $genericInnerCommentFixOutput = & $lintScriptPath -FixNullChecks -Paths (Join-Path 'Tests' 'Runtime' 'FixOnlyGenericInnerCommentExpression.cs') *>&1
+  $genericInnerCommentFixExit = $LASTEXITCODE
+  Pop-Location
+  $genericInnerCommentFixedText = Get-Content -Path $genericInnerCommentFixFile -Raw
+  Write-TestResult "UNH005.FixOnlyHandlesGenericInnerCommentExpression" ($genericInnerCommentFixExit -eq 0 -and $genericInnerCommentFixedText -match 'Assert\.IsTrue\(new Dictionary<string /\* key > value \*/, object>\(\) != null, "message"\);') "Expected generic expression with inner comment trivia to preserve type-argument comma. Exit: $genericInnerCommentFixExit, Output: $($genericInnerCommentFixOutput | Out-String), Content: $genericInnerCommentFixedText"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH005.FixOnlyHandlesGenericInnerCommentExpression" $false "Exception: $_"
+}
+
+$genericWhitespaceFixFile = Join-Path $fixOnlyDir 'FixOnlyGenericWhitespaceExpression.cs'
+Set-Content -Path $genericWhitespaceFixFile -Value @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using System.Collections.Generic;
+    using NUnit.Framework;
+
+    public sealed class FixOnlyGenericWhitespaceExpression
+    {
+        [Test]
+        public void MyTest()
+        {
+            Assert.IsNotNull(new Dictionary < string, object > (), "message");
+        }
+    }
+}
+'@ -NoNewline
+
+try {
+  Push-Location $tempDir
+  $genericWhitespaceFixOutput = & $lintScriptPath -FixNullChecks -Paths (Join-Path 'Tests' 'Runtime' 'FixOnlyGenericWhitespaceExpression.cs') *>&1
+  $genericWhitespaceFixExit = $LASTEXITCODE
+  Pop-Location
+  $genericWhitespaceFixedText = Get-Content -Path $genericWhitespaceFixFile -Raw
+  Write-TestResult "UNH005.FixOnlyHandlesGenericWhitespaceExpression" ($genericWhitespaceFixExit -eq 0 -and $genericWhitespaceFixedText -match 'Assert\.IsTrue\(new Dictionary < string, object > \(\) != null, "message"\);') "Expected generic expression with whitespace around angle brackets to preserve type-argument comma. Exit: $genericWhitespaceFixExit, Output: $($genericWhitespaceFixOutput | Out-String), Content: $genericWhitespaceFixedText"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH005.FixOnlyHandlesGenericWhitespaceExpression" $false "Exception: $_"
+}
+
+$genericCommentBeforeAngleFixFile = Join-Path $fixOnlyDir 'FixOnlyGenericCommentBeforeAngleExpression.cs'
+Set-Content -Path $genericCommentBeforeAngleFixFile -Value @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using System.Collections.Generic;
+    using NUnit.Framework;
+
+    public sealed class FixOnlyGenericCommentBeforeAngleExpression
+    {
+        [Test]
+        public void MyTest()
+        {
+            Assert.IsNotNull(new Dictionary /* name */ < string, object > (), "message");
+        }
+    }
+}
+'@ -NoNewline
+
+try {
+  Push-Location $tempDir
+  $genericCommentBeforeAngleFixOutput = & $lintScriptPath -FixNullChecks -Paths (Join-Path 'Tests' 'Runtime' 'FixOnlyGenericCommentBeforeAngleExpression.cs') *>&1
+  $genericCommentBeforeAngleFixExit = $LASTEXITCODE
+  Pop-Location
+  $genericCommentBeforeAngleFixedText = Get-Content -Path $genericCommentBeforeAngleFixFile -Raw
+  Write-TestResult "UNH005.FixOnlyHandlesGenericCommentBeforeAngleExpression" ($genericCommentBeforeAngleFixExit -eq 0 -and $genericCommentBeforeAngleFixedText -match 'Assert\.IsTrue\(new Dictionary /\* name \*/ < string, object > \(\) != null, "message"\);') "Expected generic expression with comment before angle bracket to preserve type-argument comma. Exit: $genericCommentBeforeAngleFixExit, Output: $($genericCommentBeforeAngleFixOutput | Out-String), Content: $genericCommentBeforeAngleFixedText"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH005.FixOnlyHandlesGenericCommentBeforeAngleExpression" $false "Exception: $_"
+}
+
+$parenthesizedComparisonFixFile = Join-Path $fixOnlyDir 'FixOnlyParenthesizedComparisonMessage.cs'
+Set-Content -Path $parenthesizedComparisonFixFile -Value @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using NUnit.Framework;
+
+    public sealed class FixOnlyParenthesizedComparisonMessage
+    {
+        [Test]
+        public void MyTest()
+        {
+            var left = 1;
+            var right = 2;
+            Assert.IsNotNull(left < right, right > (0) ? "message" : "fallback");
+        }
+    }
+}
+'@ -NoNewline
+
+try {
+  Push-Location $tempDir
+  $parenthesizedComparisonFixOutput = & $lintScriptPath -FixNullChecks -Paths (Join-Path 'Tests' 'Runtime' 'FixOnlyParenthesizedComparisonMessage.cs') *>&1
+  $parenthesizedComparisonFixExit = $LASTEXITCODE
+  Pop-Location
+  $parenthesizedComparisonFixedText = Get-Content -Path $parenthesizedComparisonFixFile -Raw
+  Write-TestResult "UNH005.FixOnlyHandlesParenthesizedComparisonMessage" ($parenthesizedComparisonFixExit -eq 0 -and $parenthesizedComparisonFixedText -match 'Assert\.IsTrue\(left < right != null, right > \(0\) \? "message" : "fallback"\);') "Expected spaced comparison angle before comma not to be balanced by parenthesized message expression. Exit: $parenthesizedComparisonFixExit, Output: $($parenthesizedComparisonFixOutput | Out-String), Content: $parenthesizedComparisonFixedText"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH005.FixOnlyHandlesParenthesizedComparisonMessage" $false "Exception: $_"
+}
+
+$compactParenthesizedComparisonFixFile = Join-Path $fixOnlyDir 'FixOnlyCompactParenthesizedComparisonMessage.cs'
+Set-Content -Path $compactParenthesizedComparisonFixFile -Value @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using NUnit.Framework;
+
+    public sealed class FixOnlyCompactParenthesizedComparisonMessage
+    {
+        [Test]
+        public void MyTest()
+        {
+            var left = 1;
+            var right = 2;
+            Assert.IsNotNull(left<right, right>(0) ? "message" : "fallback");
+        }
+    }
+}
+'@ -NoNewline
+
+try {
+  Push-Location $tempDir
+  $compactParenthesizedComparisonFixOutput = & $lintScriptPath -FixNullChecks -Paths (Join-Path 'Tests' 'Runtime' 'FixOnlyCompactParenthesizedComparisonMessage.cs') *>&1
+  $compactParenthesizedComparisonFixExit = $LASTEXITCODE
+  Pop-Location
+  $compactParenthesizedComparisonFixedText = Get-Content -Path $compactParenthesizedComparisonFixFile -Raw
+  Write-TestResult "UNH005.FixOnlyRefusesCompactParenthesizedComparisonMessage" ($compactParenthesizedComparisonFixExit -ne 0 -and $compactParenthesizedComparisonFixedText -match 'Assert\.IsNotNull\(left<right, right>\(0\) \? "message" : "fallback"\);') "Expected ambiguous compact comparison to remain unchanged and fail for manual repair. Exit: $compactParenthesizedComparisonFixExit, Output: $($compactParenthesizedComparisonFixOutput | Out-String), Content: $compactParenthesizedComparisonFixedText"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH005.FixOnlyRefusesCompactParenthesizedComparisonMessage" $false "Exception: $_"
+}
+
+$lowercaseGenericFixFile = Join-Path $fixOnlyDir 'FixOnlyLowercaseGenericMethodExpression.cs'
+Set-Content -Path $lowercaseGenericFixFile -Value @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using NUnit.Framework;
+
+    public sealed class FixOnlyLowercaseGenericMethodExpression
+    {
+        private static TFirst create<TFirst, TSecond>()
+        {
+            return default;
+        }
+
+        [Test]
+        public void MyTest()
+        {
+            Assert.IsNotNull(create<string, object>(), "message");
+        }
+    }
+}
+'@ -NoNewline
+
+try {
+  Push-Location $tempDir
+  $lowercaseGenericFixOutput = & $lintScriptPath -FixNullChecks -Paths (Join-Path 'Tests' 'Runtime' 'FixOnlyLowercaseGenericMethodExpression.cs') *>&1
+  $lowercaseGenericFixExit = $LASTEXITCODE
+  Pop-Location
+  $lowercaseGenericFixedText = Get-Content -Path $lowercaseGenericFixFile -Raw
+  Write-TestResult "UNH005.FixOnlyRefusesAmbiguousLowercaseGenericMethodExpression" ($lowercaseGenericFixExit -ne 0 -and $lowercaseGenericFixedText -match 'Assert\.IsNotNull\(create<string, object>\(\), "message"\);') "Expected ambiguous lowercase generic method expression to remain unchanged and fail for manual repair. Exit: $lowercaseGenericFixExit, Output: $($lowercaseGenericFixOutput | Out-String), Content: $lowercaseGenericFixedText"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH005.FixOnlyRefusesAmbiguousLowercaseGenericMethodExpression" $false "Exception: $_"
+}
+
+$nestedLowercaseGenericFixFile = Join-Path $fixOnlyDir 'FixOnlyNestedLowercaseGenericMethodExpression.cs'
+Set-Content -Path $nestedLowercaseGenericFixFile -Value @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using System.Collections.Generic;
+    using NUnit.Framework;
+
+    public sealed class FixOnlyNestedLowercaseGenericMethodExpression
+    {
+        private static TFirst create<TFirst, TSecond>()
+        {
+            return default;
+        }
+
+        [Test]
+        public void MyTest()
+        {
+            Assert.IsNotNull(create<List<string>, object>(), "message");
+        }
+    }
+}
+'@ -NoNewline
+
+try {
+  Push-Location $tempDir
+  $nestedLowercaseGenericFixOutput = & $lintScriptPath -FixNullChecks -Paths (Join-Path 'Tests' 'Runtime' 'FixOnlyNestedLowercaseGenericMethodExpression.cs') *>&1
+  $nestedLowercaseGenericFixExit = $LASTEXITCODE
+  Pop-Location
+  $nestedLowercaseGenericFixedText = Get-Content -Path $nestedLowercaseGenericFixFile -Raw
+  Write-TestResult "UNH005.FixOnlyRefusesNestedAmbiguousLowercaseGenericMethodExpression" ($nestedLowercaseGenericFixExit -ne 0 -and $nestedLowercaseGenericFixedText -match 'Assert\.IsNotNull\(create<List<string>, object>\(\), "message"\);') "Expected nested ambiguous lowercase generic method expression to remain unchanged and fail for manual repair. Exit: $nestedLowercaseGenericFixExit, Output: $($nestedLowercaseGenericFixOutput | Out-String), Content: $nestedLowercaseGenericFixedText"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH005.FixOnlyRefusesNestedAmbiguousLowercaseGenericMethodExpression" $false "Exception: $_"
+}
+
+$genericLineCommentBeforeAngleFixFile = Join-Path $fixOnlyDir 'FixOnlyGenericLineCommentBeforeAngleExpression.cs'
+Set-Content -Path $genericLineCommentBeforeAngleFixFile -Value @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using System.Collections.Generic;
+    using NUnit.Framework;
+
+    public sealed class FixOnlyGenericLineCommentBeforeAngleExpression
+    {
+        [Test]
+        public void MyTest()
+        {
+            Assert.IsNotNull(new Dictionary // name
+                < string, object > (), "message");
+        }
+    }
+}
+'@ -NoNewline
+
+try {
+  Push-Location $tempDir
+  $genericLineCommentBeforeAngleFixOutput = & $lintScriptPath -FixNullChecks -Paths (Join-Path 'Tests' 'Runtime' 'FixOnlyGenericLineCommentBeforeAngleExpression.cs') *>&1
+  $genericLineCommentBeforeAngleFixExit = $LASTEXITCODE
+  Pop-Location
+  $genericLineCommentBeforeAngleFixedText = Get-Content -Path $genericLineCommentBeforeAngleFixFile -Raw
+  Write-TestResult "UNH005.FixOnlyHandlesGenericLineCommentBeforeAngleExpression" ($genericLineCommentBeforeAngleFixExit -eq 0 -and $genericLineCommentBeforeAngleFixedText -match '(?s)Assert\.IsTrue\(new Dictionary // name\s+< string, object > \(\) != null, "message"\);') "Expected generic expression with line comment before angle bracket to preserve type-argument comma. Exit: $genericLineCommentBeforeAngleFixExit, Output: $($genericLineCommentBeforeAngleFixOutput | Out-String), Content: $genericLineCommentBeforeAngleFixedText"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH005.FixOnlyHandlesGenericLineCommentBeforeAngleExpression" $false "Exception: $_"
+}
+
+$commentedParenFixFile = Join-Path $fixOnlyDir 'FixOnlyCommentedParenExpression.cs'
+Set-Content -Path $commentedParenFixFile -Value @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using NUnit.Framework;
+
+    public sealed class FixOnlyCommentedParenExpression
+    {
+        [Test]
+        public void MyTest()
+        {
+            object foo = new object();
+            Assert.IsNotNull(foo /* ); */, "message");
+        }
+    }
+}
+'@ -NoNewline
+
+try {
+  Push-Location $tempDir
+  $commentedParenFixOutput = & $lintScriptPath -FixNullChecks -Paths (Join-Path 'Tests' 'Runtime' 'FixOnlyCommentedParenExpression.cs') *>&1
+  $commentedParenFixExit = $LASTEXITCODE
+  Pop-Location
+  $commentedParenFixedText = Get-Content -Path $commentedParenFixFile -Raw
+  Write-TestResult "UNH005.FixOnlyHandlesCommentedParenExpression" ($commentedParenFixExit -eq 0 -and $commentedParenFixedText -match 'Assert\.IsTrue\(foo /\* \); \*/ != null, "message"\);') "Expected comment text containing ); not to truncate assertion argument parsing. Exit: $commentedParenFixExit, Output: $($commentedParenFixOutput | Out-String), Content: $commentedParenFixedText"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH005.FixOnlyHandlesCommentedParenExpression" $false "Exception: $_"
+}
+
+$crlfFixFile = Join-Path $fixOnlyDir 'FixOnlyPreservesCrlf.cs'
+$crlfFixContent = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using NUnit.Framework;
+    using UnityEngine;
+
+    public sealed class FixOnlyPreservesCrlf : CommonTestBase
+    {
+        [Test]
+        public void MyTest()
+        {
+            var go = Track(new GameObject("test"));
+            Assert.IsNotNull(go);
+        }
+    }
+}
+'@
+$crlfFixContent = $crlfFixContent -replace "`r?`n", "`r`n"
+[System.IO.File]::WriteAllBytes($crlfFixFile, [System.Text.UTF8Encoding]::new($false).GetBytes($crlfFixContent))
+
+try {
+  Push-Location $tempDir
+  $crlfFixOutput = & $lintScriptPath -FixNullChecks -Paths (Join-Path 'Tests' 'Runtime' 'FixOnlyPreservesCrlf.cs') *>&1
+  $crlfFixExit = $LASTEXITCODE
+  Pop-Location
+  $fixedCrlfText = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($crlfFixFile))
+  $hasCrLf = $fixedCrlfText.Contains("`r`n")
+  $hasBareLf = [regex]::IsMatch($fixedCrlfText, "(?<!`r)`n")
+  Write-TestResult "UNH005.FixOnlyPreservesCrlf" ($crlfFixExit -eq 0 -and $hasCrLf -and -not $hasBareLf) "Expected CRLF-only fixed file. Exit: $crlfFixExit, Output: $($crlfFixOutput | Out-String)"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH005.FixOnlyPreservesCrlf" $false "Exception: $_"
 }
 
 # ── Test 10: Stale allowlist path causes failure ─────────────────────────────
@@ -1165,6 +1739,603 @@ namespace WallstopStudios.UnityHelpers.Tests
 $r = Invoke-LintOnFixture -FixtureRelativePath 'CaseNearbyUnityTestDoesNotBleedIntoNonUnityCoroutine.cs' -FixtureContent $caseNearbyUnityTestDoesNotBleedIntoNonUnityCoroutine
 $ok = ($r.ExitCode -eq 0) -and ($r.Output -notmatch 'UNH006')
 Write-TestResult "UNH006.DoesNotUseNearbyUnityTestAttribute" $ok "Exit: $($r.ExitCode), Output: $($r.Output)"
+
+# ── Test: UNH007 (giant literal loop bound in a non-perf test) ────────────────
+Write-Host "`n  Section: UNH007 detection" -ForegroundColor White
+
+$unh007Pos = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using NUnit.Framework;
+
+    public sealed class BigLoopTest : CommonTestBase
+    {
+        [Test]
+        public void Loop()
+        {
+            int sum = 0;
+            for (int i = 0; i < 60000; i++)
+            {
+                sum += i;
+            }
+            Assert.IsTrue(sum >= 0);
+        }
+    }
+}
+'@
+$r = Invoke-LintOnFixture -FixtureRelativePath 'BigLoopTest.cs' -FixtureContent $unh007Pos
+Write-TestResult "UNH007.DetectsGiantLoop" (($r.ExitCode -ne 0) -and ($r.Output -match 'UNH007')) "Exit: $($r.ExitCode), Output: $($r.Output)"
+
+$unh007Neg = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using NUnit.Framework;
+
+    [Category("Stress")]
+    public sealed class BigLoopStressTest : CommonTestBase
+    {
+        [Test]
+        public void Loop()
+        {
+            int sum = 0;
+            for (int i = 0; i < 60000; i++)
+            {
+                sum += i;
+            }
+            Assert.IsTrue(sum >= 0);
+        }
+    }
+}
+'@
+$r = Invoke-LintOnFixture -FixtureRelativePath 'BigLoopStressTest.cs' -FixtureContent $unh007Neg
+Write-TestResult "UNH007.AllowsGiantLoopInStressFixture" (($r.ExitCode -eq 0) -and ($r.Output -notmatch 'UNH007')) "Exit: $($r.ExitCode), Output: $($r.Output)"
+
+# ── Test: UNH008 (perf-named fixture must carry Performance/Stress category) ──
+Write-Host "`n  Section: UNH008 detection" -ForegroundColor White
+
+$unh008Pos = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using NUnit.Framework;
+
+    public sealed class WidgetPerformanceTests : CommonTestBase
+    {
+        [Test]
+        public void Bench()
+        {
+            Assert.IsTrue(true);
+        }
+    }
+}
+'@
+$r = Invoke-LintOnFixture -FixtureRelativePath 'WidgetPerformanceTests.cs' -FixtureContent $unh008Pos
+Write-TestResult "UNH008.DetectsUntaggedPerfFixture" (($r.ExitCode -ne 0) -and ($r.Output -match 'UNH008')) "Exit: $($r.ExitCode), Output: $($r.Output)"
+
+$unh008Neg = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using NUnit.Framework;
+
+    [Category("Performance")]
+    public sealed class WidgetPerformanceTaggedTests : CommonTestBase
+    {
+        [Test]
+        public void Bench()
+        {
+            Assert.IsTrue(true);
+        }
+    }
+}
+'@
+$r = Invoke-LintOnFixture -FixtureRelativePath 'WidgetPerformanceTaggedTests.cs' -FixtureContent $unh008Neg
+Write-TestResult "UNH008.AllowsTaggedPerfFixture" (($r.ExitCode -eq 0) -and ($r.Output -notmatch 'UNH008')) "Exit: $($r.ExitCode), Output: $($r.Output)"
+
+# Fully-qualified [NUnit.Framework.Category("Performance")] must also satisfy the rule.
+$unh008NegFq = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using NUnit.Framework;
+
+    [NUnit.Framework.Category("Performance")]
+    public sealed class WidgetPerformanceFqTests : CommonTestBase
+    {
+        [Test]
+        public void Bench()
+        {
+            Assert.IsTrue(true);
+        }
+    }
+}
+'@
+$r = Invoke-LintOnFixture -FixtureRelativePath 'WidgetPerformanceFqTests.cs' -FixtureContent $unh008NegFq
+Write-TestResult "UNH008.AllowsFullyQualifiedCategory" (($r.ExitCode -eq 0) -and ($r.Output -notmatch 'UNH008')) "Exit: $($r.ExitCode), Output: $($r.Output)"
+
+# ── Test: UNH009 (advisory, non-blocking AssetDatabase churn) ────────────────
+Write-Host "`n  Section: UNH009 advisory" -ForegroundColor White
+
+$unh009Pos = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using NUnit.Framework;
+    using UnityEditor;
+
+    public sealed class RefreshTest : CommonTestBase
+    {
+        [Test]
+        public void DoRefresh()
+        {
+            AssetDatabase.Refresh();
+        }
+    }
+}
+'@
+$r = Invoke-LintOnFixture -FixtureRelativePath 'RefreshTest.cs' -FixtureContent $unh009Pos
+# UNH009 is ADVISORY: it must appear in output but MUST NOT fail the build.
+Write-TestResult "UNH009.AdvisoryNonBlocking" (($r.ExitCode -eq 0) -and ($r.Output -match 'UNH009')) "Exit: $($r.ExitCode), Output: $($r.Output)"
+
+$unh009Neg = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using NUnit.Framework;
+    using UnityEditor;
+
+    public sealed class RefreshBatchedTest : BatchedEditorTestBase
+    {
+        [Test]
+        public void DoRefresh()
+        {
+            AssetDatabase.Refresh();
+        }
+    }
+}
+'@
+$r = Invoke-LintOnFixture -FixtureRelativePath 'RefreshBatchedTest.cs' -FixtureContent $unh009Neg
+Write-TestResult "UNH009.SkipsBatchedBase" (($r.ExitCode -eq 0) -and ($r.Output -notmatch 'UNH009')) "Exit: $($r.ExitCode), Output: $($r.Output)"
+
+# ── Test: UNH010 (advisory, non-blocking real-time waits) ────────────────────
+Write-Host "`n  Section: UNH010 advisory" -ForegroundColor White
+
+$unh010Wait = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using System.Collections;
+    using NUnit.Framework;
+    using UnityEngine;
+    using UnityEngine.TestTools;
+
+    public sealed class WaitFixture : CommonTestBase
+    {
+        [UnityTest]
+        public IEnumerator Waits()
+        {
+            yield return new WaitForSeconds(0.5f);
+        }
+    }
+}
+'@
+$r = Invoke-LintOnFixture -FixtureRelativePath 'WaitFixture.cs' -FixtureContent $unh010Wait
+Write-TestResult "UNH010.FlagsWaitForSeconds" (($r.ExitCode -eq 0) -and ($r.Output -match 'UNH010')) "Exit: $($r.ExitCode), Output: $($r.Output)"
+
+$unh010Delay = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using System.Threading.Tasks;
+    using NUnit.Framework;
+
+    public sealed class DelayFixture : CommonTestBase
+    {
+        [Test]
+        public async Task Delays()
+        {
+            await Task.Delay(50);
+        }
+    }
+}
+'@
+$r = Invoke-LintOnFixture -FixtureRelativePath 'DelayFixture.cs' -FixtureContent $unh010Delay
+Write-TestResult "UNH010.FlagsTaskDelayLiteral" (($r.ExitCode -eq 0) -and ($r.Output -match 'UNH010')) "Exit: $($r.ExitCode), Output: $($r.Output)"
+
+# Cancellation fodder: Task.Delay(n, ct) is NOT a blocking wait and must NOT flag.
+$unh010Cancel = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using System.Threading;
+    using System.Threading.Tasks;
+    using NUnit.Framework;
+
+    public sealed class CancelFixture : CommonTestBase
+    {
+        [Test]
+        public async Task Cancels()
+        {
+            CancellationToken cancellationToken = default;
+            await Task.Delay(5000, cancellationToken);
+        }
+    }
+}
+'@
+$r = Invoke-LintOnFixture -FixtureRelativePath 'CancelFixture.cs' -FixtureContent $unh010Cancel
+Write-TestResult "UNH010.SkipsCancellationDelay" (($r.ExitCode -eq 0) -and ($r.Output -notmatch 'UNH010')) "Exit: $($r.ExitCode), Output: $($r.Output)"
+
+# UNH-SUPPRESS on the wait line suppresses the advisory.
+$unh010Suppress = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using System.Threading;
+    using NUnit.Framework;
+
+    public sealed class SleepFixture : CommonTestBase
+    {
+        [Test]
+        public void Sleeps()
+        {
+            Thread.Sleep(100); // UNH-SUPPRESS: intentional poll yield
+        }
+    }
+}
+'@
+$r = Invoke-LintOnFixture -FixtureRelativePath 'SleepFixture.cs' -FixtureContent $unh010Suppress
+Write-TestResult "UNH010.HonorsSuppress" (($r.ExitCode -eq 0) -and ($r.Output -notmatch 'UNH010')) "Exit: $($r.ExitCode), Output: $($r.Output)"
+
+# Performance-category fixtures may use real-time waits (excluded from main matrix).
+$unh010Perf = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using System.Collections;
+    using NUnit.Framework;
+    using UnityEngine;
+    using UnityEngine.TestTools;
+
+    [Category("Performance")]
+    public sealed class WaitPerfFixture : CommonTestBase
+    {
+        [UnityTest]
+        public IEnumerator Waits()
+        {
+            yield return new WaitForSeconds(0.5f);
+        }
+    }
+}
+'@
+$r = Invoke-LintOnFixture -FixtureRelativePath 'WaitPerfFixture.cs' -FixtureContent $unh010Perf
+Write-TestResult "UNH010.SkipsPerfCategory" (($r.ExitCode -eq 0) -and ($r.Output -notmatch 'UNH010')) "Exit: $($r.ExitCode), Output: $($r.Output)"
+
+# ── UNH011: editor-only refs in player-compiled test code ────────────────────
+Write-Host "`n  Section: UNH011 editor-reference guard" -ForegroundColor White
+
+# UNH011 only governs PLAYER-compiled trees (everything under Tests/ EXCEPT
+# Tests/Editor), so these fixtures live under a Tests/Runtime path.
+$tempRuntimeDir = Join-Path $tempDir 'Tests' 'Runtime'
+New-Item -ItemType Directory -Path $tempRuntimeDir -Force | Out-Null
+function Invoke-LintOnRuntimeFixture {
+  param([string]$FixtureRelativePath, [string]$FixtureContent)
+  $path = Join-Path $tempRuntimeDir $FixtureRelativePath
+  Set-Content -Path $path -Value $FixtureContent -NoNewline
+  try {
+    Push-Location $tempDir
+    $out = & $lintScriptPath -Paths (Join-Path 'Tests' 'Runtime' $FixtureRelativePath) *>&1
+    $exit = $LASTEXITCODE
+    Pop-Location
+    return [pscustomobject]@{ ExitCode = $exit; Output = ($out | Out-String) }
+  } catch {
+    Pop-Location
+    return [pscustomobject]@{ ExitCode = -1; Output = "Exception: $_" }
+  }
+}
+
+# Unguarded UnityEditor reference in a player-compiled file -> CS0234 -> must fail.
+$unh011Bad = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using UnityEditor;
+
+    public static class BadEditorRef
+    {
+        public static double Now() { return EditorApplication.timeSinceStartup; }
+    }
+}
+'@
+$r = Invoke-LintOnRuntimeFixture -FixtureRelativePath 'BadEditorRef.cs' -FixtureContent $unh011Bad
+Write-TestResult "UNH011.DetectsUnguardedEditorRef" (($r.ExitCode -ne 0) -and ($r.Output -match 'UNH011')) "Expected non-zero exit with UNH011. Exit: $($r.ExitCode), Output: $($r.Output)"
+try {
+  Push-Location $tempDir
+  $out = & $lintScriptPath -Paths 'Tests\Runtime\BadEditorRef.cs' *>&1
+  $exit = $LASTEXITCODE
+  Pop-Location
+  $outStr = ($out | Out-String)
+  Write-TestResult "UNH011.DetectsBackslashRuntimePath" (($exit -ne 0) -and ($outStr -match 'UNH011')) "Expected non-zero exit with UNH011 for backslash runtime path. Exit: $exit, Output: $outStr"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH011.DetectsBackslashRuntimePath" $false "Exception: $_"
+}
+
+$unh011RuntimeAsmrefRoot = Join-Path $tempDir 'Tests' 'RuntimeAsmrefTarget'
+New-Item -ItemType Directory -Path $unh011RuntimeAsmrefRoot -Force | Out-Null
+Set-Content -Path (Join-Path $unh011RuntimeAsmrefRoot 'RuntimeAsmrefTarget.asmdef') -Value @'
+{
+  "name": "RuntimeAsmrefTarget",
+  "includePlatforms": []
+}
+'@ -NoNewline
+$unh011RuntimeAsmrefDir = Join-Path $tempDir 'Tests' 'RuntimeAsmrefFolder'
+New-Item -ItemType Directory -Path $unh011RuntimeAsmrefDir -Force | Out-Null
+Set-Content -Path (Join-Path $unh011RuntimeAsmrefDir 'RuntimeAsmrefFolder.asmref') -Value @'
+{
+  "reference": "RuntimeAsmrefTarget"
+}
+'@ -NoNewline
+Set-Content -Path (Join-Path $unh011RuntimeAsmrefDir 'RuntimeAsmrefRef.cs') -Value $unh011Bad -NoNewline
+try {
+  Push-Location $tempDir
+  $out = & $lintScriptPath -Paths (Join-Path 'Tests' 'RuntimeAsmrefFolder' 'RuntimeAsmrefRef.cs') *>&1
+  $exit = $LASTEXITCODE
+  Pop-Location
+  $outStr = ($out | Out-String)
+  Write-TestResult "UNH011.DetectsRuntimeAsmref" (($exit -ne 0) -and ($outStr -match 'UNH011')) "Expected non-zero exit with UNH011 for runtime asmref. Exit: $exit, Output: $outStr"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH011.DetectsRuntimeAsmref" $false "Exception: $_"
+}
+
+# Guarded refs, a comment naming UnityEditor, an InternalsVisibleTo("...Editor")
+# string literal, AND the editor branch of an #if !UNITY_EDITOR/#else are all legal.
+$unh011Good = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    // This comment mentions UnityEditor and must be ignored.
+    using System.Runtime.CompilerServices;
+
+    [assembly: InternalsVisibleTo("WallstopStudios.UnityHelpers.Editor")]
+#if UNITY_EDITOR
+    using UnityEditor;
+#endif
+
+    public static class GoodEditorRef
+    {
+#if UNITY_EDITOR
+        public static double Now() { return EditorApplication.timeSinceStartup; }
+#endif
+#if !UNITY_EDITOR
+        public static int Fallback() { return 0; }
+#else
+        public static double Else() { return EditorApplication.timeSinceStartup; }
+#endif
+    }
+}
+'@
+$r = Invoke-LintOnRuntimeFixture -FixtureRelativePath 'GoodEditorRef.cs' -FixtureContent $unh011Good
+Write-TestResult "UNH011.AllowsGuardedAndScrubbedRefs" (($r.ExitCode -eq 0) -and ($r.Output -notmatch 'UNH011')) "Expected exit 0 and no UNH011. Exit: $($r.ExitCode), Output: $($r.Output)"
+
+# Same unguarded ref under Tests/Editor (editor-only assembly) is allowed.
+$unh011EditorTreeFile = Join-Path $tempTestDir 'EditorTreeRef.cs'
+Set-Content -Path $unh011EditorTreeFile -Value $unh011Bad -NoNewline
+try {
+  Push-Location $tempDir
+  $out = & $lintScriptPath -Paths (Join-Path 'Tests' 'Editor' 'EditorTreeRef.cs') *>&1
+  $exit = $LASTEXITCODE
+  Pop-Location
+  $outStr = ($out | Out-String)
+  Write-TestResult "UNH011.SkipsEditorTree" (($exit -eq 0) -and ($outStr -notmatch 'UNH011')) "Expected exit 0 and no UNH011 under Tests/Editor. Exit: $exit, Output: $outStr"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH011.SkipsEditorTree" $false "Exception: $_"
+}
+try {
+  Push-Location $tempDir
+  $out = & $lintScriptPath -Paths 'Tests\Editor\EditorTreeRef.cs' *>&1
+  $exit = $LASTEXITCODE
+  Pop-Location
+  $outStr = ($out | Out-String)
+  Write-TestResult "UNH011.SkipsBackslashEditorTree" (($exit -eq 0) -and ($outStr -notmatch 'UNH011')) "Expected exit 0 and no UNH011 for backslash editor path. Exit: $exit, Output: $outStr"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH011.SkipsBackslashEditorTree" $false "Exception: $_"
+}
+
+# Same unguarded ref outside Tests/Editor is allowed when the nearest asmdef is editor-only.
+$unh011EditorAsmdefDir = Join-Path $tempDir 'Tests' 'CustomEditorAssembly'
+New-Item -ItemType Directory -Path $unh011EditorAsmdefDir -Force | Out-Null
+Set-Content -Path (Join-Path $unh011EditorAsmdefDir 'CustomEditorAssembly.asmdef') -Value @'
+{
+  "name": "CustomEditorAssembly",
+  "includePlatforms": [
+    "Editor"
+  ]
+}
+'@ -NoNewline
+Set-Content -Path (Join-Path $unh011EditorAsmdefDir 'EditorOnlyRef.cs') -Value $unh011Bad -NoNewline
+try {
+  Push-Location $tempDir
+  $out = & $lintScriptPath -Paths (Join-Path 'Tests' 'CustomEditorAssembly' 'EditorOnlyRef.cs') *>&1
+  $exit = $LASTEXITCODE
+  Pop-Location
+  $outStr = ($out | Out-String)
+Write-TestResult "UNH011.SkipsEditorOnlyAsmdef" (($exit -eq 0) -and ($outStr -notmatch 'UNH011')) "Expected exit 0 and no UNH011 for editor-only asmdef. Exit: $exit, Output: $outStr"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH011.SkipsEditorOnlyAsmdef" $false "Exception: $_"
+}
+
+$unh011EditorAsmrefDir = Join-Path $tempDir 'Tests' 'EditorAsmrefFolder'
+New-Item -ItemType Directory -Path $unh011EditorAsmrefDir -Force | Out-Null
+Set-Content -Path (Join-Path $unh011EditorAsmrefDir 'EditorAsmrefFolder.asmref') -Value @'
+{
+  "reference": "CustomEditorAssembly"
+}
+'@ -NoNewline
+Set-Content -Path (Join-Path $unh011EditorAsmrefDir 'EditorAsmrefRef.cs') -Value $unh011Bad -NoNewline
+try {
+  Push-Location $tempDir
+  $out = & $lintScriptPath -Paths (Join-Path 'Tests' 'EditorAsmrefFolder' 'EditorAsmrefRef.cs') *>&1
+  $exit = $LASTEXITCODE
+  Pop-Location
+  $outStr = ($out | Out-String)
+  Write-TestResult "UNH011.SkipsEditorOnlyAsmref" (($exit -eq 0) -and ($outStr -notmatch 'UNH011')) "Expected exit 0 and no UNH011 for editor-only asmref. Exit: $exit, Output: $outStr"
+} catch {
+  Pop-Location
+  Write-TestResult "UNH011.SkipsEditorOnlyAsmref" $false "Exception: $_"
+}
+
+# A // UNH-SUPPRESS UNH011 escape hatch is honored.
+$unh011Suppress = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    // UNH-SUPPRESS UNH011: justified
+    using UnityEditor;
+
+    public static class SuppressedEditorRef
+    {
+        public static double Now() { return EditorApplication.timeSinceStartup; }
+    }
+}
+'@
+$r = Invoke-LintOnRuntimeFixture -FixtureRelativePath 'SuppressedEditorRef.cs' -FixtureContent $unh011Suppress
+Write-TestResult "UNH011.HonorsSuppress" (($r.ExitCode -eq 0) -and ($r.Output -notmatch 'UNH011')) "Exit: $($r.ExitCode), Output: $($r.Output)"
+
+# ── UNH012: [UnityTest] must not yield return WaitForEndOfFrame ───────────────
+Write-Host "`n  Section: UNH012 WaitForEndOfFrame yield guard" -ForegroundColor White
+
+# GREEN: `yield return new WaitForEndOfFrame();` hangs under -batchmode
+# -nographics and must be flagged.
+$unh012NewExpression = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using System.Collections;
+    using NUnit.Framework;
+    using UnityEngine;
+    using UnityEngine.TestTools;
+
+    public sealed class WaitEndOfFrameNewFixture : CommonTestBase
+    {
+        [UnityTest]
+        public IEnumerator Waits()
+        {
+            yield return new WaitForEndOfFrame();
+        }
+    }
+}
+'@
+$r = Invoke-LintOnFixture -FixtureRelativePath 'WaitEndOfFrameNewFixture.cs' -FixtureContent $unh012NewExpression
+$ok = ($r.ExitCode -ne 0) -and ($r.Output -match 'UNH012')
+Write-TestResult "UNH012.FlagsYieldNewWaitForEndOfFrame" $ok "Exit: $($r.ExitCode), Output: $($r.Output)"
+
+# GREEN: yielding the production helper field also never resumes headless.
+$unh012FieldExpression = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using System.Collections;
+    using NUnit.Framework;
+    using UnityEngine.TestTools;
+    using WallstopStudios.UnityHelpers.Core.Helper;
+
+    public sealed class WaitEndOfFrameFieldFixture : CommonTestBase
+    {
+        [UnityTest]
+        public IEnumerator Waits()
+        {
+            yield return Buffers.WaitForEndOfFrame;
+        }
+    }
+}
+'@
+$r = Invoke-LintOnFixture -FixtureRelativePath 'WaitEndOfFrameFieldFixture.cs' -FixtureContent $unh012FieldExpression
+$ok = ($r.ExitCode -ne 0) -and ($r.Output -match 'UNH012')
+Write-TestResult "UNH012.FlagsYieldBuffersWaitForEndOfFrame" $ok "Exit: $($r.ExitCode), Output: $($r.Output)"
+
+# GREEN: a csharpier-wrapped `yield return` with `new WaitForEndOfFrame()` on its
+# own line must still flag (the `new WaitForEndOfFrame(` alternation catches it even
+# though `yield return` and the type are on different lines).
+$unh012MultiLineNew = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using System.Collections;
+    using NUnit.Framework;
+    using UnityEngine;
+    using UnityEngine.TestTools;
+
+    public sealed class WaitMultiLineNewFixture : CommonTestBase
+    {
+        [UnityTest]
+        public IEnumerator Waits()
+        {
+            yield return
+                new WaitForEndOfFrame();
+        }
+    }
+}
+'@
+$r = Invoke-LintOnFixture -FixtureRelativePath 'WaitMultiLineNewFixture.cs' -FixtureContent $unh012MultiLineNew
+$ok = ($r.ExitCode -ne 0) -and ($r.Output -match 'UNH012')
+Write-TestResult "UNH012.FlagsMultiLineNewWaitForEndOfFrame" $ok "Exit: $($r.ExitCode), Output: $($r.Output)"
+
+# RED: `yield return null` is the batchmode-safe replacement and must not flag.
+$unh012YieldNull = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using System.Collections;
+    using NUnit.Framework;
+    using UnityEngine.TestTools;
+
+    public sealed class WaitYieldNullFixture : CommonTestBase
+    {
+        [UnityTest]
+        public IEnumerator Waits()
+        {
+            yield return null;
+        }
+    }
+}
+'@
+$r = Invoke-LintOnFixture -FixtureRelativePath 'WaitYieldNullFixture.cs' -FixtureContent $unh012YieldNull
+$ok = ($r.ExitCode -eq 0) -and ($r.Output -notmatch 'UNH012')
+Write-TestResult "UNH012.AllowsYieldNull" $ok "Exit: $($r.ExitCode), Output: $($r.Output)"
+
+# RED: a BARE Buffers.WaitForEndOfFrame reference WITHOUT `yield return`
+# (legitimate singleton assertion, see Tests/Runtime/Utils/BuffersTests.cs)
+# must NOT be flagged.
+$unh012BareReference = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using NUnit.Framework;
+    using WallstopStudios.UnityHelpers.Core.Helper;
+
+    public sealed class WaitBareReferenceFixture : CommonTestBase
+    {
+        [Test]
+        public void BuffersWaitForEndOfFrameIsSingleton()
+        {
+            Assert.NotNull(Buffers.WaitForEndOfFrame);
+            Assert.AreSame(Buffers.WaitForEndOfFrame, Buffers.WaitForEndOfFrame);
+        }
+    }
+}
+'@
+$r = Invoke-LintOnFixture -FixtureRelativePath 'WaitBareReferenceFixture.cs' -FixtureContent $unh012BareReference
+$ok = ($r.ExitCode -eq 0) -and ($r.Output -notmatch 'UNH012')
+Write-TestResult "UNH012.DoesNotFlagBareReference" $ok "Exit: $($r.ExitCode), Output: $($r.Output)"
+
+# UNH-SUPPRESS on the yield line suppresses the violation.
+$unh012Suppress = @'
+namespace WallstopStudios.UnityHelpers.Tests
+{
+    using System.Collections;
+    using NUnit.Framework;
+    using UnityEngine;
+    using UnityEngine.TestTools;
+
+    public sealed class WaitEndOfFrameSuppressFixture : CommonTestBase
+    {
+        [UnityTest]
+        public IEnumerator Waits()
+        {
+            yield return new WaitForEndOfFrame(); // UNH-SUPPRESS
+        }
+    }
+}
+'@
+$r = Invoke-LintOnFixture -FixtureRelativePath 'WaitEndOfFrameSuppressFixture.cs' -FixtureContent $unh012Suppress
+$ok = ($r.ExitCode -eq 0) -and ($r.Output -notmatch 'UNH012')
+Write-TestResult "UNH012.HonorsSuppress" $ok "Exit: $($r.ExitCode), Output: $($r.Output)"
 
 } finally {
   # ── Cleanup ──────────────────────────────────────────────────────────────────

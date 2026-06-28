@@ -60,21 +60,28 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
         private static readonly object NullComparable = new();
         private static readonly Dictionary<(int, int, int), string> RangeLabelCache = new();
 
-        private static readonly GUIStyle AddButtonStyle = CreateSolidButtonStyle(
-            new Color(0.22f, 0.62f, 0.29f)
-        );
-        private static readonly GUIStyle ClearAllActiveButtonStyle = CreateSolidButtonStyle(
-            new Color(0.82f, 0.27f, 0.27f)
-        );
-        private static readonly GUIStyle ClearAllInactiveButtonStyle = CreateSolidButtonStyle(
-            new Color(0.55f, 0.55f, 0.55f)
-        );
-        private static readonly GUIStyle RemoveButtonStyle = CreateSolidButtonStyle(
-            new Color(0.86f, 0.23f, 0.23f)
-        );
-        private static readonly GUIStyle MoveButtonStyle = CreateSolidButtonStyle(
-            new Color(0.98f, 0.95f, 0.65f)
-        );
+        // GUIStyles are built lazily on first GUI access (see the *ButtonStyle properties below).
+        // Building them in static field initializers / a static constructor would touch
+        // EditorStyles at type-load time, which throws a NullReferenceException (cascading as a
+        // TypeInitializationException) whenever the type is first loaded outside an active IMGUI
+        // context -- e.g. in batch-mode test runs. Lazy initialization defers all EditorStyles
+        // access to actual rendering, where the editor skin is guaranteed to be ready.
+        private static GUIStyle _addButtonStyle;
+        private static GUIStyle _clearAllActiveButtonStyle;
+        private static GUIStyle _clearAllInactiveButtonStyle;
+        private static GUIStyle _removeButtonStyle;
+        private static GUIStyle _moveButtonStyle;
+
+        private static GUIStyle AddButtonStyle =>
+            _addButtonStyle ??= BuildButtonStyle(new Color(0.22f, 0.62f, 0.29f));
+        private static GUIStyle ClearAllActiveButtonStyle =>
+            _clearAllActiveButtonStyle ??= BuildButtonStyle(new Color(0.82f, 0.27f, 0.27f));
+        private static GUIStyle ClearAllInactiveButtonStyle =>
+            _clearAllInactiveButtonStyle ??= BuildButtonStyle(new Color(0.55f, 0.55f, 0.55f));
+        private static GUIStyle RemoveButtonStyle =>
+            _removeButtonStyle ??= BuildRemoveButtonStyle(new Color(0.86f, 0.23f, 0.23f));
+        private static GUIStyle MoveButtonStyle =>
+            _moveButtonStyle ??= BuildMoveButtonStyle(new Color(0.98f, 0.95f, 0.65f));
         private static readonly Color DuplicatePrimaryColor = new(0.99f, 0.82f, 0.35f, 0.55f);
         private static readonly Color DuplicateSecondaryColor = new(0.96f, 0.45f, 0.45f, 0.65f);
         private static readonly Color DuplicateOutlineColor = new(0.65f, 0.18f, 0.18f, 0.9f);
@@ -118,6 +125,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
         private static readonly GUIContent NullEntryTooltipContent = new();
         private static readonly GUIContent FoldoutLabelContent = new();
         private static readonly GUIContent UnsupportedTypeContent = new();
+        private static readonly GUIContent SuppressedFieldValueContent = new();
         private static readonly Dictionary<Type, string> UnsupportedTypeMessageCache = new();
         private static readonly Dictionary<string, Type> PropertyTypeResolutionCache = new(
             StringComparer.Ordinal
@@ -133,11 +141,11 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
         /// </summary>
         private readonly struct MainFoldoutCacheKey : IEquatable<MainFoldoutCacheKey>
         {
-            public readonly int InstanceId;
+            public readonly long InstanceId;
             public readonly string PropertyPath;
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            public MainFoldoutCacheKey(int instanceId, string propertyPath)
+            public MainFoldoutCacheKey(long instanceId, string propertyPath)
             {
                 InstanceId = instanceId;
                 PropertyPath = propertyPath;
@@ -185,9 +193,9 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
             string propertyPath
         )
         {
-            int instanceId =
+            long instanceId =
                 serializedObject?.targetObject != null
-                    ? serializedObject.targetObject.GetInstanceID()
+                    ? serializedObject.targetObject.GetUnityObjectId()
                     : 0;
             return new MainFoldoutCacheKey(instanceId, propertyPath);
         }
@@ -626,18 +634,27 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
             Full,
         }
 
-        static SerializableSetPropertyDrawer()
+        private static GUIStyle BuildButtonStyle(Color baseColor)
         {
-            float lineHeight = EditorGUIUtility.singleLineHeight;
-            ConfigureButtonStyle(AddButtonStyle, lineHeight);
-            ConfigureButtonStyle(ClearAllActiveButtonStyle, lineHeight);
-            ConfigureButtonStyle(ClearAllInactiveButtonStyle, lineHeight);
-            ConfigureButtonStyle(RemoveButtonStyle, lineHeight);
-            ConfigureButtonStyle(MoveButtonStyle, lineHeight);
-            SetButtonTextColor(MoveButtonStyle, Color.black);
-            RemoveButtonStyle.fixedWidth = 0f;
-            RemoveButtonStyle.padding = new RectOffset(3, 3, 1, 1);
-            RemoveButtonStyle.margin = new RectOffset(0, 0, 1, 1);
+            GUIStyle style = CreateSolidButtonStyle(baseColor);
+            ConfigureButtonStyle(style, EditorGUIUtility.singleLineHeight);
+            return style;
+        }
+
+        private static GUIStyle BuildMoveButtonStyle(Color baseColor)
+        {
+            GUIStyle style = BuildButtonStyle(baseColor);
+            SetButtonTextColor(style, Color.black);
+            return style;
+        }
+
+        private static GUIStyle BuildRemoveButtonStyle(Color baseColor)
+        {
+            GUIStyle style = BuildButtonStyle(baseColor);
+            style.fixedWidth = 0f;
+            style.padding = new RectOffset(3, 3, 1, 1);
+            style.margin = new RectOffset(0, 0, 1, 1);
+            return style;
         }
 
         private static GUIStyle CreateSolidButtonStyle(Color baseColor)
@@ -1187,6 +1204,77 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
             MainFoldoutAnimations.Clear();
         }
 
+        internal static bool TryToggleManualEntryFoldoutLabelForTests(
+            Event currentEvent,
+            Rect labelHitRect,
+            ref bool expanded
+        )
+        {
+            return TryToggleManualEntryFoldoutLabel(currentEvent, labelHitRect, ref expanded);
+        }
+
+        private static bool TryToggleManualEntryFoldoutLabel(
+            Event currentEvent,
+            Rect labelHitRect,
+            ref bool expanded
+        )
+        {
+            if (currentEvent == null)
+            {
+                return false;
+            }
+
+            EventType effectiveEventType = GetEffectiveMouseEventType(currentEvent);
+            if (
+                effectiveEventType != EventType.MouseDown
+                || currentEvent.button != 0
+                || !labelHitRect.Contains(currentEvent.mousePosition)
+            )
+            {
+                return false;
+            }
+
+            expanded = !expanded;
+            GUI.changed = true;
+            if (currentEvent.type != EventType.Used)
+            {
+                currentEvent.Use();
+            }
+
+            return true;
+        }
+
+        private static EventType GetEffectiveMouseEventType(Event currentEvent)
+        {
+            if (currentEvent == null)
+            {
+                return EventType.Ignore;
+            }
+
+            return GetEffectiveMouseEventType(currentEvent.type, currentEvent.rawType);
+        }
+
+        internal static EventType GetEffectiveMouseEventTypeForTests(
+            EventType eventType,
+            EventType rawEventType
+        )
+        {
+            return GetEffectiveMouseEventType(eventType, rawEventType);
+        }
+
+        private static EventType GetEffectiveMouseEventType(
+            EventType eventType,
+            EventType rawEventType
+        )
+        {
+            if (eventType == EventType.Used)
+            {
+                return rawEventType;
+            }
+
+            return eventType;
+        }
+
         /// <summary>
         /// Signals that a child property drawer's height has changed and the parent
         /// SerializableSetPropertyDrawer should invalidate its row height cache.
@@ -1519,11 +1607,11 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
         /// </summary>
         private readonly struct PropertyCacheKey : IEquatable<PropertyCacheKey>
         {
-            public readonly int InstanceId;
+            public readonly long InstanceId;
             public readonly string PropertyPath;
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            public PropertyCacheKey(int instanceId, string propertyPath)
+            public PropertyCacheKey(long instanceId, string propertyPath)
             {
                 InstanceId = instanceId;
                 PropertyPath = propertyPath;
@@ -1579,7 +1667,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
             // Common case: single target - use static cache to avoid string allocation
             if (targets.Length == 1 && targets[0] != null)
             {
-                int instanceId = targets[0].GetInstanceID();
+                long instanceId = targets[0].GetUnityObjectId();
                 PropertyCacheKey cacheKey = new(instanceId, propertyPath);
 
                 if (SingleTargetPropertyKeyCache.TryGetValue(cacheKey, out string cached))
@@ -1616,7 +1704,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
 
             for (int index = 0; index < targets.Length; index++)
             {
-                int id = targets[index] != null ? targets[index].GetInstanceID() : 0;
+                long id = targets[index] != null ? targets[index].GetUnityObjectId() : 0;
                 keyBuilder.Append(id);
                 if (index < targets.Length - 1)
                 {
@@ -2401,22 +2489,17 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
                 SerializableCollectionTweenDiagnostics.LogMouseEvent(
                     "ManualEntryLabelClick",
                     propertyPath ?? "(null)",
-                    currentEvent.type,
+                    GetEffectiveMouseEventType(currentEvent),
                     currentEvent.mousePosition,
                     labelHitRect,
                     mouseInLabelRect
                 );
 
-                if (
-                    currentEvent.type == EventType.MouseDown
-                    && currentEvent.button == 0
-                    && mouseInLabelRect
-                )
-                {
-                    expanded = !expanded;
-                    GUI.changed = true;
-                    currentEvent.Use();
-                }
+                bool labelClickToggled = TryToggleManualEntryFoldoutLabel(
+                    currentEvent,
+                    labelHitRect,
+                    ref expanded
+                );
 
                 EditorGUI.BeginChangeCheck();
                 bool arrowExpanded = EditorGUI.Foldout(
@@ -2425,13 +2508,16 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
                     GUIContent.none,
                     toggleOnLabelClick: false
                 );
-                if (EditorGUI.EndChangeCheck())
+                if (EditorGUI.EndChangeCheck() && !labelClickToggled)
                 {
                     expanded = arrowExpanded;
                 }
 
                 GUIStyle manualEntryLabelStyle = GetManualEntryFoldoutLabelStyle();
-                EditorGUIUtility.AddCursorRect(labelHitRect, MouseCursor.Link);
+                if (!EditorUi.Suppress)
+                {
+                    EditorGUIUtility.AddCursorRect(labelHitRect, MouseCursor.Link);
+                }
                 EditorGUI.LabelField(labelRect, ManualEntryFoldoutContent, manualEntryLabelStyle);
 
                 if (expanded != pending.isExpanded)
@@ -3679,6 +3765,25 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
             return UnsupportedTypeContent;
         }
 
+        private static GUIContent GetSuppressedFieldValueContent(object current)
+        {
+            string text = string.Empty;
+            if (current is Object unityObject)
+            {
+                if (unityObject != null)
+                {
+                    text = unityObject.name;
+                }
+            }
+            else if (current != null)
+            {
+                text = current.ToString() ?? string.Empty;
+            }
+
+            SuppressedFieldValueContent.text = text;
+            return SuppressedFieldValueContent;
+        }
+
         internal static object DrawFieldForType(
             Rect rect,
             GUIContent content,
@@ -3695,6 +3800,12 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
             if (!IsTypeSupported(type))
             {
                 EditorGUI.LabelField(rect, content, GetUnsupportedTypeContent(type));
+                return current;
+            }
+
+            if (EditorUi.Suppress)
+            {
+                EditorGUI.LabelField(rect, content, GetSuppressedFieldValueContent(current));
                 return current;
             }
 
@@ -6992,6 +7103,10 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
                     break;
                 case SerializedPropertyType.ManagedReference:
                 case SerializedPropertyType.Generic:
+#if UNITY_2022_1_OR_NEWER
+                    // SerializedProperty.boxedValue did not exist before Unity 2022.1;
+                    // on 2021.3 fall back to the property path (the same degraded
+                    // identity the catch below already uses for unreadable values).
                     try
                     {
                         object boxed = property.boxedValue;
@@ -7003,6 +7118,10 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
                         data.value = property.propertyPath;
                         data.comparable = property.propertyPath;
                     }
+#else
+                    data.value = property.propertyPath;
+                    data.comparable = property.propertyPath;
+#endif
                     break;
                 default:
                     data.value = property.propertyPath;
@@ -7030,6 +7149,24 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
                 SerializedProperty element = itemsProperty.GetArrayElementAtIndex(index);
                 SetElementData elementData = ReadElementData(element);
                 object value = ConvertSnapshotValue(elementType, elementData.value);
+                // On Unity 2021.3 (no SerializedProperty.boxedValue) a complex/Generic element
+                // degrades to its string propertyPath, which is not assignable to a strongly-typed
+                // snapshot array and throws InvalidCastException at SetValue. Skip any value that
+                // is not assignable to elementType (the slot stays at default(elementType)) rather
+                // than throwing, so SyncRuntimeSet can complete on every Unity version.
+                //
+                // KNOWN 2021.3 LIMITATION (not a regression — boxedValue genuinely does not exist
+                // there): for sets of complex/[Serializable] reference elements the snapshot cannot
+                // be reconstructed from serialized state, so a snapshot rebuilt during a drawer
+                // *edit* round-trips existing complex entries as default/null. The pre-2022 editor
+                // could never read these values back regardless; this guard only converts the hard
+                // InvalidCastException into the same degraded read the rest of the 2021.3 path
+                // already produces. On 2022.1+/6000 ConvertSnapshotValue returns real instances and
+                // this guard is inert, so no convertible value is ever dropped.
+                if (value != null && !elementType.IsInstanceOfType(value))
+                {
+                    continue;
+                }
                 snapshot.SetValue(value, index);
             }
 
@@ -7158,6 +7295,9 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
                     break;
                 case SerializedPropertyType.ManagedReference:
                 case SerializedPropertyType.Generic:
+#if UNITY_2022_1_OR_NEWER
+                    // SerializedProperty.boxedValue is unavailable before Unity 2022.1;
+                    // the managed/generic value is simply not written back on 2021.3.
                     try
                     {
                         property.boxedValue = data.value;
@@ -7166,6 +7306,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
                     {
                         // Swallow
                     }
+#endif
                     break;
             }
         }

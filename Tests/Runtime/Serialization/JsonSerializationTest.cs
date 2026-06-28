@@ -37,13 +37,14 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
 
     [TestFixture]
     [NUnit.Framework.Category("Fast")]
+    [WallstopStudios.UnityHelpers.Tests.Core.SkipUnderIL2CPP]
     public sealed class JsonSerializationTest : CommonTestBase
     {
         [Test]
         public void UnityEngineObjectSerializationWorks()
         {
             GameObject testGo = Track(new GameObject("Test GameObject", typeof(SpriteRenderer)));
-            int expectedId = testGo.GetInstanceID();
+            long expectedId = testGo.GetUnityObjectId();
             string json = testGo.ToJson();
             Assert.IsFalse(string.IsNullOrWhiteSpace(json), json);
             Assert.AreNotEqual("{}", json);
@@ -56,7 +57,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
             Assert.True(root.TryGetProperty("instanceId", out JsonElement id));
             Assert.AreEqual("Test GameObject", name.GetString());
             StringAssert.Contains("UnityEngine.GameObject", type.GetString());
-            Assert.AreEqual(expectedId, id.GetInt32());
+            Assert.AreEqual(expectedId, id.GetInt64());
         }
 
         [UnityEngine.TestTools.UnityTest]
@@ -68,7 +69,9 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
 
             testGo = Track(new GameObject());
             testGo.Destroy();
-            yield return null; // allow Unity to nullify destroyed object
+            // Destroy is async in PlayMode; poll until Unity nullifies the wrapper rather than
+            // assuming a single frame settles it (version/CI-load flaky otherwise).
+            yield return WaitUntilDestroyed(testGo);
             Assert.IsTrue(testGo == null);
             json = testGo.ToJson();
             Assert.AreEqual("null", json);

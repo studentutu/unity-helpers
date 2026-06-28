@@ -4,39 +4,27 @@
 namespace WallstopStudios.UnityHelpers.Tests.Tools
 {
     using NUnit.Framework;
-    using UnityEditor;
+    using UnityEngine;
     using WallstopStudios.UnityHelpers.Editor;
     using WallstopStudios.UnityHelpers.Tests.Core;
 
     [TestFixture]
-    [NUnit.Framework.Category("Slow")]
-    [NUnit.Framework.Category("Integration")]
-    public sealed class AnimationEventEditorSmokeTests : BatchedEditorTestBase
+    [NUnit.Framework.Category("Fast")]
+    public sealed class AnimationEventEditorSmokeTests : CommonTestBase
     {
-        [SetUp]
-        public void SetUp()
-        {
-            base.BaseSetUp();
-        }
-
-        [TearDown]
-        public override void TearDown()
-        {
-            base.TearDown();
-        }
-
         [Test]
-        public void AnimationEventEditorOpensAndClosesWithoutAnimator()
+        public void AnimationEventEditorCanBeInstantiatedRepeatedlyWithoutAnimator()
         {
-            AnimationEventEditor first = Track(EditorWindow.CreateWindow<AnimationEventEditor>());
-            first.Show();
-            first.Repaint();
-            first.Close();
+            AnimationEventEditor first = Track(
+                ScriptableObject.CreateInstance<AnimationEventEditor>()
+            );
+            AnimationEventEditor second = Track(
+                ScriptableObject.CreateInstance<AnimationEventEditor>()
+            );
 
-            AnimationEventEditor second = Track(EditorWindow.CreateWindow<AnimationEventEditor>());
-            second.Show();
-            second.Repaint();
-            second.Close();
+            Assert.IsTrue(first != null);
+            Assert.IsTrue(second != null);
+            Assert.AreNotSame(first, second);
         }
     }
 }

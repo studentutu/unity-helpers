@@ -6,7 +6,6 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
     using System.Collections.Generic;
     using NUnit.Framework;
     using UnityEngine;
-    using UnityEngine.TestTools;
     using WallstopStudios.UnityHelpers.Core.Attributes;
     using WallstopStudios.UnityHelpers.Tests.Core;
 
@@ -49,14 +48,13 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
             Assert.IsTrue(ValueHelpers.IsAssigned(populated));
         }
 
-        [UnityTest]
-        public System.Collections.IEnumerator IsAssignedReturnsFalseForDestroyedUnityObjects()
+        [Test]
+        public void IsAssignedReturnsFalseForDestroyedUnityObjects()
         {
             GameObject go = Track(new GameObject("ValueHelpers_Destroyed"));
             Assert.IsTrue(ValueHelpers.IsAssigned(go));
 
-            Object.Destroy(go); // UNH-SUPPRESS: Test verifies IsAssigned returns false after destruction
-            yield return null;
+            Object.DestroyImmediate(go); // UNH-SUPPRESS: Test verifies IsAssigned returns false after destruction
 
             Assert.IsFalse(ValueHelpers.IsAssigned(go));
         }

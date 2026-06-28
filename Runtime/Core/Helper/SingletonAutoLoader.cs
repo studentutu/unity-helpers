@@ -249,6 +249,20 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
             try
             {
                 Type closed = openGenericBase.MakeGenericType(singletonType);
+
+                // Constraint check, explicit on purpose: the singleton bases are declared
+                // `where T : Base<T>`, so a type that does NOT derive from Base<itself> violates the
+                // constraint. The CLR (Mono) throws ArgumentException from MakeGenericType for that
+                // violation, but IL2CPP does NOT validate generic constraints at runtime -- it
+                // returns a usable closed type whose inherited static `Instance` then resolves,
+                // suppressing the "does not derive from ..." diagnostic the callers rely on. Verify
+                // the relationship ourselves (assignability is AOT-safe and runtime-consistent) so a
+                // mismatched entry is reported identically on every backend.
+                if (!closed.IsAssignableFrom(singletonType))
+                {
+                    return null;
+                }
+
                 return closed.GetProperty(
                     nameof(RuntimeSingleton<CoroutineHandler>.Instance),
                     BindingFlags.Public | BindingFlags.Static
@@ -281,6 +295,30 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
             finally
             {
                 _testPlayModeOverride = previousOverride;
+            }
+        }
+
+        /// <summary>
+        /// Resets every static cache so a test that asserts a first-resolution log (e.g. the
+        /// "does not derive from RuntimeSingleton" / "Unable to resolve type" warnings) actually
+        /// re-emits it. Without this, the per-<c>typeName</c> loader cache and per-<see cref="Type"/>
+        /// instance-property caches suppress the warning on the second PlayMode test in the same
+        /// domain, leaving a <see cref="UnityEngine.TestTools.LogAssert.Expect(UnityEngine.LogType,
+        /// string)"/> unconsumed -- which then bleeds across the frame boundary and fails an innocent
+        /// bystander fixture. Production keeps the dedupe (correct anti-spam); only tests reset it.
+        /// </summary>
+        internal static void ClearCachesForTests()
+        {
+            lock (_loaderBuildLock)
+            {
+                _cachedLoaders.Clear();
+                _runtimeInstanceProperties.Clear();
+                _scriptableInstanceProperties.Clear();
+            }
+
+            lock (_executionLock)
+            {
+                _executedLoadTypes.Clear();
             }
         }
 #endif

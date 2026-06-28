@@ -5,6 +5,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
 {
     using NUnit.Framework;
     using ProtoBuf;
+    using WallstopStudios.UnityHelpers.Core.Serialization;
     using Serializer = WallstopStudios.UnityHelpers.Core.Serialization.Serializer;
 
     [TestFixture]
@@ -23,13 +24,23 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
             public string Label { get; set; }
         }
 
+        [SetUp]
+        public void SetUp()
+        {
+            Serializer.ClearProtobufRootCacheForTesting(
+                typeof(IWidget),
+                typeof(AbstractBase),
+                typeof(RegisteredAbstractBase)
+            );
+        }
+
         [Test]
         public void SingleImplementationRequiresRegistration()
         {
             IWidget original = new Widget { Id = 3, Label = "ok" };
             byte[] data = Serializer.ProtoSerialize(original);
 
-            Assert.Throws<ProtoException>(
+            Assert.Throws<SerializationTypeException>(
                 () => Serializer.ProtoDeserialize<IWidget>(data),
                 "Deserializing interface even with a single implementation should require registration"
             );
@@ -71,10 +82,41 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
             AbstractBase original = new DerivedA { Common = 9, ExtraA = "x" };
             byte[] data = Serializer.ProtoSerialize(original, forceRuntimeType: true);
 
-            Assert.Throws<ProtoException>(
+            Assert.Throws<SerializationTypeException>(
                 () => Serializer.ProtoDeserialize<AbstractBase>(data),
                 "Deserializing abstract base with multiple derived types should require registration"
             );
+        }
+
+        [ProtoContract]
+        private abstract class RegisteredAbstractBase
+        {
+            [ProtoMember(1)]
+            public int Common { get; set; }
+        }
+
+        [ProtoContract]
+        private sealed class RegisteredDerived : RegisteredAbstractBase
+        {
+            [ProtoMember(2)]
+            public string Extra { get; set; }
+        }
+
+        [Test]
+        public void AbstractBaseWithRegisteredRootDeserializes()
+        {
+            RegisteredAbstractBase original = new RegisteredDerived { Extra = "root" };
+            byte[] data = Serializer.ProtoSerialize(original, forceRuntimeType: true);
+
+            Serializer.RegisterProtobufRoot<RegisteredAbstractBase, RegisteredDerived>();
+
+            RegisteredAbstractBase round = Serializer.ProtoDeserialize<RegisteredAbstractBase>(
+                data
+            );
+
+            Assert.IsInstanceOf<RegisteredDerived>(round);
+            RegisteredDerived derived = (RegisteredDerived)round;
+            Assert.AreEqual("root", derived.Extra);
         }
     }
 }

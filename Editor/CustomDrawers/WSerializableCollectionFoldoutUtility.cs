@@ -8,6 +8,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
     using System.Reflection;
     using UnityEditor;
     using WallstopStudios.UnityHelpers.Core.Attributes;
+    using WallstopStudios.UnityHelpers.Core.Extension;
     using WallstopStudios.UnityHelpers.Core.Helper;
     using WallstopStudios.UnityHelpers.Editor.Settings;
 
@@ -103,11 +104,11 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
         {
             public FoldoutInitializationKey(UnityEngine.Object target, string propertyPath)
             {
-                TargetId = target != null ? target.GetInstanceID() : 0;
+                TargetId = target != null ? target.GetUnityObjectId() : 0;
                 PropertyPath = propertyPath ?? string.Empty;
             }
 
-            private int TargetId { get; }
+            private long TargetId { get; }
 
             private string PropertyPath { get; }
 

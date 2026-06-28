@@ -10,6 +10,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
     using NUnit.Framework;
     using UnityEngine;
     using UnityEngine.TestTools;
+    using WallstopStudios.UnityHelpers.Core.Extension;
     using WallstopStudios.UnityHelpers.Core.Helper;
     using WallstopStudios.UnityHelpers.Core.Serialization;
     using WallstopStudios.UnityHelpers.Tests.Core;
@@ -22,7 +23,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
         public void GameObjectSerializationContainsExpectedFields()
         {
             GameObject go = Track(new GameObject("GO_Main"));
-            int expectedId = go.GetInstanceID();
+            long expectedId = go.GetUnityObjectId();
             string json = Serializer.JsonStringify(go);
             Assert.IsFalse(string.IsNullOrWhiteSpace(json), json);
 
@@ -34,7 +35,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
             Assert.True(root.TryGetProperty("instanceId", out JsonElement id));
             Assert.AreEqual("GO_Main", name.GetString());
             StringAssert.Contains("UnityEngine.GameObject", type.GetString());
-            Assert.AreEqual(expectedId, id.GetInt32());
+            Assert.AreEqual(expectedId, id.GetInt64());
         }
 
         [Test]
@@ -51,21 +52,21 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
         public void ObjectTypedSerializationUsesRuntimeTypeConverter()
         {
             GameObject go = Track(new GameObject("ObjectTypedGO"));
-            int expectedId = go.GetInstanceID();
+            long expectedId = go.GetUnityObjectId();
             object goAsObject = go;
             string json = Serializer.JsonStringify(goAsObject);
             using JsonDocument doc = JsonDocument.Parse(json);
             JsonElement root = doc.RootElement;
             Assert.AreEqual("ObjectTypedGO", root.GetProperty("name").GetString());
             StringAssert.Contains("UnityEngine.GameObject", root.GetProperty("type").GetString());
-            Assert.AreEqual(expectedId, root.GetProperty("instanceId").GetInt32());
+            Assert.AreEqual(expectedId, root.GetProperty("instanceId").GetInt64());
         }
 
         [Test]
         public void GameObjectSerializationPrettyPrintFormatsAndParses()
         {
             GameObject go = Track(new GameObject("Pretty ☃ Object ✓"));
-            int expectedId = go.GetInstanceID();
+            long expectedId = go.GetUnityObjectId();
             string json = Serializer.JsonStringify(go, pretty: true);
             Assert.IsFalse(string.IsNullOrWhiteSpace(json), json);
             StringAssert.Contains("\n", json);
@@ -75,21 +76,21 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
             Assert.True(root.TryGetProperty("name", out JsonElement name));
             Assert.AreEqual("Pretty ☃ Object ✓", name.GetString());
             Assert.True(root.TryGetProperty("instanceId", out JsonElement id));
-            Assert.AreEqual(expectedId, id.GetInt32());
+            Assert.AreEqual(expectedId, id.GetInt64());
         }
 
         [Test]
         public void GameObjectSerializationStableInstanceIdAcrossSerializations()
         {
             GameObject go = Track(new GameObject("StableId"));
-            int expectedId = go.GetInstanceID();
+            long expectedId = go.GetUnityObjectId();
             string j1 = Serializer.JsonStringify(go);
             string j2 = Serializer.JsonStringify(go);
 
             using JsonDocument d1 = JsonDocument.Parse(j1);
             using JsonDocument d2 = JsonDocument.Parse(j2);
-            int id1 = d1.RootElement.GetProperty("instanceId").GetInt32();
-            int id2 = d2.RootElement.GetProperty("instanceId").GetInt32();
+            long id1 = d1.RootElement.GetProperty("instanceId").GetInt64();
+            long id2 = d2.RootElement.GetProperty("instanceId").GetInt64();
             Assert.AreEqual(expectedId, id1);
             Assert.AreEqual(id1, id2);
         }
@@ -100,17 +101,20 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
             GameObject go = Track(new GameObject("NoReadSupport"));
             string json = Serializer.JsonStringify(go);
 
-            // Our converter intentionally does not implement Read. Ensure this throws.
-            Assert.Throws<NotImplementedException>(() =>
-                Serializer.JsonDeserialize<GameObject>(json)
+            // Our converter intentionally does not implement Read (throws NotImplementedException);
+            // the Serializer wraps that as SerializationCorruptDataException with the original inner.
+            SerializationCorruptDataException ex = Assert.Throws<SerializationCorruptDataException>(
+                () =>
+                    Serializer.JsonDeserialize<GameObject>(json)
             );
+            Assert.IsTrue(ex.InnerException is NotImplementedException);
         }
 
         [UnityTest]
         public System.Collections.IEnumerator GameObjectArraySerializationWorksWithNullAndDestroyed()
         {
             GameObject alive = Track(new GameObject("Alive"));
-            int aliveId = alive.GetInstanceID();
+            long aliveId = alive.GetUnityObjectId();
             GameObject dead = Track(new GameObject("Dead"));
             dead.Destroy();
             yield return null; // ensure Unity nullification
@@ -129,7 +133,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
             JsonElement mid = root[1];
             Assert.AreEqual(JsonValueKind.Object, mid.ValueKind);
             Assert.AreEqual("Alive", mid.GetProperty("name").GetString());
-            Assert.AreEqual(aliveId, mid.GetProperty("instanceId").GetInt32());
+            Assert.AreEqual(aliveId, mid.GetProperty("instanceId").GetInt64());
 
             Assert.AreEqual(JsonValueKind.Null, root[2].ValueKind);
         }
@@ -138,7 +142,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
         public System.Collections.IEnumerator GameObjectDictionarySerializationWorksWithNullAndDestroyed()
         {
             GameObject alive = Track(new GameObject("Alive_Dict"));
-            int aliveId = alive.GetInstanceID();
+            long aliveId = alive.GetUnityObjectId();
             GameObject dead = Track(new GameObject("Dead_Dict"));
             dead.Destroy();
             yield return null; // ensure Unity nullification
@@ -163,7 +167,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
 
             Assert.True(root.TryGetProperty("alive", out JsonElement aliveEl));
             Assert.AreEqual("Alive_Dict", aliveEl.GetProperty("name").GetString());
-            Assert.AreEqual(aliveId, aliveEl.GetProperty("instanceId").GetInt32());
+            Assert.AreEqual(aliveId, aliveEl.GetProperty("instanceId").GetInt64());
 
             Assert.True(root.TryGetProperty("dead", out JsonElement deadEl));
             Assert.AreEqual(JsonValueKind.Null, deadEl.ValueKind);
@@ -183,7 +187,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
         public void NestedObjectSerializationWithGameObjectProperty()
         {
             GameObject go = Track(new GameObject("Nested"));
-            int expectedId = go.GetInstanceID();
+            long expectedId = go.GetUnityObjectId();
             GoHolder holder = new() { Go = go };
             string json = Serializer.JsonStringify(holder);
             Assert.IsFalse(string.IsNullOrWhiteSpace(json), json);
@@ -192,14 +196,14 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
             JsonElement root = doc.RootElement;
             Assert.True(root.TryGetProperty("Go", out JsonElement goEl));
             Assert.AreEqual("Nested", goEl.GetProperty("name").GetString());
-            Assert.AreEqual(expectedId, goEl.GetProperty("instanceId").GetInt32());
+            Assert.AreEqual(expectedId, goEl.GetProperty("instanceId").GetInt64());
         }
 
         [Test]
         public void NestedObjectSerializationWithGameObjectField()
         {
             GameObject go = Track(new GameObject("NestedField"));
-            int expectedId = go.GetInstanceID();
+            long expectedId = go.GetUnityObjectId();
             GoFieldHolder holder = new() { go = go };
             string json = Serializer.JsonStringify(holder);
             Assert.IsFalse(string.IsNullOrWhiteSpace(json), json);
@@ -208,14 +212,14 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
             JsonElement root = doc.RootElement;
             Assert.True(root.TryGetProperty("go", out JsonElement goEl));
             Assert.AreEqual("NestedField", goEl.GetProperty("name").GetString());
-            Assert.AreEqual(expectedId, goEl.GetProperty("instanceId").GetInt32());
+            Assert.AreEqual(expectedId, goEl.GetProperty("instanceId").GetInt64());
         }
 
         [Test]
         public void FastSerializerProducesValidGameObjectJson()
         {
             GameObject go = Track(new GameObject("FastGO"));
-            int expectedId = go.GetInstanceID();
+            long expectedId = go.GetUnityObjectId();
             byte[] bytes = Serializer.JsonSerializeFast(go);
             Assert.NotNull(bytes);
             string json = Encoding.UTF8.GetString(bytes);
@@ -224,14 +228,14 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
             using JsonDocument doc = JsonDocument.Parse(json);
             JsonElement root = doc.RootElement;
             Assert.AreEqual("FastGO", root.GetProperty("name").GetString());
-            Assert.AreEqual(expectedId, root.GetProperty("instanceId").GetInt32());
+            Assert.AreEqual(expectedId, root.GetProperty("instanceId").GetInt64());
         }
 
         [Test]
         public void SerializeIntoCallerBufferProducesValidGameObjectJson()
         {
             GameObject go = Track(new GameObject("BufferedGO"));
-            int expectedId = go.GetInstanceID();
+            long expectedId = go.GetUnityObjectId();
             byte[] buffer = null;
             int len = Serializer.JsonSerialize(
                 go,
@@ -245,7 +249,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
             using JsonDocument doc = JsonDocument.Parse(json);
             JsonElement root = doc.RootElement;
             Assert.AreEqual("BufferedGO", root.GetProperty("name").GetString());
-            Assert.AreEqual(expectedId, root.GetProperty("instanceId").GetInt32());
+            Assert.AreEqual(expectedId, root.GetProperty("instanceId").GetInt64());
         }
     }
 }

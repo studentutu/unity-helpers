@@ -10,6 +10,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
     using UnityEngine;
     using UnityEngine.SceneManagement;
     using UnityEngine.TestTools;
+    using WallstopStudios.UnityHelpers.Core.Extension;
     using WallstopStudios.UnityHelpers.Tests.Core;
     using WallstopStudios.UnityHelpers.Utils;
     using Object = UnityEngine.Object;
@@ -39,7 +40,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             void DestroyAll<T>()
                 where T : RuntimeSingleton<T>
             {
-                foreach (T inst in Object.FindObjectsOfType<T>(includeInactive: true))
+                foreach (T inst in UnityObjectExtensions.FindObjectsOfTypeShim<T>(true))
                 {
                     if (inst != null)
                     {
@@ -150,6 +151,18 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
         }
 
         [Test]
+        public void RegistryDescribesLiveSingletonInstancesBeforeClear()
+        {
+            TestRuntimeSingleton instance = TestRuntimeSingleton.Instance;
+            Track(instance.gameObject);
+
+            string description = RuntimeSingletonRegistry.DescribeLiveInstancesForTesting();
+
+            StringAssert.Contains(nameof(TestRuntimeSingleton), description);
+            StringAssert.Contains(instance.name, description);
+        }
+
+        [Test]
         public void InstanceReturnsSameObjectOnMultipleAccesses()
         {
             TestRuntimeSingleton instance1 = TestRuntimeSingleton.Instance;
@@ -256,7 +269,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             GameObject secondObject = Track(new GameObject("SecondCustomStartSingleton"));
             CustomStartSingleton second = secondObject.AddComponent<CustomStartSingleton>();
 
-            LogAssert.Expect(
+            ExpectError(
                 LogType.Error,
                 new System.Text.RegularExpressions.Regex(".*Double singleton detected.*")
             );
@@ -276,9 +289,10 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
 
             Assert.IsTrue(CustomDestroyableSingleton.HasInstance);
 
-            Object.DestroyImmediate(instance.gameObject);
+            GameObject gameObject = instance.gameObject;
+            Object.Destroy(gameObject); // UNH-SUPPRESS: Test verifies singleton destruction callback
 
-            yield return null;
+            yield return WaitUntilDestroyed(gameObject);
 
             Assert.IsTrue(CustomDestroyableSingleton.destroyWasCalled);
             Assert.IsFalse(CustomDestroyableSingleton.HasInstance);
@@ -288,16 +302,17 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
         public IEnumerator InstanceCanBeAccessedAfterDestruction()
         {
             TestRuntimeSingleton instance1 = TestRuntimeSingleton.Instance;
-            int instanceId1 = instance1.GetInstanceID();
+            long instanceId1 = instance1.GetUnityObjectId();
+            GameObject gameObject = instance1.gameObject;
 
-            Object.DestroyImmediate(instance1.gameObject); // UNH-SUPPRESS: Test verifies singleton recreation after destruction
+            Object.Destroy(gameObject); // UNH-SUPPRESS: Test verifies singleton recreation after destruction
 
-            yield return null;
+            yield return WaitUntilDestroyed(gameObject);
 
             TestRuntimeSingleton instance2 = TestRuntimeSingleton.Instance;
 
             Assert.IsTrue(instance2 != null);
-            Assert.AreNotEqual(instanceId1, instance2.GetInstanceID());
+            Assert.AreNotEqual(instanceId1, instance2.GetUnityObjectId());
         }
 
         [Test]
@@ -329,9 +344,8 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
 
             Assert.IsFalse(hasInstance);
 
-            TestRuntimeSingleton[] allInstances = Object.FindObjectsOfType<TestRuntimeSingleton>(
-                includeInactive: true
-            );
+            TestRuntimeSingleton[] allInstances =
+                UnityObjectExtensions.FindObjectsOfTypeShim<TestRuntimeSingleton>(true);
             Assert.AreEqual(0, allInstances.Length);
         }
 
@@ -395,9 +409,8 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             Assert.AreSame(instance1, instance2);
             Assert.AreSame(instance2, instance3);
 
-            TestRuntimeSingleton[] allInstances = Object.FindObjectsOfType<TestRuntimeSingleton>(
-                includeInactive: true
-            );
+            TestRuntimeSingleton[] allInstances =
+                UnityObjectExtensions.FindObjectsOfTypeShim<TestRuntimeSingleton>(true);
             Assert.AreEqual(1, allInstances.Length);
         }
 
@@ -509,7 +522,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             GameObject secondObject = Track(new GameObject("SecondTestRuntimeSingleton"));
             TestRuntimeSingleton second = secondObject.AddComponent<TestRuntimeSingleton>();
 
-            LogAssert.Expect(
+            ExpectError(
                 LogType.Error,
                 new System.Text.RegularExpressions.Regex(".*Double singleton detected.*")
             );
@@ -534,7 +547,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             TestRuntimeSingleton second = secondObject.AddComponent<TestRuntimeSingleton>();
             second.testValue = 200;
 
-            LogAssert.Expect(
+            ExpectError(
                 LogType.Error,
                 new System.Text.RegularExpressions.Regex(".*Double singleton detected.*")
             );
@@ -561,7 +574,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
         public IEnumerator InstanceSurvivesMultipleFrames()
         {
             TestRuntimeSingleton instance = TestRuntimeSingleton.Instance;
-            int instanceId = instance.GetInstanceID();
+            long instanceId = instance.GetUnityObjectId();
 
             for (int i = 0; i < 10; i++)
             {
@@ -570,7 +583,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
 
             TestRuntimeSingleton sameInstance = TestRuntimeSingleton.Instance;
 
-            Assert.AreEqual(instanceId, sameInstance.GetInstanceID());
+            Assert.AreEqual(instanceId, sameInstance.GetUnityObjectId());
         }
 
         [Test]
@@ -597,7 +610,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             GameObject fakeObject = Track(new GameObject("Fake"));
             TestRuntimeSingleton fake = fakeObject.AddComponent<TestRuntimeSingleton>();
 
-            LogAssert.Expect(
+            ExpectError(
                 LogType.Error,
                 new System.Text.RegularExpressions.Regex(".*Double singleton detected.*")
             );
@@ -719,7 +732,8 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             Assert.AreNotSame(inactive, instance);
             Assert.IsTrue(instance.gameObject.activeSelf);
 
-            Object.DestroyImmediate(inactiveObject); // UNH-SUPPRESS: Test cleanup for inactive object
+            Object.Destroy(inactiveObject); // UNH-SUPPRESS: Test cleanup for inactive object
+            yield return WaitUntilDestroyed(inactiveObject);
         }
 
         [Test]
@@ -785,7 +799,8 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             Assert.IsTrue(instance.gameObject.TryGetComponent(out Rigidbody foundRb));
             Assert.AreSame(rb, foundRb);
 
-            Object.DestroyImmediate(rb); // UNH-SUPPRESS: Test cleanup for added component
+            Object.Destroy(rb); // UNH-SUPPRESS: Test cleanup for added component
+            yield return WaitUntilDestroyed(rb);
         }
 
         [Test]
@@ -834,6 +849,92 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
                 .GetResult();
 
             Assert.AreSame(instance, backgroundInstance);
+        }
+
+        [Test]
+        public void ClearInstanceWhenNeverAccessedDoesNotThrow()
+        {
+            Assert.DoesNotThrow(() => TestRuntimeSingleton.ClearInstance());
+            Assert.IsFalse(TestRuntimeSingleton.HasInstance);
+        }
+
+        [Test]
+        public void ClearInstanceWhenCalledTwiceDoesNotThrow()
+        {
+            TestRuntimeSingleton instance = TestRuntimeSingleton.Instance;
+            Track(instance.gameObject);
+
+            Assert.DoesNotThrow(() =>
+            {
+                TestRuntimeSingleton.ClearInstance();
+                TestRuntimeSingleton.ClearInstance();
+            });
+            Assert.IsFalse(TestRuntimeSingleton.HasInstance);
+        }
+
+        [UnityTest]
+        public IEnumerator ClearInstanceDestroysGameObjectAndClearsReference()
+        {
+            TestRuntimeSingleton instance = TestRuntimeSingleton.Instance;
+            GameObject gameObject = instance.gameObject;
+
+            TestRuntimeSingleton.ClearInstance();
+            // ClearInstance destroys via Object.Destroy (deferred in PlayMode); poll until the
+            // wrapper is nulled rather than assuming one frame settles it (flaky under CI load).
+            yield return WaitUntilDestroyed(gameObject);
+
+            Assert.IsFalse(TestRuntimeSingleton.HasInstance);
+            Assert.IsTrue(gameObject == null);
+        }
+
+        [UnityTest]
+        public IEnumerator ClearInstanceResetsInitializeCount()
+        {
+            TestRuntimeSingleton instance = TestRuntimeSingleton.Instance;
+            Track(instance.gameObject);
+
+            yield return null;
+
+            Assert.Greater(TestRuntimeSingleton.InitializeCount, 0);
+
+            TestRuntimeSingleton.ClearInstance();
+            yield return null;
+
+            Assert.AreEqual(0, TestRuntimeSingleton.InitializeCount);
+        }
+
+        [UnityTest]
+        public IEnumerator ClearInstanceAllowsFreshInstanceAfterClear()
+        {
+            TestRuntimeSingleton first = TestRuntimeSingleton.Instance;
+            GameObject firstObject = first.gameObject;
+            Track(first.gameObject);
+            first.testValue = 99;
+
+            TestRuntimeSingleton.ClearInstance();
+            // Deferred destroy in PlayMode; poll until the old instance is actually gone.
+            yield return WaitUntilDestroyed(firstObject);
+
+            TestRuntimeSingleton second = TestRuntimeSingleton.Instance;
+            Track(second.gameObject);
+
+            Assert.IsTrue(first == null);
+            Assert.AreNotSame(first, second);
+            Assert.AreEqual(42, second.testValue);
+        }
+
+        [UnityTest]
+        public IEnumerator RegistryClearAllDestroysRegisteredSingletonInstances()
+        {
+            TestRuntimeSingleton instance = TestRuntimeSingleton.Instance;
+            GameObject gameObject = instance.gameObject;
+
+            RuntimeSingletonRegistry.ClearAllRegisteredInstances();
+            // Deferred destroy in PlayMode; poll until the wrapper is nulled (flaky under CI load).
+            yield return WaitUntilDestroyed(gameObject);
+
+            Assert.IsFalse(TestRuntimeSingleton.HasInstance);
+            Assert.IsTrue(gameObject == null);
         }
     }
 }

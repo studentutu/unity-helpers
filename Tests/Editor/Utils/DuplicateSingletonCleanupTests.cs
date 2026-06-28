@@ -7,6 +7,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
     using System;
     using System.Collections;
     using System.IO;
+    using System.Text.RegularExpressions;
     using NUnit.Framework;
     using UnityEditor;
     using UnityEngine;
@@ -47,7 +48,6 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             _previousEditorUiSuppress = EditorUi.Suppress;
             EditorUi.Suppress = true;
             ScriptableObjectSingletonCreator.IncludeTestAssemblies = true;
-            ScriptableObjectSingletonCreator.VerboseLogging = true;
             ScriptableObjectSingletonCreator.AllowAssetCreationDuringSuppression = true;
             ScriptableObjectSingletonCreator.DisableAutomaticRetries = true;
             // Bypass compilation state check - Unity may report isCompiling/isUpdating
@@ -313,7 +313,6 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
         {
             EnsureFolder(TestRoot);
             EnsureFolder(NestedFolder);
-            LogAssert.ignoreFailingMessages = true;
 
             string canonicalPath = TestRoot + "/CleanupEnabledSingleton.asset";
             string duplicatePath = NestedFolder + "/CleanupEnabledSingleton.asset";
@@ -358,7 +357,6 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
         {
             EnsureFolder(TestRoot);
             EnsureFolder(NestedFolder);
-            LogAssert.ignoreFailingMessages = true;
 
             string canonicalPath = TestRoot + "/CleanupDisabledSingleton.asset";
             string duplicatePath = NestedFolder + "/CleanupDisabledSingleton.asset";
@@ -403,7 +401,6 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
         {
             EnsureFolder(TestRoot);
             EnsureFolder(NestedFolder);
-            LogAssert.ignoreFailingMessages = true;
 
             string canonicalPath = TestRoot + "/CleanupWithDataSingleton.asset";
             string duplicatePath = NestedFolder + "/CleanupWithDataSingleton.asset";
@@ -432,6 +429,13 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
                 Is.Not.Null
             );
 
+            LogAssert.Expect(
+                LogType.Warning,
+                new Regex(
+                    "Found duplicate singleton asset.*CleanupWithDataSingleton.*different content",
+                    RegexOptions.IgnoreCase
+                )
+            );
             ScriptableObjectSingletonCreator.EnsureSingletonAssets();
             yield return null;
             AssetDatabaseBatchHelper.RefreshIfNotBatching();
@@ -453,7 +457,6 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             EnsureFolder(TestRoot);
             EnsureFolder(NestedFolder);
             EnsureFolder(DeeplyNestedFolder);
-            LogAssert.ignoreFailingMessages = true;
 
             string canonicalPath = TestRoot + "/CleanupEnabledSingleton.asset";
             string duplicatePath1 = NestedFolder + "/CleanupEnabledSingleton.asset";
@@ -517,8 +520,6 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             // Ensure folders are registered with AssetDatabase before proceeding
             AssetDatabaseBatchHelper.SaveAndRefreshIfNotBatching();
             yield return null;
-
-            LogAssert.ignoreFailingMessages = true;
 
             string canonicalPath = TestRoot + "/CleanupEnabledSingleton.asset";
             string duplicatePath = DeeplyNestedFolder + "/CleanupEnabledSingleton.asset";
@@ -615,7 +616,6 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
         {
             EnsureFolder(TestRoot);
             EnsureFolder(NestedFolder);
-            LogAssert.ignoreFailingMessages = true;
 
             string canonicalPath = TestRoot + "/CleanupEnabledSingleton.asset";
             string duplicatePath = NestedFolder + "/CleanupEnabledSingleton.asset";
@@ -675,7 +675,6 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
         {
             EnsureFolder(TestRoot);
             EnsureFolder(NestedFolder);
-            LogAssert.ignoreFailingMessages = true;
 
             string duplicatePath = NestedFolder + "/CleanupEnabledSingleton.asset";
 
@@ -707,7 +706,6 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
         public IEnumerator CleanupHandlesSingleAssetNoDuplicates()
         {
             EnsureFolder(TestRoot);
-            LogAssert.ignoreFailingMessages = true;
 
             string canonicalPath = TestRoot + "/CleanupEnabledSingleton.asset";
 
@@ -739,7 +737,6 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
         {
             EnsureFolder(TestRoot);
             EnsureFolder(NestedFolder);
-            LogAssert.ignoreFailingMessages = true;
 
             string canonicalPath = TestRoot + "/CleanupWithDataSingleton.asset";
             string duplicatePath = NestedFolder + "/CleanupWithDataSingleton.asset";
@@ -833,8 +830,6 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             AssetDatabaseBatchHelper.SaveAndRefreshIfNotBatching();
             yield return null;
 
-            LogAssert.ignoreFailingMessages = true;
-
             string canonicalPath = TestRoot + "/CleanupEnabledSingleton.asset";
             string duplicatePath = Level4 + "/CleanupEnabledSingleton.asset";
 
@@ -902,8 +897,6 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
 
             AssetDatabaseBatchHelper.SaveAndRefreshIfNotBatching();
             yield return null;
-
-            LogAssert.ignoreFailingMessages = true;
 
             string canonicalPath = TestRoot + "/CleanupEnabledSingleton.asset";
             string duplicatePath = DeepFolder + "/CleanupEnabledSingleton.asset";
@@ -979,8 +972,6 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
 
             AssetDatabaseBatchHelper.SaveAndRefreshIfNotBatching();
             yield return null;
-
-            LogAssert.ignoreFailingMessages = true;
 
             string canonicalPath = TestRoot + "/CleanupEnabledSingleton.asset";
             string duplicatePath = AssetSubfolder + "/CleanupEnabledSingleton.asset";

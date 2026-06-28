@@ -304,6 +304,17 @@ namespace WallstopStudios.UnityHelpers.Editor.AssetProcessors
             string[] movedFromAssetPaths
         )
         {
+            // The asset-change watcher is an editor-authoring concern, not a play-mode one.
+            // EnsureInitialized() below runs BuildWatchers, an all-types/all-methods reflection
+            // scan; if a play-mode test mutates the AssetDatabase, Unity invokes this callback
+            // recursively inside the import phase and that scan destabilizes the asset pipeline
+            // (a native mono crash on some Unity versions, multi-minute importer stalls on others),
+            // aborting the play-mode test run with a zero-count results.xml. Skip while playing.
+            if (EditorApplication.isPlayingOrWillChangePlaymode)
+            {
+                return;
+            }
+
             EnsureInitialized();
             if (WatchersByAssetType.Count == 0)
             {
@@ -704,7 +715,7 @@ namespace WallstopStudios.UnityHelpers.Editor.AssetProcessors
         )
         {
             HashSet<string> yieldedPaths = new(StringComparer.OrdinalIgnoreCase);
-            HashSet<int> yieldedInstanceIds = new();
+            HashSet<long> yieldedInstanceIds = new();
 
             // Determine if this is a Component type - these require explicit prefab/scene search
             // and should NOT be found via the primary asset search (which would incorrectly
@@ -872,7 +883,7 @@ namespace WallstopStudios.UnityHelpers.Editor.AssetProcessors
         private static IEnumerable<UnityEngine.Object> EnumeratePrefabComponents(
             Type declaringType,
             HashSet<string> yieldedPaths,
-            HashSet<int> yieldedInstanceIds
+            HashSet<long> yieldedInstanceIds
         )
         {
             // Find all prefabs in the project
@@ -906,7 +917,7 @@ namespace WallstopStudios.UnityHelpers.Editor.AssetProcessors
                         continue;
                     }
 
-                    int instanceId = component.GetInstanceID();
+                    long instanceId = component.GetUnityObjectId();
                     if (yieldedInstanceIds.Add(instanceId))
                     {
                         yield return component;
@@ -917,7 +928,7 @@ namespace WallstopStudios.UnityHelpers.Editor.AssetProcessors
 
         private static IEnumerable<UnityEngine.Object> EnumerateSceneComponents(
             Type declaringType,
-            HashSet<int> yieldedInstanceIds
+            HashSet<long> yieldedInstanceIds
         )
         {
             // Search all loaded scenes
@@ -950,7 +961,7 @@ namespace WallstopStudios.UnityHelpers.Editor.AssetProcessors
                             continue;
                         }
 
-                        int instanceId = component.GetInstanceID();
+                        long instanceId = component.GetUnityObjectId();
                         if (yieldedInstanceIds.Add(instanceId))
                         {
                             yield return component;

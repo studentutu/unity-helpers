@@ -4,6 +4,7 @@
 namespace WallstopStudios.UnityHelpers.Tests.Attributes
 {
     using System;
+    using System.Collections;
     using System.Collections.Generic;
     using System.Text.RegularExpressions;
     using NUnit.Framework;
@@ -15,9 +16,15 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
     [NUnit.Framework.Category("Fast")]
     public sealed class DropDownAttributeTests
     {
-        [TearDown]
-        public void VerifyNoUnexpectedLogs()
+        [UnityTearDown]
+        public IEnumerator VerifyNoUnexpectedLogs()
         {
+            // These synchronous [Test]s emit [Error] logs (WValueDropDown provider errors) that
+            // they LogAssert.Expect. Without spanning a frame, an error can flush at the NEXT frame
+            // boundary -- bleeding into a later PlayMode fixture's teardown (the cross-test pollution
+            // that failed ~20 RelationalComponentsZenjectTests). Pump a frame so the log flushes
+            // within THIS fixture, then reconcile here where the expectations were registered.
+            yield return null;
             LogAssert.NoUnexpectedReceived();
         }
 
@@ -53,7 +60,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
         public void StringInListMissingMethodLogsErrorAndReturnsEmpty()
         {
             Regex pattern = new("WValueDropDownAttribute.*Could not locate.*Missing");
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             StringInListAttribute attribute = new(typeof(StringProviders), "Missing");
             string[] result = attribute.List;
             CollectionAssert.IsEmpty(
@@ -69,7 +76,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             Regex pattern = new(
                 "WValueDropDownAttribute.*ThrowingProvider.*InvalidOperationException"
             );
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             StringInListAttribute attribute = new(
                 typeof(StringProviders),
                 nameof(StringProviders.ThrowingProvider)
@@ -255,7 +262,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
         public void IntDropDownMissingMethodLogsErrorAndReturnsEmpty()
         {
             Regex pattern = new("WValueDropDownAttribute.*Could not locate.*Missing");
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             IntDropDownAttribute attribute = new(typeof(IntProviders), "Missing");
             int[] result = attribute.Options;
             CollectionAssert.IsEmpty(
@@ -271,7 +278,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             Regex pattern = new(
                 "WValueDropDownAttribute.*ThrowingProvider.*InvalidOperationException"
             );
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             IntDropDownAttribute attribute = new(
                 typeof(IntProviders),
                 nameof(IntProviders.ThrowingProvider)
@@ -296,7 +303,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             Regex pattern = new(
                 $"WValueDropDownAttribute.*Could not locate.*{expectedMethodInError}"
             );
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             StringInListAttribute attribute = new(providerType, methodName);
             CollectionAssert.IsEmpty(
                 attribute.List,
@@ -318,7 +325,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             Regex pattern = new(
                 $"WValueDropDownAttribute.*Could not locate.*{expectedMethodInError}"
             );
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             IntDropDownAttribute attribute = new(providerType, methodName);
             CollectionAssert.IsEmpty(
                 attribute.Options,
@@ -395,7 +402,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
         public void StringInListNullProviderTypeLogsErrorAndReturnsEmpty()
         {
             Regex pattern = new("WValueDropDownAttribute.*Provider type cannot be null");
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             StringInListAttribute attribute = new((Type)null, "SomeMethod");
             CollectionAssert.IsEmpty(
                 attribute.List,
@@ -407,7 +414,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
         public void IntDropDownNullProviderTypeLogsErrorAndReturnsEmpty()
         {
             Regex pattern = new("WValueDropDownAttribute.*Provider type cannot be null");
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             IntDropDownAttribute attribute = new(null, "SomeMethod");
             CollectionAssert.IsEmpty(
                 attribute.Options,
@@ -422,7 +429,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
         )
         {
             Regex pattern = new("WValueDropDownAttribute.*Method name cannot be null or empty");
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             StringInListAttribute attribute = new(typeof(StringProviders), methodName);
             CollectionAssert.IsEmpty(
                 attribute.List,
@@ -438,7 +445,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
         )
         {
             Regex pattern = new("WValueDropDownAttribute.*Method name cannot be null or empty");
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             IntDropDownAttribute attribute = new(typeof(IntProviders), methodName);
             CollectionAssert.IsEmpty(
                 attribute.Options,
@@ -455,7 +462,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
         )
         {
             Regex pattern = new("WValueDropDownAttribute.*Method name cannot be null or empty");
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             StringInListAttribute attribute = new(methodName);
             CollectionAssert.IsEmpty(
                 attribute.List,
@@ -472,7 +479,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
         )
         {
             Regex pattern = new("WValueDropDownAttribute.*Method name cannot be null or empty");
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             IntDropDownAttribute attribute = new(methodName);
             CollectionAssert.IsEmpty(
                 attribute.Options,
@@ -539,7 +546,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             Regex pattern = new(
                 "WValueDropDownAttribute.*ArgumentThrowingProvider.*ArgumentException"
             );
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             StringInListAttribute attribute = new(
                 typeof(ExceptionProviders),
                 nameof(ExceptionProviders.ArgumentThrowingProvider)
@@ -556,7 +563,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             Regex pattern = new(
                 "WValueDropDownAttribute.*NullReferenceThrowingProvider.*NullReferenceException"
             );
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             StringInListAttribute attribute = new(
                 typeof(ExceptionProviders),
                 nameof(ExceptionProviders.NullReferenceThrowingProvider)
@@ -705,7 +712,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
         public void WValueDropDownInvalidConversionLogsErrorAndSkips()
         {
             Regex pattern = new("WValueDropDownAttribute");
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             WValueDropDownAttribute attribute = new(typeof(byte), 1, 512);
             object[] options = attribute.Options;
             Assert.AreEqual(1, options.Length);
@@ -716,7 +723,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
         public void WValueDropDownMissingProviderLogsErrorAndReturnsEmpty()
         {
             Regex pattern = new("WValueDropDownAttribute");
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             WValueDropDownAttribute attribute = new(
                 typeof(ValueProviders),
                 "Missing",
@@ -807,7 +814,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
         public void WValueDropDownProviderThrowingLogsErrorAndReturnsEmpty()
         {
             Regex pattern = new("WValueDropDownAttribute");
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             WValueDropDownAttribute attribute = new(
                 typeof(ValueProviders),
                 nameof(ValueProviders.ThrowingProvider)
@@ -853,7 +860,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
         public void WValueDropDownProviderWithInvalidReturnLogsError()
         {
             Regex pattern = new("WValueDropDownAttribute");
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             WValueDropDownAttribute attribute = new(
                 typeof(ValueProviders),
                 nameof(ValueProviders.GetInvalidProvider)
@@ -881,7 +888,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
         )
         {
             Regex pattern = new("WValueDropDownAttribute.*(must return|Could not locate)");
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             WValueDropDownAttribute attribute = new(providerType, methodName);
             CollectionAssert.IsEmpty(
                 attribute.Options,
@@ -900,7 +907,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
         )
         {
             Regex pattern = new($"WValueDropDownAttribute.*Could not locate.*{methodName}");
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             WValueDropDownAttribute attribute = new(providerType, methodName);
             CollectionAssert.IsEmpty(
                 attribute.Options,
@@ -919,7 +926,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
         )
         {
             Regex pattern = new($"WValueDropDownAttribute.*Could not locate.*{methodName}");
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             WValueDropDownAttribute attribute = new(providerType, methodName, valueType);
             CollectionAssert.IsEmpty(
                 attribute.Options,
@@ -934,7 +941,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
         public void MethodWithParametersNotMatchedAsProvider()
         {
             Regex pattern = new("WValueDropDownAttribute.*Could not locate.*GetValuesWithParam");
-            LogAssert.Expect(LogType.Error, pattern);
+            LogAssert.Expect(LogType.Warning, pattern);
             IntDropDownAttribute attribute = new(
                 typeof(MethodWithParametersProvider),
                 nameof(MethodWithParametersProvider.GetValuesWithParam)

@@ -30,7 +30,8 @@
     "**/*.min.css",
     "Samples~/**/Library/**",
     "Samples~/**/Temp/**",
-    "Samples~/**/obj/**"
+    "Samples~/**/obj/**",
+    "perf-results/**"
   ],
   "files": [
     "**/*.{md,markdown}",
@@ -230,7 +231,8 @@
         "Blit",
         "ulf",
         "alf",
-        "unityci"
+        "unityci",
+        "uielements"
       ]
     },
     {
@@ -489,7 +491,8 @@
         "UnityLogTagFormatter",
         "Sirenix",
         "asmdef",
-        "asmref"
+        "asmref",
+        "stcf"
       ]
     },
     {
@@ -512,6 +515,15 @@
         "YAML",
         "XML",
         "CRLF",
+        "urandom",
+        "xxd",
+        "hlsl",
+        "iff",
+        "aniso",
+        "ambisonic",
+        "dxf",
+        "SRGB",
+        "fnt",
         "csharpierrc",
         "LF",
         "RTL",
@@ -519,6 +531,7 @@
         "NUL",
         "UTF",
         "ASCII",
+        "ACMRTUXB",
         "ASTC",
         "DXT",
         "TOCTOU",
@@ -546,6 +559,7 @@
         "SSAO",
         "AO",
         "MSAA",
+        "MSYS",
         "FXAA",
         "TAA",
         "DOF",
@@ -818,7 +832,10 @@
         "env",
         "instanceof",
         "TMPDIR",
-        "cwd"
+        "cwd",
+        "gantt",
+        "mcp",
+        "icall"
       ]
     }
   ],
@@ -1079,7 +1096,8 @@
     "nographics",
     "tzf",
     "nogit",
-    "Dups"
+    "Dups",
+    "WFL"
   ],
   "flagWords": [],
   "minWordLength": 3,

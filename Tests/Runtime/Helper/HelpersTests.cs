@@ -273,41 +273,13 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
             child.transform.SetParent(parent.transform);
             grandChild.transform.SetParent(child.transform);
 
-            bool originalIgnore = LogAssert.ignoreFailingMessages;
-            try
-            {
-                // Suppress possible tag-not-defined errors
-                LogAssert.ignoreFailingMessages = true;
+            grandChild.tag = "Player";
 
-                bool playerTagSet = true;
-                try
-                {
-                    // May throw if tag does not exist in this project
-                    grandChild.tag = "Player";
-                }
-                catch (UnityException)
-                {
-                    playerTagSet = false;
-                }
+            GameObject foundPlayer = parent.FindChildGameObjectWithTag("Player");
+            Assert.AreSame(grandChild, foundPlayer);
 
-                GameObject foundPlayer = parent.FindChildGameObjectWithTag("Player");
-                if (playerTagSet)
-                {
-                    Assert.AreSame(grandChild, foundPlayer);
-                }
-                else
-                {
-                    Assert.IsTrue(foundPlayer == null);
-                }
-
-                // Whether the tag "NonExistentTag" exists or not, there should be no matching child
-                GameObject foundNonExistent = parent.FindChildGameObjectWithTag("NonExistentTag");
-                Assert.IsTrue(foundNonExistent == null);
-            }
-            finally
-            {
-                LogAssert.ignoreFailingMessages = originalIgnore;
-            }
+            GameObject foundMissingBuiltinTag = parent.FindChildGameObjectWithTag("EditorOnly");
+            Assert.IsTrue(foundMissingBuiltinTag == null);
 
             yield break;
         }
@@ -331,21 +303,40 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
         public IEnumerator StartFunctionAsCoroutineWaitsBeforeFirstInvocationWhenRequested()
         {
             CoroutineHost host = CreateHost();
+            host.ResetState();
 
+            // Use an interval comfortably larger than a single (possibly slow, ~50-70ms) batchmode
+            // frame and assert frame-independently: the coroutine cannot invoke synchronously
+            // (StartCoroutine only advances it to the first WaitForDelay yield), and with waitBefore the
+            // first invocation must land no earlier than ~interval after start. Asserting "0 after
+            // exactly one yield" used to flake because a single slow frame can span a sub-frame delay.
+            const float interval = 0.25f;
+            float start = Time.time;
             Coroutine coroutine = host.StartFunctionAsCoroutine(
                 host.Increment,
-                0.01f,
+                interval,
                 useJitter: false,
                 waitBefore: true
             );
 
-            yield return null;
-            Assert.AreEqual(0, host.InvocationCount);
+            Assert.AreEqual(0, host.InvocationCount, "waitBefore must not invoke synchronously.");
 
-            while (host.InvocationCount == 0)
+            float timeout = Time.time + interval + 5f;
+            while (host.InvocationCount == 0 && Time.time < timeout)
             {
                 yield return null;
             }
+
+            Assert.Greater(
+                host.InvocationCount,
+                0,
+                "Invocation never occurred after the waitBefore delay elapsed."
+            );
+            Assert.GreaterOrEqual(
+                Time.time - start,
+                interval * 0.5f,
+                "waitBefore should delay the first invocation by approximately the interval."
+            );
 
             host.StopCoroutine(coroutine);
         }
@@ -355,24 +346,26 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
         {
             CoroutineHost host = CreateHost();
             host.ResetState();
-            Helpers.JitterSampler = _ => 0.02f;
+
+            // Jitter is clamped to the interval (Helpers.SampleInitialJitter -> Min(jitter, interval)),
+            // so use an interval/jitter comfortably larger than one (~50-70ms) batchmode frame and
+            // assert frame-independently. Otherwise a single slow frame can span the whole sub-frame
+            // delay and invoke on frame 1, which previously flaked this test ("Expected 0 But was 1").
+            const float interval = 0.25f;
+            Helpers.JitterSampler = _ => interval;
+            float start = Time.time;
 
             Coroutine coroutine = host.StartFunctionAsCoroutine(
                 host.Increment,
-                0.05f,
+                interval,
                 useJitter: true
             );
 
             try
             {
-                yield return null;
-                Assert.AreEqual(
-                    0,
-                    host.InvocationCount,
-                    "Jitter should delay the first invocation."
-                );
+                Assert.AreEqual(0, host.InvocationCount, "Jitter must not invoke synchronously.");
 
-                float timeout = Time.time + 0.5f;
+                float timeout = Time.time + interval + 5f;
                 while (host.InvocationCount == 0 && Time.time < timeout)
                 {
                     yield return null;
@@ -382,6 +375,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
                     host.InvocationCount,
                     0,
                     "Invocation never occurred after jitter delay elapsed."
+                );
+                Assert.GreaterOrEqual(
+                    Time.time - start,
+                    interval * 0.5f,
+                    "Jitter should delay the first invocation."
                 );
             }
             finally
@@ -482,7 +480,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
             Coroutine first = host.ExecuteFunctionAfterFrame(() => executed++);
             Coroutine second = host.ExecuteFunctionAfterFrame(() => executed++);
 
-            yield return new WaitForEndOfFrame();
+            yield return null;
             yield return null;
 
             Assert.AreEqual(2, executed);
@@ -572,7 +570,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
 
             Coroutine coroutine = host.ExecuteFunctionAfterFrame(host.Increment);
             Assert.AreEqual(0, host.InvocationCount);
-            yield return new WaitForEndOfFrame();
+            yield return null;
             yield return null;
             Assert.AreEqual(1, host.InvocationCount);
             host.StopCoroutine(coroutine);
@@ -800,44 +798,16 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
 
             child.transform.SetParent(parent.transform);
 
-            bool originalIgnore = LogAssert.ignoreFailingMessages;
-            try
-            {
-                // Suppress possible tag-not-defined errors
-                LogAssert.ignoreFailingMessages = true;
+            child.tag = "Player";
 
-                bool playerTagSet = true;
-                try
-                {
-                    // May throw if tag does not exist in this project
-                    child.tag = "Player";
-                }
-                catch (UnityException)
-                {
-                    playerTagSet = false;
-                }
+            GameObject foundPlayerDirect = parent.GetPlayerObjectInChildHierarchy();
+            GameObject foundPlayerTag = parent.GetTagObjectInChildHierarchy("Player");
 
-                GameObject foundPlayerDirect = parent.GetPlayerObjectInChildHierarchy();
-                GameObject foundPlayerTag = parent.GetTagObjectInChildHierarchy("Player");
+            Assert.AreSame(child, foundPlayerDirect);
+            Assert.AreSame(child, foundPlayerTag);
 
-                if (playerTagSet)
-                {
-                    Assert.AreSame(child, foundPlayerDirect);
-                    Assert.AreSame(child, foundPlayerTag);
-                }
-                else
-                {
-                    Assert.IsTrue(foundPlayerDirect == null);
-                    Assert.IsTrue(foundPlayerTag == null);
-                }
-
-                GameObject foundNonExistent = parent.GetTagObjectInChildHierarchy("NonExistent");
-                Assert.IsTrue(foundNonExistent == null);
-            }
-            finally
-            {
-                LogAssert.ignoreFailingMessages = originalIgnore;
-            }
+            GameObject foundMissingBuiltinTag = parent.GetTagObjectInChildHierarchy("EditorOnly");
+            Assert.IsTrue(foundMissingBuiltinTag == null);
 
             yield break;
         }
@@ -993,13 +963,17 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
             yield break;
         }
 
-        [UnityTest]
-        public IEnumerator GetAngleWithSpeedRotatesTowardsTarget()
+        [Test]
+        public void GetAngleWithSpeedRotatesTowardsTarget()
         {
-            yield return null;
+            // GetAngleWithSpeed scales the turn by the time step, so it does nothing when the step is
+            // 0. A headless standalone player can report Time.deltaTime == 0 indefinitely, which would
+            // leave the vector unchanged and fail the asserts. Use the explicit-deltaTime overload so
+            // the rotation is exercised deterministically on every platform (no frame-timing dependency).
+            const float deltaTime = 1f / 60f;
             Vector2 current = Vector2.right;
             Vector2 target = Vector2.up;
-            Vector2 rotated = Helpers.GetAngleWithSpeed(target, current, 180f);
+            Vector2 rotated = Helpers.GetAngleWithSpeed(target, current, 180f, deltaTime);
             Assert.Greater(rotated.y, current.y);
             Assert.Less(rotated.x, current.x);
         }

@@ -11,6 +11,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers.Utils
     using UnityEngine;
     using WallstopStudios.UnityHelpers.Core.Attributes;
     using WallstopStudios.UnityHelpers.Core.DataStructure;
+    using WallstopStudios.UnityHelpers.Core.Extension;
     using WallstopStudios.UnityHelpers.Editor.Core.Helper;
     using WallstopStudios.UnityHelpers.Editor.Settings;
     using WallstopStudios.UnityHelpers.Editor.Utils;
@@ -125,7 +126,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers.Utils
         /// Eager initialization would trigger Cache construction during domain reload,
         /// which can cause deadlocks during Unity's "Open Project: Open Scene" phase.
         /// </summary>
-        private static Cache<int, Editor> _editorCache;
+        private static Cache<long, Editor> _editorCache;
 
         /// <summary>
         /// Cache for Unity Editor instances, keyed by object instance ID.
@@ -133,8 +134,8 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers.Utils
         /// to properly destroy Editor instances when they are evicted from the cache.
         /// Lazy-initialized to prevent Unity Editor hangs during static initialization.
         /// </summary>
-        private static Cache<int, Editor> EditorCache =>
-            _editorCache ??= CacheBuilder<int, Editor>
+        private static Cache<long, Editor> EditorCache =>
+            _editorCache ??= CacheBuilder<long, Editor>
                 .NewBuilder()
                 .MaximumSize(MaxEditorCacheSize)
                 .OnEviction(OnEditorEvicted)
@@ -147,7 +148,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers.Utils
         /// <param name="key">The instance ID of the evicted editor.</param>
         /// <param name="editor">The Editor instance being evicted.</param>
         /// <param name="reason">The reason for eviction.</param>
-        private static void OnEditorEvicted(int key, Editor editor, EvictionReason reason)
+        private static void OnEditorEvicted(long key, Editor editor, EvictionReason reason)
         {
             if (editor != null)
             {
@@ -329,7 +330,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers.Utils
                 return null;
             }
 
-            int key = value.GetInstanceID();
+            long key = value.GetUnityObjectId();
 
             // Check if we have a valid cached editor (TryGet marks it as accessed for LRU)
             if (EditorCache.TryGet(key, out Editor cachedEditor) && cachedEditor != null)
@@ -416,9 +417,11 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers.Utils
         /// <param name="parentInstanceId">The instance ID of the parent object.</param>
         /// <param name="propertyPath">The property path.</param>
         /// <returns>A unique foldout key string.</returns>
-        public static string BuildFoldoutKey(int parentInstanceId, string propertyPath)
+        public static string BuildFoldoutKey(long parentInstanceId, string propertyPath)
         {
-            return GetCachedIntString(parentInstanceId) + FoldoutKeySeparator + propertyPath;
+            return parentInstanceId.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + FoldoutKeySeparator
+                + propertyPath;
         }
 
         /// <summary>
@@ -437,11 +440,11 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers.Utils
         /// <param name="parentInstanceId">The instance ID of the parent object.</param>
         /// <param name="propertyPath">The property path.</param>
         /// <returns>A unique scroll key string.</returns>
-        public static string BuildScrollKey(int parentInstanceId, string propertyPath)
+        public static string BuildScrollKey(long parentInstanceId, string propertyPath)
         {
             return ScrollKeyPrefix
                 + FoldoutKeySeparator
-                + GetCachedIntString(parentInstanceId)
+                + parentInstanceId.ToString(System.Globalization.CultureInfo.InvariantCulture)
                 + FoldoutKeySeparator
                 + propertyPath;
         }

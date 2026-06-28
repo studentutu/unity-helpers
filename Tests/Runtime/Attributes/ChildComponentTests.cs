@@ -4,7 +4,6 @@
 namespace WallstopStudios.UnityHelpers.Tests.Attributes
 {
     using System;
-    using System.Collections;
     using System.Collections.Generic;
     using System.Linq;
     using Components;
@@ -19,8 +18,8 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
     [NUnit.Framework.Category("Fast")]
     public sealed class ChildComponentTests : CommonTestBase
     {
-        [UnityTest]
-        public IEnumerator Nominal()
+        [Test]
+        public void Nominal()
         {
             GameObject parent = Track(
                 new GameObject("Parent-ChildComponentTest", typeof(SpriteRenderer))
@@ -89,11 +88,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             Assert.IsTrue(expect.inclusiveChild != null);
             Assert.AreEqual(childLevel1.GetComponent<SpriteRenderer>(), expect.inclusiveChild);
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator IncludeInactiveFalseSkipsInactiveDescendents()
+        [Test]
+        public void IncludeInactiveFalseSkipsInactiveDescendents()
         {
             GameObject root = Track(
                 new GameObject("Child-InactiveRoot", typeof(ChildAssignmentTester))
@@ -139,32 +138,33 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
                 tester.descendentsAllList
             );
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator MissingRequiredChildLogsError()
+        [Test]
+        public void MissingRequiredChildLogsError()
         {
             GameObject root = new("Child-Missing", typeof(ChildMissingTester));
             Track(root);
             ChildMissingTester tester = root.GetComponent<ChildMissingTester>();
 
-            LogAssert.Expect(
-                LogType.Error,
-                new System.Text.RegularExpressions.Regex(
-                    @"^\d+(\.\d+)?\|Child-Missing\[ChildMissingTester\]\|Unable to find child component of type UnityEngine\.SpriteRenderer for field 'requiredRenderer'$"
-                )
+            ExpectMissingRelationalComponentError(
+                "Child-Missing",
+                "ChildMissingTester",
+                "child",
+                "UnityEngine.SpriteRenderer",
+                "requiredRenderer"
             );
 
             tester.AssignChildComponents();
 
             Assert.IsTrue(tester.requiredRenderer == null);
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator SkipIfAssignedPreservesExistingValues()
+        [Test]
+        public void SkipIfAssignedPreservesExistingValues()
         {
             GameObject root = Track(
                 new GameObject("ChildSkipIfAssigned", typeof(ChildSkipIfAssignedTester))
@@ -194,11 +194,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             // Verify normal assignments (without skipIfAssigned) were assigned
             Assert.AreSame(rootRenderer, tester.normalChild);
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator SkipIfAssignedDoesNotSkipEmptyCollections()
+        [Test]
+        public void SkipIfAssignedDoesNotSkipEmptyCollections()
         {
             GameObject root = Track(
                 new GameObject("ChildSkipEmpty", typeof(ChildSkipIfAssignedTester))
@@ -219,11 +219,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             Assert.AreEqual(2, tester.preAssignedChildArray.Length);
             Assert.AreEqual(2, tester.preAssignedChildList.Count);
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator SkipIfAssignedWithNullUnityObjectStillAssigns()
+        [Test]
+        public void SkipIfAssignedWithNullUnityObjectStillAssigns()
         {
             GameObject root = new("ChildSkipNull", typeof(ChildSkipIfAssignedTester));
             Track(root);
@@ -238,11 +238,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             // Null Unity object should have been reassigned
             Assert.AreSame(rootRenderer, tester.preAssignedChild);
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator OptionalChildDoesNotLogErrorWhenMissing()
+        [Test]
+        public void OptionalChildDoesNotLogErrorWhenMissing()
         {
             GameObject root = new("ChildOptional", typeof(ChildOptionalTester));
             Track(root);
@@ -252,11 +252,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             tester.AssignChildComponents();
 
             Assert.IsTrue(tester.optionalRenderer == null);
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator OnlyDescendentsExcludesSelf()
+        [Test]
+        public void OnlyDescendentsExcludesSelf()
         {
             GameObject root = new("ChildOnlyDescendents", typeof(SpriteRenderer));
             Track(root);
@@ -281,46 +281,46 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
                 tester.includeSelfArray
             );
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator OnlyDescendentsWithNoChildrenReturnsNothing()
+        [Test]
+        public void OnlyDescendentsWithNoChildrenReturnsNothing()
         {
             GameObject root = new("ChildNoDescendents", typeof(ChildOnlyDescendentsTester));
             Track(root);
             ChildOnlyDescendentsTester tester = root.GetComponent<ChildOnlyDescendentsTester>();
 
-            // Expect error for descendentOnly (SpriteRenderer)
-            LogAssert.Expect(
-                LogType.Error,
-                new System.Text.RegularExpressions.Regex(
-                    @"^\d+(\.\d+)?\|ChildNoDescendents\[ChildOnlyDescendentsTester\]\|Unable to find child component of type UnityEngine\.SpriteRenderer for field 'descendentOnly'$"
-                )
+            const string owner = "ChildNoDescendents";
+            const string ownerType = "ChildOnlyDescendentsTester";
+            // No SpriteRenderer on root or descendants, so every required field reports missing.
+            ExpectMissingRelationalComponentError(
+                owner,
+                ownerType,
+                "child",
+                "UnityEngine.SpriteRenderer",
+                "descendentOnly"
             );
-
-            // Expect error for descendentOnlyArray (SpriteRenderer[])
-            LogAssert.Expect(
-                LogType.Error,
-                new System.Text.RegularExpressions.Regex(
-                    @"^\d+(\.\d+)?\|ChildNoDescendents\[ChildOnlyDescendentsTester\]\|Unable to find child component of type UnityEngine\.SpriteRenderer\[\] for field 'descendentOnlyArray'$"
-                )
+            ExpectMissingRelationalComponentError(
+                owner,
+                ownerType,
+                "child",
+                "UnityEngine.SpriteRenderer[]",
+                "descendentOnlyArray"
             );
-
-            // Expect error for includeSelf (SpriteRenderer) - no SpriteRenderer on root
-            LogAssert.Expect(
-                LogType.Error,
-                new System.Text.RegularExpressions.Regex(
-                    @"^\d+(\.\d+)?\|ChildNoDescendents\[ChildOnlyDescendentsTester\]\|Unable to find child component of type UnityEngine\.SpriteRenderer for field 'includeSelf'$"
-                )
+            ExpectMissingRelationalComponentError(
+                owner,
+                ownerType,
+                "child",
+                "UnityEngine.SpriteRenderer",
+                "includeSelf"
             );
-
-            // Expect error for includeSelfArray (SpriteRenderer[]) - no SpriteRenderer on root
-            LogAssert.Expect(
-                LogType.Error,
-                new System.Text.RegularExpressions.Regex(
-                    @"^\d+(\.\d+)?\|ChildNoDescendents\[ChildOnlyDescendentsTester\]\|Unable to find child component of type UnityEngine\.SpriteRenderer\[\] for field 'includeSelfArray'$"
-                )
+            ExpectMissingRelationalComponentError(
+                owner,
+                ownerType,
+                "child",
+                "UnityEngine.SpriteRenderer[]",
+                "includeSelfArray"
             );
 
             tester.AssignChildComponents();
@@ -328,11 +328,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             Assert.IsTrue(tester.descendentOnly == null);
             Assert.AreEqual(0, tester.descendentOnlyArray.Length);
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator DeepHierarchyHandledCorrectly()
+        [Test]
+        public void DeepHierarchyHandledCorrectly()
         {
             GameObject root = new("ChildDeepRoot", typeof(SpriteRenderer));
             Track(root);
@@ -354,11 +354,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             Assert.AreEqual(11, tester.allChildren.Length);
             Assert.AreEqual(11, tester.allChildrenList.Count);
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator BreadthFirstSearchOrderVerified()
+        [Test]
+        public void BreadthFirstSearchOrderVerified()
         {
             GameObject root = new("ChildBFSRoot", typeof(SpriteRenderer));
             Track(root);
@@ -385,11 +385,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             // grandchild1 should be after both children
             Assert.AreSame(grandchild1.GetComponent<SpriteRenderer>(), tester.allChildren[3]);
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator InactiveGameObjectExcludedWhenIncludeInactiveFalse()
+        [Test]
+        public void InactiveGameObjectExcludedWhenIncludeInactiveFalse()
         {
             GameObject root = new("ChildInactiveRoot", typeof(ChildInactiveTester));
             Track(root);
@@ -423,11 +423,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
                 tester.includeInactiveArray
             );
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator DisabledBehaviourExcludedWhenIncludeInactiveFalse()
+        [Test]
+        public void DisabledBehaviourExcludedWhenIncludeInactiveFalse()
         {
             GameObject root = new("ChildDisabledRoot", typeof(ChildDisabledBehaviourTester));
             Track(root);
@@ -438,20 +438,21 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             child.transform.SetParent(root.transform);
             BoxCollider childCollider = child.GetComponent<BoxCollider>();
             childCollider.enabled = false;
-            yield return null;
 
             // Expect error logs for fields with includeInactive=false when disabled Behaviour is present
-            LogAssert.Expect(
-                LogType.Error,
-                new System.Text.RegularExpressions.Regex(
-                    "Unable to find child component of type UnityEngine.BoxCollider for field 'activeOnly'$"
-                )
+            ExpectMissingRelationalComponentError(
+                "ChildDisabledRoot",
+                "ChildDisabledBehaviourTester",
+                "child",
+                "UnityEngine.BoxCollider",
+                "activeOnly"
             );
-            LogAssert.Expect(
-                LogType.Error,
-                new System.Text.RegularExpressions.Regex(
-                    "Unable to find child component of type UnityEngine.BoxCollider\\[\\] for field 'activeOnlyArray'$"
-                )
+            ExpectMissingRelationalComponentError(
+                "ChildDisabledRoot",
+                "ChildDisabledBehaviourTester",
+                "child",
+                "UnityEngine.BoxCollider[]",
+                "activeOnlyArray"
             );
 
             tester.AssignChildComponents();
@@ -464,11 +465,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             Assert.AreSame(childCollider, tester.includeInactive);
             CollectionAssert.AreEquivalent(new[] { childCollider }, tester.includeInactiveArray);
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator MultipleChildComponentsOnSameGameObject()
+        [Test]
+        public void MultipleChildComponentsOnSameGameObject()
         {
             GameObject root = new("ChildMultiRoot", typeof(ChildMultiComponentTester));
             Track(root);
@@ -489,11 +490,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             CollectionAssert.Contains(tester.colliders, second);
             CollectionAssert.Contains(tester.colliders, third);
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator ComplexHierarchyWithMultipleBranches()
+        [Test]
+        public void ComplexHierarchyWithMultipleBranches()
         {
             GameObject root = new("ChildComplexRoot", typeof(SpriteRenderer));
             Track(root);
@@ -524,11 +525,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             Assert.AreEqual(6, tester.allChildren.Length);
             Assert.AreEqual(6, tester.allChildrenList.Count);
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator CacheIsolationBetweenDifferentComponentTypes()
+        [Test]
+        public void CacheIsolationBetweenDifferentComponentTypes()
         {
             GameObject root = new("ChildCacheRoot", typeof(SpriteRenderer));
             Track(root);
@@ -543,11 +544,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             Assert.IsTrue(testerB.childRenderer != null);
             Assert.AreSame(testerA.childRenderer, testerB.childRenderer);
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator RepeatedAssignmentsAreIdempotent()
+        [Test]
+        public void RepeatedAssignmentsAreIdempotent()
         {
             GameObject root = new("ChildIdempotentRoot", typeof(SpriteRenderer));
             Track(root);
@@ -566,11 +567,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             // Repeated calls should produce same results
             CollectionAssert.AreEqual(firstAssignment, secondAssignment);
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator ChildComponentWithMixedActiveStatesInHierarchy()
+        [Test]
+        public void ChildComponentWithMixedActiveStatesInHierarchy()
         {
             GameObject root = new("ChildMixedRoot", typeof(ChildInactiveTester));
             Track(root);
@@ -605,11 +606,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             // includeInactive should find all
             Assert.AreEqual(4, tester.includeInactiveArray.Length);
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator ChildComponentFindsFirstMatchInBFSOrder()
+        [Test]
+        public void ChildComponentFindsFirstMatchInBFSOrder()
         {
             GameObject root = new("ChildFirstMatch", typeof(SpriteRenderer));
             Track(root);
@@ -628,11 +629,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             // Should find root first (self is included by default)
             Assert.AreSame(root.GetComponent<SpriteRenderer>(), tester.single);
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator ChildComponentHandlesEmptyHierarchy()
+        [Test]
+        public void ChildComponentHandlesEmptyHierarchy()
         {
             GameObject root = new("ChildEmpty", typeof(ChildOptionalTester));
             Track(root);
@@ -642,11 +643,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             tester.AssignChildComponents();
 
             Assert.IsTrue(tester.optionalRenderer == null);
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator AssignChildComponentsNullsPreAssignedConcreteFieldWhenNoChildFound()
+        [Test]
+        public void AssignChildComponentsNullsPreAssignedConcreteFieldWhenNoChildFound()
         {
             GameObject root = Track(
                 new GameObject("ChildOverwriteNull", typeof(ChildOverwriteNullTester))
@@ -662,11 +663,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             tester.AssignChildComponents();
 
             Assert.IsTrue(tester.concreteField == null);
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator AssignChildComponentsNullsPreAssignedInterfaceFieldWhenNoChildFound()
+        [Test]
+        public void AssignChildComponentsNullsPreAssignedInterfaceFieldWhenNoChildFound()
         {
             GameObject root = Track(
                 new GameObject("ChildOverwriteNullInterface", typeof(ChildOverwriteNullTester))
@@ -682,7 +683,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             tester.AssignChildComponents();
 
             Assert.IsTrue(tester.interfaceField == null);
-            yield break;
+            return;
         }
     }
 }

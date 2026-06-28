@@ -148,7 +148,6 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
             public string FullPath { get; set; }
             public string FileName { get; set; }
             public string RelativeDirectory { get; set; }
-            public string Hash { get; set; }
             public AnimationStatus Status { get; set; } = AnimationStatus.Unknown;
             public string DestinationRelativePath { get; set; }
             public bool Selected { get; set; } = true;
@@ -591,7 +590,6 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
                                 _animationSourcePathRelative,
                                 directoryName.SanitizePath()
                             ),
-                            Hash = GetDependencyHashString(sourceRelPath),
                         };
                         fileInfo.DestinationRelativePath = Path.Combine(
                                 _animationDestinationPathRelative,
@@ -606,7 +604,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
                         {
                             ShowProgress(
                                 "Analyzing Animations",
-                                $"Hashing: {fileInfo.FileName}",
+                                $"Gathering: {fileInfo.FileName}",
                                 current / total
                             );
                         }
@@ -699,7 +697,6 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
                                     _animationDestinationPathRelative,
                                     Path.GetDirectoryName(destRelPath).SanitizePath()
                                 ),
-                                Hash = GetDependencyHashString(destRelPath),
                                 Status = AnimationStatus.Unknown,
                                 DestinationRelativePath = destRelPath,
                                 Selected = true,
@@ -1137,23 +1134,10 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
             return string.Empty;
         }
 
-        private string GetDependencyHashString(string assetPath)
-        {
-            try
-            {
-                if (string.IsNullOrWhiteSpace(assetPath))
-                {
-                    return string.Empty;
-                }
-                Hash128 hash = AssetDatabase.GetAssetDependencyHash(assetPath);
-                return hash.ToString();
-            }
-            catch (Exception e)
-            {
-                this.LogError($"Error getting dependency hash for {assetPath}.", e);
-                return string.Empty;
-            }
-        }
+        // Content comparison passes tolerance 0 so WallMath.Approximately falls back to its built-in
+        // relative fudge (~1e-6 * magnitude): tight enough to catch real animation edits (a looser
+        // tolerance would mask changes and skip a needed re-copy) while ignoring float round-trip noise.
+        private const float ContentEqualityTolerance = 0f;
 
         /// <summary>
         /// Compares the content of two animation clips to determine if they are functionally identical.
@@ -1187,90 +1171,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
                     destinationAssetPath
                 );
 
-                if (sourceClip == null || destClip == null)
-                {
-                    return false;
-                }
-
-                // Compare basic clip properties
-                if (!Mathf.Approximately(sourceClip.frameRate, destClip.frameRate))
-                {
-                    return false;
-                }
-                if (!Mathf.Approximately(sourceClip.length, destClip.length))
-                {
-                    return false;
-                }
-                if (sourceClip.wrapMode != destClip.wrapMode)
-                {
-                    return false;
-                }
-                if (sourceClip.isLooping != destClip.isLooping)
-                {
-                    return false;
-                }
-                if (sourceClip.legacy != destClip.legacy)
-                {
-                    return false;
-                }
-
-                // Compare animation clip settings
-                AnimationClipSettings sourceSettings = AnimationUtility.GetAnimationClipSettings(
-                    sourceClip
-                );
-                AnimationClipSettings destSettings = AnimationUtility.GetAnimationClipSettings(
-                    destClip
-                );
-                if (!AreAnimationClipSettingsEqual(sourceSettings, destSettings))
-                {
-                    return false;
-                }
-
-                // Compare animation events
-                AnimationEvent[] sourceEvents = AnimationUtility.GetAnimationEvents(sourceClip);
-                AnimationEvent[] destEvents = AnimationUtility.GetAnimationEvents(destClip);
-                if (!AreAnimationEventsEqual(sourceEvents, destEvents))
-                {
-                    return false;
-                }
-
-                // Compare float curve bindings
-                EditorCurveBinding[] sourceFloatBindings = AnimationUtility.GetCurveBindings(
-                    sourceClip
-                );
-                EditorCurveBinding[] destFloatBindings = AnimationUtility.GetCurveBindings(
-                    destClip
-                );
-                if (
-                    !AreCurveBindingsEqual(
-                        sourceClip,
-                        destClip,
-                        sourceFloatBindings,
-                        destFloatBindings
-                    )
-                )
-                {
-                    return false;
-                }
-
-                // Compare object reference curve bindings (for sprites, etc.)
-                EditorCurveBinding[] sourceObjBindings =
-                    AnimationUtility.GetObjectReferenceCurveBindings(sourceClip);
-                EditorCurveBinding[] destObjBindings =
-                    AnimationUtility.GetObjectReferenceCurveBindings(destClip);
-                if (
-                    !AreObjectReferenceCurveBindingsEqual(
-                        sourceClip,
-                        destClip,
-                        sourceObjBindings,
-                        destObjBindings
-                    )
-                )
-                {
-                    return false;
-                }
-
-                return true;
+                return AreAnimationClipsContentEqual(sourceClip, destClip);
             }
             catch (Exception e)
             {
@@ -1280,6 +1181,99 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
                 );
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Compares the content of two already-loaded animation clips to determine if they are
+        /// functionally identical. Pure (no asset I/O): operates on in-memory
+        /// <see cref="AnimationClip"/> instances, so it is unit-testable without importing assets.
+        /// </summary>
+        /// <param name="sourceClip">The source animation clip (may be null).</param>
+        /// <param name="destClip">The destination animation clip (may be null).</param>
+        /// <returns>True if the animation clips have identical content, false otherwise.</returns>
+        internal static bool AreAnimationClipsContentEqual(
+            AnimationClip sourceClip,
+            AnimationClip destClip
+        )
+        {
+            if (sourceClip == null || destClip == null)
+            {
+                return false;
+            }
+
+            // Compare basic clip properties
+            if (!sourceClip.frameRate.Approximately(destClip.frameRate, ContentEqualityTolerance))
+            {
+                return false;
+            }
+            if (!sourceClip.length.Approximately(destClip.length, ContentEqualityTolerance))
+            {
+                return false;
+            }
+            if (sourceClip.wrapMode != destClip.wrapMode)
+            {
+                return false;
+            }
+            if (sourceClip.isLooping != destClip.isLooping)
+            {
+                return false;
+            }
+            if (sourceClip.legacy != destClip.legacy)
+            {
+                return false;
+            }
+
+            // Compare animation clip settings
+            AnimationClipSettings sourceSettings = AnimationUtility.GetAnimationClipSettings(
+                sourceClip
+            );
+            AnimationClipSettings destSettings = AnimationUtility.GetAnimationClipSettings(
+                destClip
+            );
+            if (!AreAnimationClipSettingsEqual(sourceSettings, destSettings))
+            {
+                return false;
+            }
+
+            // Compare animation events
+            AnimationEvent[] sourceEvents = AnimationUtility.GetAnimationEvents(sourceClip);
+            AnimationEvent[] destEvents = AnimationUtility.GetAnimationEvents(destClip);
+            if (!AreAnimationEventsEqual(sourceEvents, destEvents))
+            {
+                return false;
+            }
+
+            // Compare float curve bindings
+            EditorCurveBinding[] sourceFloatBindings = AnimationUtility.GetCurveBindings(
+                sourceClip
+            );
+            EditorCurveBinding[] destFloatBindings = AnimationUtility.GetCurveBindings(destClip);
+            if (
+                !AreCurveBindingsEqual(sourceClip, destClip, sourceFloatBindings, destFloatBindings)
+            )
+            {
+                return false;
+            }
+
+            // Compare object reference curve bindings (for sprites, etc.)
+            EditorCurveBinding[] sourceObjBindings =
+                AnimationUtility.GetObjectReferenceCurveBindings(sourceClip);
+            EditorCurveBinding[] destObjBindings = AnimationUtility.GetObjectReferenceCurveBindings(
+                destClip
+            );
+            if (
+                !AreObjectReferenceCurveBindingsEqual(
+                    sourceClip,
+                    destClip,
+                    sourceObjBindings,
+                    destObjBindings
+                )
+            )
+            {
+                return false;
+            }
+
+            return true;
         }
 
         private static bool AreAnimationClipSettingsEqual(
@@ -1295,7 +1289,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
             {
                 return false;
             }
-            if (a.cycleOffset != b.cycleOffset)
+            if (!a.cycleOffset.Approximately(b.cycleOffset, ContentEqualityTolerance))
             {
                 return false;
             }
@@ -1319,11 +1313,11 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
             {
                 return false;
             }
-            if (!Mathf.Approximately(a.startTime, b.startTime))
+            if (!a.startTime.Approximately(b.startTime, ContentEqualityTolerance))
             {
                 return false;
             }
-            if (!Mathf.Approximately(a.stopTime, b.stopTime))
+            if (!a.stopTime.Approximately(b.stopTime, ContentEqualityTolerance))
             {
                 return false;
             }
@@ -1348,7 +1342,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
             {
                 AnimationEvent evtA = a[i];
                 AnimationEvent evtB = b[i];
-                if (!Mathf.Approximately(evtA.time, evtB.time))
+                if (!evtA.time.Approximately(evtB.time, ContentEqualityTolerance))
                 {
                     return false;
                 }
@@ -1356,7 +1350,12 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
                 {
                     return false;
                 }
-                if (!Mathf.Approximately(evtA.floatParameter, evtB.floatParameter))
+                if (
+                    !evtA.floatParameter.Approximately(
+                        evtB.floatParameter,
+                        ContentEqualityTolerance
+                    )
+                )
                 {
                     return false;
                 }
@@ -1582,27 +1581,27 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
             {
                 Keyframe kA = keysA[i];
                 Keyframe kB = keysB[i];
-                if (!Mathf.Approximately(kA.time, kB.time))
+                if (!kA.time.Approximately(kB.time, ContentEqualityTolerance))
                 {
                     return false;
                 }
-                if (!Mathf.Approximately(kA.value, kB.value))
+                if (!kA.value.Approximately(kB.value, ContentEqualityTolerance))
                 {
                     return false;
                 }
-                if (!Mathf.Approximately(kA.inTangent, kB.inTangent))
+                if (!kA.inTangent.Approximately(kB.inTangent, ContentEqualityTolerance))
                 {
                     return false;
                 }
-                if (!Mathf.Approximately(kA.outTangent, kB.outTangent))
+                if (!kA.outTangent.Approximately(kB.outTangent, ContentEqualityTolerance))
                 {
                     return false;
                 }
-                if (!Mathf.Approximately(kA.inWeight, kB.inWeight))
+                if (!kA.inWeight.Approximately(kB.inWeight, ContentEqualityTolerance))
                 {
                     return false;
                 }
-                if (!Mathf.Approximately(kA.outWeight, kB.outWeight))
+                if (!kA.outWeight.Approximately(kB.outWeight, ContentEqualityTolerance))
                 {
                     return false;
                 }
@@ -1636,7 +1635,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
             {
                 ObjectReferenceKeyframe kA = a[i];
                 ObjectReferenceKeyframe kB = b[i];
-                if (!Mathf.Approximately(kA.time, kB.time))
+                if (!kA.time.Approximately(kB.time, ContentEqualityTolerance))
                 {
                     return false;
                 }

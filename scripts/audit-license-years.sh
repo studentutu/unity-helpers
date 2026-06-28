@@ -22,7 +22,7 @@ set -euo pipefail
 
 # Configuration
 REPO_START_YEAR=2023
-CURRENT_YEAR=2026
+CURRENT_YEAR=$(date +%Y)
 
 # Parse arguments
 OUTPUT_MODE="default"
@@ -71,9 +71,15 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 # --- Cache setup ---
-CACHE_FILE="$REPO_ROOT/.git/license-year-cache"
+CACHE_FILE=$(git rev-parse --git-path license-year-cache 2>/dev/null || true)
+if [[ -z "$CACHE_FILE" ]]; then
+    CACHE_FILE="$REPO_ROOT/.git/license-year-cache"
+elif [[ "$CACHE_FILE" != /* ]]; then
+    CACHE_FILE="$REPO_ROOT/$CACHE_FILE"
+fi
 declare -A year_cache=()
 cache_dirty=false
+declare -a tracked_csharp_files=()
 
 # Load cache into associative array
 load_cache() {
@@ -112,6 +118,7 @@ no_git_history_files=0
 
 # Arrays for mismatches
 declare -a mismatch_list=()
+declare -a missing_header_list=()
 
 # Extract year from copyright header
 get_header_year() {
@@ -127,21 +134,50 @@ get_header_year() {
     fi
 }
 
+normalize_repo_path() {
+    local path="$1"
+    local rel
+
+    path="${path//\\//}"
+    if [[ "$path" =~ ^[A-Za-z]:/ ]]; then
+        if command -v cygpath >/dev/null 2>&1; then
+            path=$(cygpath -u "$path")
+        else
+            return 1
+        fi
+    fi
+
+    if [[ "$path" = /* ]]; then
+        case "$path" in
+            "$REPO_ROOT"/*)
+                rel="${path#"$REPO_ROOT"/}"
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    else
+        rel="$path"
+    fi
+
+    rel="${rel#./}"
+    printf '%s\n' "$rel"
+}
+
 # Get git creation year for a file (with cache)
 # Sets global _git_year to avoid subshell (cache writes must stay in main shell)
 _git_year=""
 get_git_creation_year() {
-    local file="$1"
-    local rel="$2"
+    local rel="$1"
 
     # Check cache first
-    if [[ "$USE_CACHE" == true && -n "${year_cache[$rel]+_}" ]]; then
+    if [[ -n "${year_cache[$rel]+_}" ]]; then
         _git_year="${year_cache[$rel]}"
         return
     fi
 
     # Use --follow to track across renames, --diff-filter=A for additions only
-    _git_year=$(git log --follow --diff-filter=A --format=%ad --date=format:%Y -- "$file" 2>/dev/null | tail -1)
+    _git_year=$(git log --follow --diff-filter=A --format=%ad --date=format:%Y -- "$rel" 2>/dev/null | tail -1)
 
     if [[ -n "$_git_year" ]]; then
         # Store in cache
@@ -150,24 +186,103 @@ get_git_creation_year() {
     fi
 }
 
+load_tracked_csharp_files() {
+    tracked_csharp_files=()
+    while IFS= read -r -d '' file; do
+        tracked_csharp_files+=("$file")
+    done < <(git ls-files -z -- '*.cs' | sort -z)
+}
+
+prime_git_creation_year_cache() {
+    local missing_count=0
+    local rel
+    for rel in "${tracked_csharp_files[@]}"; do
+        if [[ -z "${year_cache[$rel]+_}" ]]; then
+            missing_count=$((missing_count + 1))
+        fi
+    done
+
+    if [[ "$missing_count" -eq 0 ]]; then
+        return
+    fi
+
+    declare -A history_years=()
+    local history_year=""
+    local line
+    local status
+    local first_path
+    local second_path
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^YEAR:([0-9]{4})$ ]]; then
+            history_year="${BASH_REMATCH[1]}"
+            continue
+        fi
+
+        if [[ -z "$line" ]]; then
+            continue
+        fi
+
+        IFS=$'\t' read -r status first_path second_path <<< "$line"
+        case "$status" in
+            A*)
+                history_years["$first_path"]="$history_year"
+                ;;
+            C*)
+                if [[ -n "${history_years[$first_path]+_}" ]]; then
+                    history_years["$second_path"]="${history_years[$first_path]}"
+                else
+                    history_years["$second_path"]="$history_year"
+                fi
+                ;;
+            R*)
+                if [[ -n "${history_years[$first_path]+_}" ]]; then
+                    history_years["$second_path"]="${history_years[$first_path]}"
+                    unset "history_years[$first_path]"
+                else
+                    history_years["$second_path"]="$history_year"
+                fi
+                ;;
+            D*)
+                unset "history_years[$first_path]"
+                ;;
+        esac
+    done < <(
+        git -c diff.renameLimit=999999 log \
+            --reverse \
+            --name-status \
+            --diff-filter=ACRD \
+            --format='YEAR:%ad' \
+            --date=format:%Y \
+            --find-renames \
+            --find-copies-harder
+    )
+
+    for rel in "${tracked_csharp_files[@]}"; do
+        if [[ -n "${history_years[$rel]+_}" ]]; then
+            year_cache["$rel"]="${history_years[$rel]}"
+            cache_dirty=true
+        fi
+    done
+}
+
 # Print CSV header if in CSV mode
 if [[ "$OUTPUT_MODE" == "csv" ]]; then
     echo "file,current_year,git_year,status"
 fi
 
-# Audit a single file (absolute path)
+# Audit a single file (repo-relative path)
 audit_file() {
-    local file="$1"
+    local rel_path="$1"
+    local file="$REPO_ROOT/$rel_path"
     ((total_files++)) || true
-
-    # Get relative path for cleaner output
-    rel_path="${file#$REPO_ROOT/}"
 
     # Get header year
     header_year=$(get_header_year "$file")
 
     if [[ -z "$header_year" ]]; then
         ((missing_header_files++)) || true
+        missing_header_list+=("$rel_path")
         if [[ "$OUTPUT_MODE" == "csv" ]]; then
             echo "$rel_path,MISSING,N/A,missing_header"
         elif [[ "$OUTPUT_MODE" == "default" ]]; then
@@ -177,7 +292,7 @@ audit_file() {
     fi
 
     # Get git creation year (sets _git_year global, no subshell)
-    get_git_creation_year "$file" "$rel_path"
+    get_git_creation_year "$rel_path"
     git_year="$_git_year"
 
     if [[ -z "$git_year" ]]; then
@@ -225,23 +340,26 @@ audit_file() {
 if [[ "$PATHS_MODE" == true ]]; then
     # Incremental mode: audit only specified files
     for p in "${PATH_ARGS[@]}"; do
-        # Resolve to absolute path
-        if [[ "$p" = /* ]]; then
-            abs_path="$p"
-        else
-            abs_path="$REPO_ROOT/$p"
+        rel_path=$(normalize_repo_path "$p" || true)
+        if [[ -z "${rel_path:-}" ]]; then
+            echo "WARNING: File outside repository skipped: $p" >&2
+            continue
         fi
-        if [[ -f "$abs_path" ]]; then
-            audit_file "$abs_path"
+
+        if [[ -f "$REPO_ROOT/$rel_path" && "$rel_path" == *.cs ]]; then
+            audit_file "$rel_path"
         else
             echo "WARNING: File not found: $p" >&2
         fi
     done
 else
-    # Full scan: find all .cs files
-    while IFS= read -r -d '' file; do
+    # Full scan: only tracked .cs files. Ignored local worktrees must never
+    # affect repository validation.
+    load_tracked_csharp_files
+    prime_git_creation_year_cache
+    for file in "${tracked_csharp_files[@]}"; do
         audit_file "$file"
-    done < <(find "$REPO_ROOT" -name "*.cs" -type f -print0 | sort -z)
+    done
 fi
 
 # Print summary
@@ -258,6 +376,20 @@ if [[ "$OUTPUT_MODE" != "csv" ]]; then
     if [[ $mismatched_files -gt 0 || $missing_header_files -gt 0 ]]; then
         needs_update=$((mismatched_files + missing_header_files))
         echo "Files needing update: $needs_update"
+        if [[ ${#mismatch_list[@]} -gt 0 ]]; then
+            echo ""
+            echo "Mismatched files:"
+            for mismatch in "${mismatch_list[@]}"; do
+                echo "  $mismatch"
+            done
+        fi
+        if [[ ${#missing_header_list[@]} -gt 0 ]]; then
+            echo ""
+            echo "Missing header files:"
+            for missing_header in "${missing_header_list[@]}"; do
+                echo "  $missing_header"
+            done
+        fi
         exit 1
     else
         echo "All files have correct copyright years!"

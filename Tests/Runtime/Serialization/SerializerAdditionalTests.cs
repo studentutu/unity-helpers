@@ -24,6 +24,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
     [TestFixture]
     [NUnit.Framework.Category("Slow")]
     [NUnit.Framework.Category("Integration")]
+    [WallstopStudios.UnityHelpers.Tests.Core.SkipUnderIL2CPP]
     public sealed class SerializerAdditionalTests
     {
         private string _tempDirectory;
@@ -339,7 +340,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
         {
             TestMessage msg = new() { Id = 1, Name = "Test" };
 
-            Assert.Throws<InvalidEnumArgumentException>(() =>
+            Assert.Throws<SerializationConfigurationException>(() =>
                 Serializer.Serialize(msg, (SerializationType)999)
             );
         }
@@ -349,7 +350,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
         {
             byte[] data = { 1, 2, 3 };
 
-            Assert.Throws<InvalidEnumArgumentException>(() =>
+            Assert.Throws<SerializationConfigurationException>(() =>
                 Serializer.Deserialize<TestMessage>(data, (SerializationType)999)
             );
         }
@@ -359,7 +360,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
         {
             TestMessage msg = new() { Id = 1, Name = "Test" };
 
-            Assert.Throws<InvalidEnumArgumentException>(() =>
+            Assert.Throws<SerializationConfigurationException>(() =>
 #pragma warning disable CS0618 // Type or member is obsolete
                 Serializer.Serialize(msg, SerializationType.None)
 #pragma warning restore CS0618 // Type or member is obsolete
@@ -371,7 +372,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
         {
             byte[] data = { 1, 2, 3 };
 
-            Assert.Throws<InvalidEnumArgumentException>(() =>
+            Assert.Throws<SerializationConfigurationException>(() =>
 #pragma warning disable CS0618 // Type or member is obsolete
                 Serializer.Deserialize<TestMessage>(data, SerializationType.None)
 #pragma warning restore CS0618 // Type or member is obsolete
@@ -446,7 +447,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
             TestMessage msg = new() { Id = 1 };
             byte[] buffer = null;
 
-            Assert.Throws<InvalidEnumArgumentException>(() =>
+            Assert.Throws<SerializationConfigurationException>(() =>
                 Serializer.Serialize(msg, (SerializationType)999, ref buffer)
             );
         }
@@ -794,7 +795,8 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
         {
             byte[] emptyData = Array.Empty<byte>();
 
-            Assert.Throws<System.Runtime.Serialization.SerializationException>(() =>
+            // Empty input is an input-contract violation (InputValidation stage).
+            Assert.Throws<SerializationInputException>(() =>
                 Serializer.BinaryDeserialize<TestMessage>(emptyData)
             );
         }
@@ -804,7 +806,9 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
         {
             byte[] corruptedData = { 0xFF, 0xFF, 0xFF, 0xFF };
 
-            Assert.Throws<System.Runtime.Serialization.SerializationException>(() =>
+            // Corrupt (non-null, non-empty) payload surfaces as CorruptDataException with the
+            // underlying codec failure preserved as InnerException.
+            Assert.Throws<SerializationCorruptDataException>(() =>
                 Serializer.BinaryDeserialize<TestMessage>(corruptedData)
             );
         }
@@ -812,25 +816,26 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
         [Test]
         public void ProtoDeserializeNullDataThrowsException()
         {
-            Assert.Throws<ProtoException>(() => Serializer.ProtoDeserialize<TestMessage>(null));
+            Assert.Throws<SerializationInputException>(() =>
+                Serializer.ProtoDeserialize<TestMessage>(null)
+            );
         }
 
         [Test]
-        public void ProtoDeserializeEmptyArrayReturnsDefaultInstance()
+        public void ProtoDeserializeEmptyArrayThrowsInputException()
         {
             byte[] emptyData = Array.Empty<byte>();
 
-            // Protobuf allows deserializing empty data as default instance
-            TestMessage result = Serializer.ProtoDeserialize<TestMessage>(emptyData);
-
-            Assert.NotNull(result);
-            Assert.AreEqual(0, result.Id);
+            Assert.Throws<SerializationInputException>(() =>
+                Serializer.ProtoDeserialize<TestMessage>(emptyData)
+            );
         }
 
         [Test]
         public void ProtoDeserializeWithTypeNullDataThrowsException()
         {
-            Assert.Throws<ArgumentException>(() =>
+            // Null payload is an input-contract violation (InputValidation stage).
+            Assert.Throws<SerializationInputException>(() =>
                 Serializer.ProtoDeserialize<object>(null, typeof(TestMessage))
             );
         }
@@ -840,7 +845,9 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
         {
             byte[] data = { 1, 2, 3 };
 
-            Assert.Throws<ArgumentNullException>(() =>
+            // A null target Type is a configuration error (the dispatch cannot proceed), surfaced
+            // as SerializationConfigurationException — not swallowed by Try*.
+            Assert.Throws<SerializationConfigurationException>(() =>
                 Serializer.ProtoDeserialize<object>(data, null)
             );
         }
@@ -913,7 +920,9 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
             string filePath = Path.Combine(_tempDirectory, "invalid.json");
             File.WriteAllText(filePath, "{ invalid json content }");
 
-            Assert.Throws<JsonException>(() => Serializer.ReadFromJsonFile<TestMessage>(filePath));
+            Assert.Throws<SerializationCorruptDataException>(() =>
+                Serializer.ReadFromJsonFile<TestMessage>(filePath)
+            );
         }
     }
 }

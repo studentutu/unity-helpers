@@ -54,7 +54,7 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
         private static string[] CachedLayerNames = Array.Empty<string>();
         private static bool LayerCacheInitialized;
 
-#if UNITY_EDITOR
+#if UNITY_EDITOR || UNITY_INCLUDE_TESTS
         internal static Func<string[]> LayerNameProvider
         {
             get => _layerNameProvider ?? DefaultLayerNameProvider;
@@ -63,8 +63,12 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
 
         private static Func<string[]> _layerNameProvider;
 
+#if UNITY_EDITOR
         private static readonly Func<string[]> DefaultLayerNameProvider = () =>
             InternalEditorUtility.layers;
+#else
+        private static readonly Func<string[]> DefaultLayerNameProvider = () => Array.Empty<string>();
+#endif
 
         internal static void ResetLayerNameProvider()
         {
@@ -361,10 +365,10 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                 return CachedLayerNames;
             }
 
-#if UNITY_EDITOR
+#if UNITY_EDITOR || UNITY_INCLUDE_TESTS
             try
             {
-                // Prefer the editor API when available
+                // Prefer the editor API or an injected test provider when available.
                 string[] editorLayers = LayerNameProvider?.Invoke();
                 if (editorLayers is { Length: > 0 })
                 {
@@ -913,7 +917,17 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
 
         private static IEnumerator FunctionAfterFrame(Action action)
         {
-            yield return Buffers.WaitForEndOfFrame;
+            if (IsRunningInBatchMode)
+            {
+                // WaitForEndOfFrame never resumes under headless -batchmode -nographics
+                // (there is no end-of-frame render signal), so the callback would silently
+                // never fire. Advancing one frame is the headless-safe equivalent.
+                yield return null;
+            }
+            else
+            {
+                yield return Buffers.WaitForEndOfFrame;
+            }
             action();
         }
 
@@ -1461,12 +1475,38 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
             float rotationSpeed
         )
         {
+            return GetAngleWithSpeed(
+                targetDirection,
+                currentDirection,
+                rotationSpeed,
+                Time.deltaTime
+            );
+        }
+
+        /// <summary>
+        /// Rotates a direction vector toward a target direction at a fixed angular speed, using an
+        /// explicit time step instead of <see cref="Time.deltaTime"/>. Prefer this overload from a
+        /// fixed-timestep loop, or wherever the caller must control the step deterministically (e.g.
+        /// tests, replays, headless simulation, where <see cref="Time.deltaTime"/> may be 0).
+        /// </summary>
+        /// <param name="targetDirection">Desired direction (normalized or not).</param>
+        /// <param name="currentDirection">Current direction (normalized or not).</param>
+        /// <param name="rotationSpeed">Degrees per second.</param>
+        /// <param name="deltaTime">Seconds elapsed this step.</param>
+        /// <returns>New normalized direction after applying rotation for the given step.</returns>
+        public static Vector2 GetAngleWithSpeed(
+            Vector2 targetDirection,
+            Vector2 currentDirection,
+            float rotationSpeed,
+            float deltaTime
+        )
+        {
             if (targetDirection == Vector2.zero)
             {
                 return currentDirection;
             }
 
-            float turnRatePerFrame = rotationSpeed * Time.deltaTime;
+            float turnRatePerFrame = rotationSpeed * deltaTime;
             float angleDiscrepancy = Vector2.SignedAngle(currentDirection, targetDirection);
             float turnRateThisFrame;
             if (Math.Sign(angleDiscrepancy) < 0)

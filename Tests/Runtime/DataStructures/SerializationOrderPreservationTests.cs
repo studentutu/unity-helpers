@@ -19,6 +19,7 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
     /// </summary>
     [TestFixture]
     [NUnit.Framework.Category("Fast")]
+    [WallstopStudios.UnityHelpers.Tests.Core.SkipUnderIL2CPP]
     public sealed class SerializationOrderPreservationTests : CommonTestBase
     {
         [Test]
@@ -646,9 +647,11 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
             };
 
             // Expect the error log about null key being skipped
-            LogAssert.Expect(
-                LogType.Error,
-                "SerializableSortedDictionary<System.String, System.Int32> skipped serialized entry at index 1 because the key reference was null."
+            ExpectError(
+                LogType.Warning,
+                System.Text.RegularExpressions.Regex.Escape(
+                    "SerializableSortedDictionary<System.String, System.Int32> skipped serialized entry at index 1 because the key reference was null."
+                )
             );
 
             // Act
@@ -673,9 +676,11 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
             };
 
             // Expect the error log about null entry being skipped
-            LogAssert.Expect(
-                LogType.Error,
-                "SerializableSet<System.String> skipped serialized entry at index 1 because the value reference was null."
+            ExpectError(
+                LogType.Warning,
+                System.Text.RegularExpressions.Regex.Escape(
+                    "SerializableSet<System.String> skipped serialized entry at index 1 because the value reference was null."
+                )
             );
 
             // Act
@@ -2290,9 +2295,11 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
             };
 
             // Expect the error log about null key being skipped
-            LogAssert.Expect(
-                LogType.Error,
-                "SerializableDictionary<System.String, System.Int32> skipped serialized entry at index 1 because the key reference was null."
+            ExpectError(
+                LogType.Warning,
+                System.Text.RegularExpressions.Regex.Escape(
+                    "SerializableDictionary<System.String, System.Int32> skipped serialized entry at index 1 because the key reference was null."
+                )
             );
 
             // Act

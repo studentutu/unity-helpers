@@ -13,6 +13,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
 
     [TestFixture]
     [NUnit.Framework.Category("Fast")]
+    [WallstopStudios.UnityHelpers.Tests.Core.SkipUnderIL2CPP]
     public sealed class ProtoSerializationCorrectnessTests
     {
         [ProtoContract]
@@ -207,9 +208,15 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
             IRandom rng = new PcgRandom(12345);
             for (int i = 0; i < 2_000; ++i)
             {
+                // Id is i+1 (never 0) so no iteration produces an ALL-default message. An all-default
+                // [ProtoContract] serializes to zero bytes, which the deserializer deliberately
+                // rejects as empty input (see ProtoDeserializeEmptyBytesThrowsSerializationInputException
+                // -- empty payload is a contract error, not an all-default round-trip). This test
+                // exercises pooled-stream state leakage across mixed payload sizes, not the
+                // empty-input contract, so it keeps at least one non-default field per message.
                 EdgeCaseMessage msg = new()
                 {
-                    Id = i,
+                    Id = i + 1,
                     Name = i % 3 == 0 ? null : ("N_" + i),
                     Values = i % 4 == 0 ? null : new List<int> { i, i + 1, i + 2 },
                     Data = i % 5 == 0 ? null : MakeBytes(rng.Next(0, 8192)),
@@ -470,11 +477,14 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
             {
                 Id = 999,
                 Name = "LargeCollection",
-                Values = new List<int>(100_000),
+                Values = new List<int>(10_000),
                 Data = MakeBytes(1024 * 1024), // 1 MB
             };
 
-            for (int i = 0; i < 100_000; ++i)
+            // 10k still exercises large-collection round-trip paths while keeping
+            // this correctness test in the fast suite (full-scale throughput is
+            // covered by the Performance-categorized benchmark suite).
+            for (int i = 0; i < 10_000; ++i)
             {
                 msg.Values.Add(i);
             }
@@ -484,7 +494,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
 
             Assert.AreEqual(msg.Id, clone.Id);
             Assert.AreEqual(msg.Name, clone.Name);
-            Assert.AreEqual(100_000, clone.Values.Count);
+            Assert.AreEqual(10_000, clone.Values.Count);
             CollectionAssert.AreEqual(msg.Values, clone.Values);
             Assert.AreEqual(1024 * 1024, clone.Data.Length);
             CollectionAssert.AreEqual(msg.Data, clone.Data);

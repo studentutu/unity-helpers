@@ -19,6 +19,20 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
     {
         // Tracking handled by CommonTestBase
 
+        [SetUp]
+        public override void BaseSetUp()
+        {
+            base.BaseSetUp();
+            ChildSpawner.ClearSpawnedPrefabsForTesting();
+        }
+
+        [TearDown]
+        public override void TearDown()
+        {
+            ChildSpawner.ClearSpawnedPrefabsForTesting();
+            base.TearDown();
+        }
+
         [UnityTest]
         public IEnumerator SpawnsChildrenOnAwake()
         {
@@ -58,6 +72,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             childSpawner._dontDestroyOnLoad = false;
 
             Assert.AreEqual(0, spawner.transform.childCount);
+            InvokeStartOnce(childSpawner);
             yield return null;
 
             Assert.AreEqual(1, spawner.transform.childCount);
@@ -94,6 +109,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             childSpawner._prefabs = new[] { prefab1, prefab2, prefab3 };
             childSpawner._dontDestroyOnLoad = false;
             Assert.AreEqual(0, spawner.transform.childCount);
+            InvokeStartOnce(childSpawner);
             yield return null;
 
             Assert.AreEqual(3, spawner.transform.childCount);
@@ -111,6 +127,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             childSpawner._dontDestroyOnLoad = false;
 
             Assert.AreEqual(0, spawner.transform.childCount);
+            InvokeStartOnce(childSpawner);
             yield return null;
 
             Assert.AreEqual(1, spawner.transform.childCount);
@@ -131,12 +148,15 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             childSpawner._dontDestroyOnLoad = false;
 
             Assert.AreEqual(0, spawner.transform.childCount);
-            LogAssert.Expect(
-                LogType.Error,
+            // Emitted via the package logger (this.LogWarn), which is compiled out in a
+            // non-development player -- ExpectWallstopLog skips the expectation there.
+            ExpectWallstopLog(
+                LogType.Warning,
                 new System.Text.RegularExpressions.Regex(
                     "Duplicate child prefab detected: TestPrefab"
                 )
             );
+            InvokeStartOnce(childSpawner);
             yield return null;
 
             Assert.AreEqual(3, spawner.transform.childCount);
@@ -173,6 +193,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
 
             childSpawner.SendMessage("Awake");
             Assert.AreEqual(0, spawner.transform.childCount);
+            InvokeStartOnce(childSpawner);
             yield return null;
 
             Assert.AreEqual(1, spawner.transform.childCount);
@@ -189,6 +210,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             childSpawner._dontDestroyOnLoad = false;
 
             Assert.AreEqual(0, spawner.transform.childCount);
+            InvokeStartOnce(childSpawner);
             yield return null;
 
             Assert.AreEqual(0, spawner.transform.childCount);
@@ -205,8 +227,12 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             childSpawner._prefabs = new[] { prefab, null };
             childSpawner._dontDestroyOnLoad = false;
 
-            LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(".*"));
+            ExpectWallstopLog(
+                LogType.Warning,
+                new System.Text.RegularExpressions.Regex("Unexpectedly null prefab")
+            );
             Assert.AreEqual(0, spawner.transform.childCount);
+            InvokeStartOnce(childSpawner);
             yield return null;
 
             Assert.AreEqual(1, spawner.transform.childCount);
@@ -224,11 +250,9 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             childSpawner._dontDestroyOnLoad = false;
 
             childSpawner.SendMessage("Awake");
-            yield return null;
-
             Assert.AreEqual(1, spawner.transform.childCount);
 
-            childSpawner.SendMessage("Start");
+            InvokeStartOnce(childSpawner);
             yield return null;
 
             Assert.AreEqual(1, spawner.transform.childCount);
@@ -252,6 +276,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             childSpawner._dontDestroyOnLoad = false;
 
             Assert.AreEqual(0, spawner.transform.childCount);
+            InvokeStartOnce(childSpawner);
             yield return null;
 
             Assert.AreEqual(1, spawner.transform.childCount);
@@ -274,6 +299,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             childSpawner._spawnMethod = ChildSpawnMethod.Start;
             childSpawner._developmentOnlyPrefabs = new[] { prefab };
             childSpawner._dontDestroyOnLoad = false;
+            InvokeStartOnce(childSpawner);
             yield return null;
 
             Assert.AreEqual(1, spawner.transform.childCount);
@@ -290,10 +316,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             childSpawner._spawnMethod = ChildSpawnMethod.Start;
             childSpawner._prefabs = new[] { prefab, prefab };
             childSpawner._dontDestroyOnLoad = false;
-            LogAssert.Expect(
-                LogType.Error,
+            ExpectWallstopLog(
+                LogType.Warning,
                 new System.Text.RegularExpressions.Regex(".*Duplicate.*")
             );
+            InvokeStartOnce(childSpawner);
             yield return null;
 
             Assert.AreEqual(2, spawner.transform.childCount);
@@ -302,9 +329,9 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
         [UnityTest]
         public IEnumerator HandlesMultipleSpawnMethodsCombined()
         {
-            GameObject prefab = new("TestPrefab");
+            GameObject prefab = Track(new GameObject("TestPrefab"));
             Object.DontDestroyOnLoad(prefab);
-            GameObject spawner = new("Spawner", typeof(ChildSpawner));
+            GameObject spawner = Track(new GameObject("Spawner", typeof(ChildSpawner)));
             ChildSpawner childSpawner = spawner.GetComponent<ChildSpawner>();
 
             childSpawner._spawnMethod =
@@ -332,7 +359,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             childSpawner._prefabs = new[] { prefab1, prefab2, prefab3 };
             childSpawner._dontDestroyOnLoad = false;
 
-            childSpawner.SendMessage("Start");
+            InvokeStartOnce(childSpawner);
             yield return null;
 
             Assert.IsTrue(
@@ -363,7 +390,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             childSpawner._prefabs = new[] { prefab };
             childSpawner._dontDestroyOnLoad = false;
 
-            childSpawner.SendMessage("Start");
+            InvokeStartOnce(childSpawner);
             yield return null;
 
             Transform child = spawner.transform.GetChild(0);
@@ -391,6 +418,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             childSpawner._developmentOnlyPrefabs = new[] { prefab3 };
             childSpawner._dontDestroyOnLoad = false;
             Assert.AreEqual(0, spawner.transform.childCount);
+            InvokeStartOnce(childSpawner);
             yield return null;
 
             Assert.AreEqual(3, spawner.transform.childCount);
@@ -424,6 +452,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             childSpawner._spawnMethod = ChildSpawnMethod.Start;
             childSpawner._prefabs = new[] { prefab };
             childSpawner._dontDestroyOnLoad = true;
+            InvokeStartOnce(childSpawner);
             yield return null;
 
             Assert.IsTrue(spawner.IsDontDestroyOnLoad());
@@ -432,15 +461,15 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
         [UnityTest]
         public IEnumerator DoesNotDontDestroyOnLoadWhenDisabled()
         {
-            GameObject prefab = new("TestPrefab");
-            GameObject spawner = new("Spawner", typeof(ChildSpawner));
+            GameObject prefab = Track(new GameObject("TestPrefab"));
+            GameObject spawner = Track(new GameObject("Spawner", typeof(ChildSpawner)));
             ChildSpawner childSpawner = spawner.GetComponent<ChildSpawner>();
 
             childSpawner._spawnMethod = ChildSpawnMethod.Start;
             childSpawner._prefabs = new[] { prefab };
             childSpawner._dontDestroyOnLoad = false;
 
-            childSpawner.SendMessage("Start");
+            InvokeStartOnce(childSpawner);
             yield return null;
 
             Assert.IsFalse(spawner.IsDontDestroyOnLoad());
@@ -449,9 +478,9 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
         [UnityTest]
         public IEnumerator AllSpawnMethodsWorkIndependently()
         {
-            GameObject prefabAwake = new("AwakePrefab");
-            GameObject prefabOnEnabled = new("OnEnabledPrefab");
-            GameObject prefabStart = new("StartPrefab");
+            GameObject prefabAwake = Track(new GameObject("AwakePrefab"));
+            GameObject prefabOnEnabled = Track(new GameObject("OnEnabledPrefab"));
+            GameObject prefabStart = Track(new GameObject("StartPrefab"));
 
             GameObject spawnerAwake = Track(new GameObject("SpawnerAwake", typeof(ChildSpawner)));
             ChildSpawner childSpawnerAwake = spawnerAwake.GetComponent<ChildSpawner>();
@@ -484,12 +513,18 @@ namespace WallstopStudios.UnityHelpers.Tests.Utils
             Assert.AreEqual(1, spawnerOnEnabled.transform.childCount);
             Assert.AreEqual(0, spawnerStart.transform.childCount);
 
-            childSpawnerStart.SendMessage("Start");
+            InvokeStartOnce(childSpawnerStart);
             Assert.AreEqual(1, spawnerAwake.transform.childCount);
             Assert.AreEqual(1, spawnerOnEnabled.transform.childCount);
             Assert.AreEqual(1, spawnerStart.transform.childCount);
 
             yield return null;
+        }
+
+        private static void InvokeStartOnce(ChildSpawner childSpawner)
+        {
+            childSpawner.SendMessage(nameof(ChildSpawnMethod.Start));
+            childSpawner._spawnMethod = ChildSpawnMethod.Awake;
         }
     }
 }

@@ -32,20 +32,20 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
         {
             if (providerType == null)
             {
-                Debug.LogError($"{attributeName}: Provider type cannot be null.");
+                Debug.LogWarning($"{attributeName}: Provider type cannot be null.");
                 return EmptyFactory;
             }
 
             if (string.IsNullOrEmpty(methodName))
             {
-                Debug.LogError($"{attributeName}: Method name cannot be null or empty.");
+                Debug.LogWarning($"{attributeName}: Method name cannot be null or empty.");
                 return EmptyFactory;
             }
 
             MethodInfo resolved = ResolveProviderMethod(providerType, methodName);
             if (resolved == null)
             {
-                Debug.LogError(
+                Debug.LogWarning(
                     $"{attributeName}: Could not locate a parameterless static method named '{methodName}' on {providerType.FullName} that returns {typeof(T).Name} values."
                 );
                 return EmptyFactory;
@@ -63,8 +63,17 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
                 }
                 catch (Exception e)
                 {
-                    Debug.LogError(
-                        $"{attributeName}: Invocation of '{providerType.FullName}.{methodName}' threw {e.GetType().Name}."
+                    // Unwrap TargetInvocationException so the reported type is the exception the
+                    // provider method actually threw. The cached invoker can be reflection-based
+                    // (MethodInfo.Invoke) -- always so under IL2CPP, where Expression.Compile is
+                    // unavailable -- which wraps the real exception; without unwrapping the message
+                    // would report "TargetInvocationException" instead of the caller's exception.
+                    Exception thrown = e
+                        is System.Reflection.TargetInvocationException { InnerException: { } inner }
+                        ? inner
+                        : e;
+                    Debug.LogWarning(
+                        $"{attributeName}: Invocation of '{providerType.FullName}.{methodName}' threw {thrown.GetType().Name}."
                     );
                     return Array.Empty<T>();
                 }
@@ -103,7 +112,7 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
                 return ConvertEnumerable(enumerable);
             }
 
-            Debug.LogError(
+            Debug.LogWarning(
                 $"{attributeName}: Method '{providerType.FullName}.{methodName}' returned incompatible type '{result.GetType().FullName}'. Expected {typeof(T).Name}[] or IEnumerable<{typeof(T).Name}>."
             );
             return Array.Empty<T>();
@@ -178,7 +187,7 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
         {
             if (valueType == null)
             {
-                Debug.LogError($"{attributeName}: Value type cannot be null.");
+                Debug.LogWarning($"{attributeName}: Value type cannot be null.");
                 return EmptyFactory;
             }
 
@@ -201,19 +210,19 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
         {
             if (valueType == null)
             {
-                Debug.LogError($"{attributeName}: Value type cannot be null.");
+                Debug.LogWarning($"{attributeName}: Value type cannot be null.");
                 return logErrorIfNotFound ? EmptyFactory : null;
             }
 
             if (providerType == null)
             {
-                Debug.LogError($"{attributeName}: Provider type cannot be null.");
+                Debug.LogWarning($"{attributeName}: Provider type cannot be null.");
                 return logErrorIfNotFound ? EmptyFactory : null;
             }
 
             if (string.IsNullOrEmpty(methodName))
             {
-                Debug.LogError($"{attributeName}: Method name cannot be null or empty.");
+                Debug.LogWarning($"{attributeName}: Method name cannot be null or empty.");
                 return logErrorIfNotFound ? EmptyFactory : null;
             }
 
@@ -222,7 +231,7 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
             {
                 if (logErrorIfNotFound)
                 {
-                    Debug.LogError(
+                    Debug.LogWarning(
                         $"{attributeName}: Could not locate a parameterless static method named '{methodName}' on {providerType.FullName} that returns enumerable values."
                     );
                     return EmptyFactory;
@@ -242,8 +251,17 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
                 }
                 catch (Exception e)
                 {
-                    Debug.LogError(
-                        $"{attributeName}: Invocation of '{providerType.FullName}.{methodName}' threw {e.GetType().Name}."
+                    // Unwrap TargetInvocationException so the reported type is the exception the
+                    // provider method actually threw. The cached invoker can be reflection-based
+                    // (MethodInfo.Invoke) -- always so under IL2CPP, where Expression.Compile is
+                    // unavailable -- which wraps the real exception; without unwrapping the message
+                    // would report "TargetInvocationException" instead of the caller's exception.
+                    Exception thrown = e
+                        is System.Reflection.TargetInvocationException { InnerException: { } inner }
+                        ? inner
+                        : e;
+                    Debug.LogWarning(
+                        $"{attributeName}: Invocation of '{providerType.FullName}.{methodName}' threw {thrown.GetType().Name}."
                     );
                     return Array.Empty<object>();
                 }
@@ -277,13 +295,13 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
 
             if (providerType == null)
             {
-                Debug.LogError($"{attributeName}: Provider type cannot be null.");
+                Debug.LogWarning($"{attributeName}: Provider type cannot be null.");
                 return logErrorIfNotFound ? EmptyFactory : null;
             }
 
             if (string.IsNullOrEmpty(methodName))
             {
-                Debug.LogError($"{attributeName}: Method name cannot be null or empty.");
+                Debug.LogWarning($"{attributeName}: Method name cannot be null or empty.");
                 return logErrorIfNotFound ? EmptyFactory : null;
             }
 
@@ -296,7 +314,7 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
             {
                 if (logErrorIfNotFound)
                 {
-                    Debug.LogError(
+                    Debug.LogWarning(
                         $"{attributeName}: Could not locate a parameterless static method named '{methodName}' on {providerType.FullName} that returns enumerable values."
                     );
                     return EmptyFactory;
@@ -308,7 +326,7 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
             {
                 if (logErrorIfNotFound)
                 {
-                    Debug.LogError(
+                    Debug.LogWarning(
                         $"{attributeName}: Method '{providerType.FullName}.{methodName}' must return an array or IEnumerable<T>."
                     );
                     return EmptyFactory;
@@ -333,8 +351,17 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
                 }
                 catch (Exception e)
                 {
-                    Debug.LogError(
-                        $"{attributeName}: Invocation of '{providerType.FullName}.{methodName}' threw {e.GetType().Name}."
+                    // Unwrap TargetInvocationException so the reported type is the exception the
+                    // provider method actually threw. The cached invoker can be reflection-based
+                    // (MethodInfo.Invoke) -- always so under IL2CPP, where Expression.Compile is
+                    // unavailable -- which wraps the real exception; without unwrapping the message
+                    // would report "TargetInvocationException" instead of the caller's exception.
+                    Exception thrown = e
+                        is System.Reflection.TargetInvocationException { InnerException: { } inner }
+                        ? inner
+                        : e;
+                    Debug.LogWarning(
+                        $"{attributeName}: Invocation of '{providerType.FullName}.{methodName}' threw {thrown.GetType().Name}."
                     );
                     return Array.Empty<object>();
                 }
@@ -368,7 +395,7 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
                 return NormalizeEnumerable(enumerable, valueType, attributeName);
             }
 
-            Debug.LogError(
+            Debug.LogWarning(
                 $"{attributeName}: Provider returned incompatible type '{result.GetType().FullName}'. Expected an array or IEnumerable."
             );
             return Array.Empty<object>();
@@ -390,7 +417,7 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
                 }
                 else
                 {
-                    Debug.LogError(
+                    Debug.LogWarning(
                         $"{attributeName}: Unable to convert value at index {index} to {valueType.FullName}."
                     );
                 }
@@ -418,7 +445,7 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
                 }
                 else
                 {
-                    Debug.LogError(
+                    Debug.LogWarning(
                         $"{attributeName}: Unable to convert value at index {index} to {valueType.FullName}."
                     );
                 }
@@ -452,7 +479,7 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
                 }
                 else
                 {
-                    Debug.LogError(
+                    Debug.LogWarning(
                         $"{attributeName}: Unable to convert value at index {index} to {valueType.FullName}."
                     );
                 }

@@ -1,6 +1,10 @@
 // MIT License - Copyright (c) 2025 wallstop
 // Full license text: https://github.com/wallstop/unity-helpers/blob/main/LICENSE
 
+#if UNITY_6000_0_OR_NEWER
+#define UNH_HAS_RIGIDBODY2D_LINEAR_VELOCITY
+#endif
+
 namespace WallstopStudios.UnityHelpers.Tests.Extensions
 {
     using System;
@@ -147,10 +151,21 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
             GameObject go = Track(new GameObject("RigidBodyTest", typeof(Rigidbody2D)));
 
             Rigidbody2D body = go.GetComponent<Rigidbody2D>();
+            // Rigidbody2D.velocity was renamed to linearVelocity in Unity 6000;
+            // mirror the version split that UnityExtensions.Stop uses internally.
+#if UNH_HAS_RIGIDBODY2D_LINEAR_VELOCITY
+            body.linearVelocity = new Vector2(10f, 5f);
+#else
             body.velocity = new Vector2(10f, 5f);
+#endif
             body.angularVelocity = 15f;
             body.Stop();
-            Assert.AreEqual(Vector2.zero, body.velocity);
+#if UNH_HAS_RIGIDBODY2D_LINEAR_VELOCITY
+            Vector2 stoppedVelocity = body.linearVelocity;
+#else
+            Vector2 stoppedVelocity = body.velocity;
+#endif
+            Assert.AreEqual(Vector2.zero, stoppedVelocity);
             Assert.AreEqual(0f, body.angularVelocity);
         }
 

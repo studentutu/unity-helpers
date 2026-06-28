@@ -5,7 +5,6 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
 {
     using System;
     using System.IO;
-    using System.Text.RegularExpressions;
     using NUnit.Framework;
     using UnityEngine;
     using UnityEngine.TestTools;
@@ -286,7 +285,14 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
         {
             string dataPath = Application.dataPath.SanitizePath();
             string result = DirectoryHelper.AbsoluteToUnityRelativePath(dataPath);
-            Assert.That(result, Does.Contain("Assets").Or.EqualTo(string.Empty));
+
+            // AbsoluteToUnityRelativePath strips the project-root prefix, so the relative form of
+            // Application.dataPath is its final segment. In the editor that segment is "Assets"; in a
+            // standalone player Application.dataPath ends in "<Product>_Data", so it is that folder
+            // name instead (NOT "Assets"). Assert the platform-agnostic invariant -- the final
+            // segment -- so the test holds in both, rather than baking in the editor-only "Assets".
+            string expected = Path.GetFileName(dataPath);
+            Assert.That(result, Is.EqualTo(expected).Or.EqualTo(string.Empty));
         }
 
         [Test]
@@ -823,16 +829,18 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
         [Test]
         public void EnsureDirectoryExistsWithBackslashPathThrowsOutsideAssets()
         {
+            // Editor-only contract (the ArgumentException guard is behind #if UNITY_EDITOR); in a
+            // standalone player EnsureDirectoryExists calls Directory.CreateDirectory and does not
+            // throw. See EnsureDirectoryExistsOutsideAssetsThrowsArgumentException.
+            if (!Application.isEditor)
+            {
+                Assert.Ignore(
+                    "EnsureDirectoryExists only enforces the Assets-folder requirement in the editor."
+                );
+            }
+
             const string inputPath = @"SomeFolder\SubFolder";
             const string expectedNormalizedPath = "SomeFolder/SubFolder";
-
-            // The production code normalizes backslashes to forward slashes before logging
-            LogAssert.Expect(
-                LogType.Error,
-                new Regex(
-                    $"Attempted to create directory outside of Assets: '{Regex.Escape(expectedNormalizedPath)}'"
-                )
-            );
 
             ArgumentException exception = Assert.Throws<ArgumentException>(
                 () => DirectoryHelper.EnsureDirectoryExists(inputPath),
@@ -841,9 +849,18 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
 
             Assert.That(
                 exception.Message,
-                Does.Contain("Assets"),
-                $"Exception message should mention Assets folder. Input: '{inputPath}'"
+                Does.Contain(expectedNormalizedPath),
+                $"Exception message should name the offending (normalized) path. Input: '{inputPath}'"
             );
+            Assert.That(
+                exception.Message,
+                Does.Contain("Assets"),
+                "Exception message should mention the Assets folder requirement."
+            );
+            Assert.That(exception.ParamName, Is.EqualTo("relativeDirectoryPath"));
+
+            // The failure must be signalled ONLY through the typed exception -- no error log.
+            LogAssert.NoUnexpectedReceived();
         }
 
         [Test]
@@ -896,13 +913,16 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
             string expectedNormalizedPath
         )
         {
-            // The production code normalizes backslashes to forward slashes before logging
-            LogAssert.Expect(
-                LogType.Error,
-                new Regex(
-                    $"Attempted to create directory outside of Assets: '{Regex.Escape(expectedNormalizedPath)}'"
-                )
-            );
+            // The "must be under Assets/" guard that throws ArgumentException lives behind
+            // #if UNITY_EDITOR in DirectoryHelper.EnsureDirectoryExists. In a standalone player the
+            // method instead calls Directory.CreateDirectory (no throw -- the AssetDatabase layout
+            // does not exist at runtime), so this editor-only contract cannot be asserted there.
+            if (!Application.isEditor)
+            {
+                Assert.Ignore(
+                    "EnsureDirectoryExists only enforces the Assets-folder requirement in the editor."
+                );
+            }
 
             ArgumentException exception = Assert.Throws<ArgumentException>(
                 () => DirectoryHelper.EnsureDirectoryExists(inputPath),
@@ -911,9 +931,18 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
 
             Assert.That(
                 exception.Message,
-                Does.Contain("Assets"),
-                $"Exception message should mention Assets folder. Input: '{inputPath}', Normalized: '{expectedNormalizedPath}'"
+                Does.Contain(expectedNormalizedPath),
+                $"Exception message should name the offending (normalized) path. Input: '{inputPath}', Normalized: '{expectedNormalizedPath}'"
             );
+            Assert.That(
+                exception.Message,
+                Does.Contain("Assets"),
+                $"Exception message should mention the Assets folder requirement. Input: '{inputPath}'"
+            );
+            Assert.That(exception.ParamName, Is.EqualTo("relativeDirectoryPath"));
+
+            // The failure must be signalled ONLY through the typed exception -- no error log.
+            LogAssert.NoUnexpectedReceived();
         }
 
         [Test]

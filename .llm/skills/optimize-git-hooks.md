@@ -4,12 +4,12 @@
 
 ## Purpose
 
-Patterns and techniques for keeping git hooks fast (<10s). Covers changed-file
-detection, caching, batching, parallel execution, and incremental checking.
+Patterns and techniques for keeping git hooks fast (<1s warm path). Covers changed-file
+detection, caching, batching, and incremental checking.
 
 ## When to Use This Skill
 
-- A hook takes more than 10 seconds on a typical push/commit
+- A hook takes more than 1 second on a typical warm push/commit
 - Adding a new check to an existing hook
 - Debugging slow hook performance
 - Deciding whether a check belongs in hook vs CI
@@ -18,13 +18,21 @@ detection, caching, batching, parallel execution, and incremental checking.
 
 ## Core Principle: CI Catches Repo-Wide, Hooks Catch Change-Local
 
-Hooks should be **fast** — validate only the files being committed/pushed. CI runs
-the full-repo validation as a safety net. This means:
+Hooks should be **fast** and last-resort. Agent workflows, `agent:preflight`,
+`validate:prepush`, and CI should catch normal lint/test/doc/spelling failures
+before Git invokes a hook. Local hooks validate only the files being
+committed/pushed and only the tiny set of checks that are cheap and safety
+critical.
+
+This means:
 
 - Hooks operate on changed files only (not all files)
 - Hooks skip checks when no relevant files changed
 - Hooks cache expensive computations
 - CI runs the same lint scripts without `--paths` for full coverage
+- Pre-push must not start Node or child PowerShell processes for ordinary
+  linting; route those checks through `npm run agent:preflight`,
+  `npm run validate:prepush`, and CI
 
 ---
 
@@ -33,25 +41,25 @@ the full-repo validation as a safety net. This means:
 See [git-hook-patterns](./git-hook-patterns.md)
 for the full stdin-parsing pattern.
 
-**Key optimization:** Collect changed files once using null-delimited git output, then classify them into arrays and reuse those arrays across checks:
+**Key optimization:** Let Git identify relevant changed content using
+null-delimited output and pickaxe patterns instead of reading each changed blob
+in a loop:
 
-```bash
-ALL_CHANGED_FILES=()
-while IFS= read -r -d '' file; do
-    ALL_CHANGED_FILES+=("$file")
-done < <(git diff --name-only -z ...)
-
-CHANGED_MD=()
-CHANGED_CS=()
-for file in "${ALL_CHANGED_FILES[@]}"; do
-    [[ "$file" =~ \.(md|markdown)$ ]] && CHANGED_MD+=("$file")
-    [[ "$file" =~ \.cs$ ]] && CHANGED_CS+=("$file")
-done
-
-if [ ${#CHANGED_MD[@]} -gt 0 ]; then
-    node scripts/run-node-bin.js markdownlint --config .markdownlint.json -- "${CHANGED_MD[@]}"
-fi
+```powershell
+$regionPattern = '^[[:space:]]*#[[:space:]]*(region|endregion)'
+$changedRegionFiles = & git diff `
+  --name-only `
+  -z `
+  --diff-filter=ACMRTUXB `
+  -G $regionPattern `
+  "$remoteSha..$localSha" `
+  -- '*.cs'
 ```
+
+This catches pushed changes that add, remove, or edit `#region`/`#endregion`
+directives. If a new branch has no discoverable merge base, a single
+`git grep <sha> -- '*.cs'` fallback is acceptable; avoid per-file `git show`
+loops.
 
 ---
 
@@ -81,7 +89,9 @@ bash scripts/audit-license-years.sh --summary --paths file1.cs file2.cs
 bash scripts/audit-license-years.sh --summary --no-cache
 ```
 
-**Performance:** First run ~60s (builds cache), subsequent runs with 5 changed files ~1-2s.
+**Performance:** Full uncached scans are too slow for pre-push. Pre-commit,
+agent preflight, and CI paths must pass changed files through `--paths`; warm
+cache checks for a few changed files should stay sub-second.
 
 ---
 
@@ -136,29 +146,14 @@ function Get-TrackedFiles {
 
 ---
 
-## Parallel Execution
-
-See [git-hook-patterns](./git-hook-patterns.md)
-for the full pattern. Key considerations:
-
-- **Group by runtime:** node checks (prettier, markdownlint, cspell), PowerShell
-  checks (lint-gitignore, lint-meta, check-eol), bash checks (license audit)
-- **No shared state:** Each group writes to its own stdout/stderr
-- **Error propagation:** Collect PIDs, `wait` each, set a failure flag
-- **Cleanup:** `trap cleanup EXIT INT TERM` kills background processes + removes temp files
-
----
-
 ## Performance Budget for Hooks
 
-| Category                  | Target   | Technique                     |
-| ------------------------- | -------- | ----------------------------- |
-| Changed-file detection    | <500ms   | Parse stdin, `git diff`       |
-| Node.js checks (group)    | <3s      | `--no-install`, changed files |
-| PowerShell checks (group) | <3s      | Batched git ops, `-Paths`     |
-| License audit             | <1s      | Cache + `--paths` incremental |
-| Bash checks (group)       | <2s      | Regex, no subprocesses        |
-| **Total pre-push**        | **<10s** | Parallel groups               |
+| Category               | Target  | Technique                                |
+| ---------------------- | ------- | ---------------------------------------- |
+| Changed-file detection | <100ms  | Parse stdin, `git diff`                  |
+| Native checks (group)  | <250ms  | Git pickaxe/grep, no per-file blob reads |
+| Artifact auto-cleanup  | <100ms  | Hook-name patterns + `git check-ignore`  |
+| **Total pre-push**     | **<1s** | Last-resort checks only                  |
 
 ---
 
@@ -166,12 +161,19 @@ for the full pattern. Key considerations:
 
 When adding a new check to the pre-push hook:
 
-1. **Classify changed files into a dedicated array** while walking the collected file list
-2. **Skip when empty:** `if [ ${#CHANGED_SET[@]} -gt 0 ]; then ... fi`
-3. **Add to the appropriate parallel group** (node/pwsh/bash)
-4. **Return non-zero** on failure from within the group function
-5. **Update the hook header comment** listing all checks
-6. **Add a test** in `scripts/tests/test-pre-push-changed-files.sh`
+1. First prove the check cannot live in `agent:preflight`, `validate:prepush`,
+   pre-commit, or CI. That is the default home for formatting, spelling, docs,
+   EOL, meta, and regression-suite validation.
+2. Measure the hook before and after. Any total pre-push time above 1 second is
+   a failure to investigate, not an accepted tradeoff.
+3. Prefer Git-native changed-content filters such as `git diff -G` over
+   collecting broad path lists and scanning each blob.
+4. **Skip when empty:** `if [ ${#CHANGED_SET[@]} -gt 0 ]; then ... fi`.
+5. Keep the check dependency-light and native. Avoid Node/PowerShell startup in
+   pre-push unless there is no viable last-resort alternative.
+6. **Return non-zero** on failure from within the check function.
+7. **Update the hook header comment** listing all checks.
+8. **Add a test** in `scripts/tests/test-pre-push-changed-files.sh`.
 
 ---
 

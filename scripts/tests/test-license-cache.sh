@@ -44,10 +44,17 @@ run_test() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 AUDIT_SCRIPT="$REPO_ROOT/scripts/audit-license-years.sh"
-CACHE_FILE="$REPO_ROOT/.git/license-year-cache"
 POST_REWRITE="$REPO_ROOT/.githooks/post-rewrite"
+POST_REWRITE_IMPL="$REPO_ROOT/.githooks/post-rewrite.ps1"
+PRE_COMMIT="$REPO_ROOT/.githooks/pre-commit"
+PRE_COMMIT_IMPL="$REPO_ROOT/.githooks/pre-commit.ps1"
 
 cd "$REPO_ROOT"
+CACHE_FILE="$(git rev-parse --git-path license-year-cache)"
+case "$CACHE_FILE" in
+    /*) ;;
+    *) CACHE_FILE="$REPO_ROOT/$CACHE_FILE" ;;
+esac
 
 # =============================================================================
 # Test: audit-license-years.sh exists and has required flags
@@ -84,6 +91,20 @@ else
 fi
 
 run_test
+if grep -q 'git rev-parse --git-path license-year-cache' "$AUDIT_SCRIPT" && grep -q 'rev-parse --git-path license-year-cache' "$POST_REWRITE_IMPL"; then
+    pass "License cache path is worktree-safe"
+else
+    fail "License cache path is worktree-safe" "git rev-parse --git-path license-year-cache" "not found"
+fi
+
+run_test
+if grep -q 'CURRENT_YEAR=$(date +%Y)' "$AUDIT_SCRIPT" && grep -q 'CURRENT_YEAR=$(date +%Y)' "$REPO_ROOT/scripts/update-license-headers.sh"; then
+    pass "License scripts compute current year dynamically"
+else
+    fail "License scripts compute current year dynamically" 'CURRENT_YEAR=$(date +%Y)' "not found"
+fi
+
+run_test
 if grep -q 'year_cache' "$AUDIT_SCRIPT"; then
     pass "Cache associative array exists"
 else
@@ -102,6 +123,41 @@ if grep -q 'load_cache' "$AUDIT_SCRIPT"; then
     pass "Cache load function defined"
 else
     fail "Cache load function defined" "load_cache function" "not found"
+fi
+
+run_test
+if grep -q "git ls-files -z -- '\\*.cs'" "$AUDIT_SCRIPT"; then
+    pass "Full audit enumerates tracked C# files through git ls-files"
+else
+    fail "Full audit uses tracked C# file enumeration" "git ls-files -z -- '*.cs'" "not found"
+fi
+
+run_test
+if grep -q -- '--find-copies-harder' "$AUDIT_SCRIPT" && grep -q 'diff.renameLimit=999999' "$AUDIT_SCRIPT"; then
+    pass "Full audit primes cache with copy-aware history"
+else
+    fail "Full audit primes cache with copy-aware history" "--find-copies-harder and diff.renameLimit=999999" "not found"
+fi
+
+run_test
+if grep -q "git ls-files -z -- '\\*.cs'" "$REPO_ROOT/scripts/update-license-headers.sh"; then
+    pass "License header updater enumerates tracked C# files through git ls-files"
+else
+    fail "License updater uses tracked C# file enumeration" "git ls-files -z -- '*.cs'" "not found"
+fi
+
+run_test
+if grep -q -- '--paths' "$REPO_ROOT/scripts/update-license-headers.sh"; then
+    pass "License header updater supports --paths for scoped recovery"
+else
+    fail "License updater supports --paths" "--paths present" "not found"
+fi
+
+run_test
+if ! grep -q 'audit-license-years.sh' "$PRE_COMMIT" "$PRE_COMMIT_IMPL" && grep -q 'Test-LicenseYearHeaders' "$REPO_ROOT/scripts/agent-preflight.ps1"; then
+    pass "License recovery is delegated out of pre-commit"
+else
+    fail "License recovery is delegated out of pre-commit" "no pre-commit license audit and agent-preflight coverage" "drift detected"
 fi
 
 run_test
@@ -139,6 +195,103 @@ if [ -n "$CS_FILE" ]; then
     fi
 else
     fail "Cache creation" "found .cs file" "no .cs files in repo"
+fi
+
+run_test
+if [ -n "$CS_FILE" ]; then
+    TMP_PARENT=$(mktemp -d)
+    TMP_WORKTREE="$TMP_PARENT/worktree"
+    if git worktree add -q "$TMP_WORKTREE" HEAD >/dev/null 2>&1; then
+        cp "$AUDIT_SCRIPT" "$TMP_WORKTREE/scripts/audit-license-years.sh"
+        expected_year=$(git -C "$TMP_WORKTREE" log --follow --diff-filter=A --format=%ad --date=format:%Y -- "$CS_FILE" | tail -1)
+        if [ -z "$expected_year" ]; then
+            expected_year=$(date +%Y)
+        elif [ "$expected_year" -lt 2023 ]; then
+            expected_year=2023
+        fi
+
+        wrong_year=2026
+        if [ "$expected_year" = "$wrong_year" ]; then
+            wrong_year=2025
+        fi
+
+        sed -i -E "1s/Copyright \\(c\\) [0-9]{4}/Copyright (c) $wrong_year/" "$TMP_WORKTREE/$CS_FILE"
+        set +e
+        summary_output=$(bash "$TMP_WORKTREE/scripts/audit-license-years.sh" --summary --paths "$CS_FILE" 2>&1)
+        summary_status=$?
+        set -e
+        if [ "$summary_status" -ne 0 ] &&
+            echo "$summary_output" | grep -Fq "Mismatched files:" &&
+            echo "$summary_output" | grep -Fq "$CS_FILE: has $wrong_year, expected $expected_year"; then
+            pass "Summary mode reports mismatched files"
+        else
+            fail "Summary mode reports mismatched files" "$CS_FILE mismatch details" "$summary_output"
+        fi
+        git worktree remove -f "$TMP_WORKTREE" >/dev/null 2>&1 || true
+    else
+        fail "Summary mode reports mismatched files" "temporary linked worktree" "git worktree add failed"
+    fi
+    rm -rf "$TMP_PARENT"
+else
+    fail "Summary mode diagnostics" "found .cs file" "no .cs files in repo"
+fi
+
+run_test
+TMP_COPY_REPO=$(mktemp -d)
+mkdir -p "$TMP_COPY_REPO/scripts" "$TMP_COPY_REPO/Runtime"
+cp "$AUDIT_SCRIPT" "$TMP_COPY_REPO/scripts/audit-license-years.sh"
+git -C "$TMP_COPY_REPO" init -q
+git -C "$TMP_COPY_REPO" config user.email "test@example.com"
+git -C "$TMP_COPY_REPO" config user.name "License Cache Test"
+cat > "$TMP_COPY_REPO/Runtime/Source.cs" <<'EOF_SOURCE'
+// MIT License - Copyright (c) 2023 wallstop
+// Full license text: https://github.com/wallstop/unity-helpers/blob/main/LICENSE
+
+public sealed class Source {}
+EOF_SOURCE
+git -C "$TMP_COPY_REPO" add Runtime/Source.cs scripts/audit-license-years.sh
+GIT_AUTHOR_DATE='2023-01-01T00:00:00Z' GIT_COMMITTER_DATE='2023-01-01T00:00:00Z' \
+    git -C "$TMP_COPY_REPO" commit -q -m 'Add source'
+cp "$TMP_COPY_REPO/Runtime/Source.cs" "$TMP_COPY_REPO/Runtime/Copied.cs"
+git -C "$TMP_COPY_REPO" add Runtime/Copied.cs
+GIT_AUTHOR_DATE='2025-01-01T00:00:00Z' GIT_COMMITTER_DATE='2025-01-01T00:00:00Z' \
+    git -C "$TMP_COPY_REPO" commit -q -m 'Copy source'
+set +e
+copy_output=$(bash "$TMP_COPY_REPO/scripts/audit-license-years.sh" --summary 2>&1)
+copy_status=$?
+set -e
+if [ "$copy_status" -eq 0 ] && echo "$copy_output" | grep -Fq "Matched years:          2"; then
+    pass "Full audit preserves copied file creation years"
+else
+    fail "Full audit preserves copied file creation years" "copy-aware full audit passes" "$copy_output"
+fi
+rm -rf "$TMP_COPY_REPO"
+
+run_test
+if [ -n "$CS_FILE" ]; then
+    TMP_PARENT=$(mktemp -d)
+    TMP_WORKTREE="$TMP_PARENT/worktree"
+    if git worktree add -q "$TMP_WORKTREE" HEAD >/dev/null 2>&1; then
+        cp "$AUDIT_SCRIPT" "$TMP_WORKTREE/scripts/audit-license-years.sh"
+        WORKTREE_CACHE=$(git -C "$TMP_WORKTREE" rev-parse --git-path license-year-cache)
+        case "$WORKTREE_CACHE" in
+            /*) ;;
+            *) WORKTREE_CACHE="$TMP_WORKTREE/$WORKTREE_CACHE" ;;
+        esac
+        rm -f "$WORKTREE_CACHE"
+        bash "$TMP_WORKTREE/scripts/audit-license-years.sh" --summary --paths "$CS_FILE" >/dev/null 2>&1 || true
+        if [ -f "$WORKTREE_CACHE" ]; then
+            pass "Linked worktree audit writes cache through git rev-parse --git-path"
+        else
+            fail "Linked worktree audit writes cache through git rev-parse --git-path" "cache file at $WORKTREE_CACHE" "not created"
+        fi
+        git worktree remove -f "$TMP_WORKTREE" >/dev/null 2>&1 || true
+    else
+        fail "Linked worktree audit writes cache through git rev-parse --git-path" "temporary linked worktree" "git worktree add failed"
+    fi
+    rm -rf "$TMP_PARENT"
+else
+    fail "Linked worktree cache behavior" "found .cs file" "no .cs files in repo"
 fi
 
 # =============================================================================
@@ -181,7 +334,7 @@ else
 fi
 
 run_test
-if grep -q 'license-year-cache' "$POST_REWRITE"; then
+if grep -q 'license-year-cache' "$POST_REWRITE_IMPL"; then
     pass "post-rewrite references cache file"
 else
     fail "post-rewrite references cache file" "license-year-cache" "not found"
@@ -191,7 +344,7 @@ fi
 if [ -f "$CACHE_FILE" ]; then
     # Ensure a cache file exists
     run_test
-    bash "$POST_REWRITE" amend 2>/dev/null || true
+    "$POST_REWRITE" amend >/dev/null 2>&1 || true
     if [ ! -f "$CACHE_FILE" ]; then
         pass "post-rewrite hook deletes cache"
     else

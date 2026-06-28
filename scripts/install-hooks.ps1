@@ -2,16 +2,19 @@
 # Git Hooks & Autofixers Installation Script (PowerShell)
 # =============================================================================
 # Installs git hooks and all required development tools for this repository.
+# cspell:ignore choco mdlint rhysd
 #
 # Usage:
 #   ./scripts/install-hooks.ps1           # Full installation
 #   ./scripts/install-hooks.ps1 -Check    # Check what's installed
+#   ./scripts/install-hooks.ps1 -HooksOnly # Configure hooks and push defaults only
 #   ./scripts/install-hooks.ps1 -Help     # Show help
 # =============================================================================
 
 [CmdletBinding()]
 param(
     [switch]$Check,
+    [switch]$HooksOnly,
     [switch]$Help
 )
 
@@ -55,6 +58,7 @@ function Show-Help {
     Write-Host ""
     Write-Host "Options:"
     Write-Host "  -Check    Check installation status without making changes"
+    Write-Host "  -HooksOnly Configure git hooks and push defaults only"
     Write-Host "  -Help     Show this help message"
     Write-Host ""
     Write-Host "This script installs:"
@@ -66,8 +70,24 @@ function Show-Help {
 
 function Test-Command {
     param([string]$Command)
-    $null = Get-Command $Command -ErrorAction SilentlyContinue
-    return $?
+    return ($null -ne (Get-Command $Command -ErrorAction SilentlyContinue))
+}
+
+function Test-ExecutableBit {
+    param([string]$Path)
+
+    try {
+        $resolvedPath = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath
+        $mode = [System.IO.File]::GetUnixFileMode($resolvedPath)
+        $executeBits = [System.IO.UnixFileMode]::UserExecute -bor
+            [System.IO.UnixFileMode]::GroupExecute -bor
+            [System.IO.UnixFileMode]::OtherExecute
+
+        return (($mode -band $executeBits) -ne 0)
+    }
+    catch {
+        return $false
+    }
 }
 
 function Get-CommandVersion {
@@ -151,6 +171,14 @@ function Test-Status {
     }
     else {
         Write-Warning "dotnet: NOT FOUND (CSharpier won't work)"
+    }
+
+    if (Test-Command "pwsh") {
+        Write-Success "pwsh: $(Get-CommandVersion 'pwsh' @('--version'))"
+    }
+    else {
+        Write-ErrorMsg "pwsh: NOT FOUND (required git hook runtime)"
+        $allOk = $false
     }
     
     Write-Host ""
@@ -337,6 +365,10 @@ function Test-Status {
 
 function Install-GitHooks {
     Write-Header "Installing Git Hooks"
+
+    if (-not (Test-Command "pwsh")) {
+        throw "pwsh is required because tracked git hook entrypoints delegate to .ps1 implementations. Install PowerShell 7+ and rerun hooks installation."
+    }
     
     Push-Location $RepoRoot
     try {
@@ -357,6 +389,32 @@ function Install-GitHooks {
 
         if (Test-Path ".githooks/pre-push") {
             Write-Success "pre-push hook exists"
+        }
+
+        $runningOnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+            [System.Runtime.InteropServices.OSPlatform]::Windows
+        )
+        if (-not $runningOnWindows) {
+            $artifactExtensions = @('.txt', '.log', '.out', '.err', '.tmp')
+            $existingHookFiles = @(
+                Get-ChildItem -LiteralPath '.githooks' -File -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $_.Name -notlike '*.sample' -and
+                        $artifactExtensions -notcontains $_.Extension -and
+                        [string]::IsNullOrWhiteSpace($_.Extension)
+                    } |
+                    ForEach-Object { $_.FullName }
+            )
+            $nonExecutableHookFiles = @($existingHookFiles | Where-Object { -not (Test-ExecutableBit -Path $_) })
+            if ($nonExecutableHookFiles.Count -gt 0 -and (Get-Command chmod -ErrorAction SilentlyContinue)) {
+                & chmod +x -- @nonExecutableHookFiles
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Success "Git hook executable bits restored"
+                }
+                else {
+                    Write-Warning "chmod failed while restoring git hook executable bits"
+                }
+            }
         }
     }
     finally {
@@ -494,7 +552,13 @@ function Main {
         Test-Status
         return
     }
-    
+
+    if ($HooksOnly) {
+        Install-GitHooks
+        Set-GitPushDefaults
+        return
+    }
+
     # Default: full installation
     Write-Header "Git Hooks & Autofixers Installation"
     Write-Host ""

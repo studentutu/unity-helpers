@@ -3,7 +3,6 @@
 
 namespace WallstopStudios.UnityHelpers.Tests.Attributes
 {
-    using System.Collections;
     using System.Text.RegularExpressions;
     using NUnit.Framework;
     using UnityEngine;
@@ -16,8 +15,8 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
     [NUnit.Framework.Category("Fast")]
     public sealed class RelationalComponentTagAndNameFilterEdgeTests : CommonTestBase
     {
-        [UnityTest]
-        public IEnumerator IncludeInactiveExcludesDisabledAndInactive()
+        [Test]
+        public void IncludeInactiveExcludesDisabledAndInactive()
         {
             GameObject root = Track(new GameObject("InactiveRoot", typeof(IncludeInactiveTester)));
             IncludeInactiveTester tester = root.GetComponent<IncludeInactiveTester>();
@@ -45,11 +44,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             Assert.AreEqual(1, tester.onlyActivePlayers.Count);
             Assert.AreSame(activeChild.GetComponent<SpriteRenderer>(), tester.onlyActivePlayers[0]);
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator CombinedTagAndNameFilterRequiresBoth()
+        [Test]
+        public void CombinedTagAndNameFilterRequiresBoth()
         {
             GameObject root = Track(new GameObject("Root", typeof(CombinedFilterTester)));
             CombinedFilterTester tester = root.GetComponent<CombinedFilterTester>();
@@ -73,11 +72,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             Assert.AreEqual(1, tester.matched.Count);
             Assert.AreSame(correct.GetComponent<SpriteRenderer>(), tester.matched[0]);
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator TagFilterMatchesUntagged()
+        [Test]
+        public void TagFilterMatchesUntagged()
         {
             GameObject root = Track(new GameObject("Root", typeof(UntaggedFilterTester)));
             UntaggedFilterTester tester = root.GetComponent<UntaggedFilterTester>();
@@ -95,11 +94,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             Assert.AreEqual(1, tester.untagged.Count);
             Assert.AreSame(child1.GetComponent<SpriteRenderer>(), tester.untagged[0]);
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator OnlyDescendantsIncludesSelfWhenFalse()
+        [Test]
+        public void OnlyDescendantsIncludesSelfWhenFalse()
         {
             GameObject root = Track(
                 new GameObject("SelfRoot", typeof(SelfInclusionTester), typeof(SpriteRenderer))
@@ -111,11 +110,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             Assert.IsTrue(tester.selfRenderer != null);
             Assert.AreSame(root.GetComponent<SpriteRenderer>(), tester.selfRenderer);
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator AllowInterfacesFalseDisablesInterfaceResolution()
+        [Test]
+        public void AllowInterfacesFalseDisablesInterfaceResolution()
         {
             GameObject root = Track(
                 new GameObject("InterfaceRoot", typeof(InterfacesDisabledTester))
@@ -125,7 +124,8 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             GameObject child = Track(new GameObject("Child", typeof(TestInterfaceComponent)));
             child.transform.SetParent(root.transform);
 
-            LogAssert.Expect(
+            // Emitted via the package logger, which is compiled out in a non-development player.
+            ExpectWallstopLog(
                 LogType.Error,
                 new Regex(@"Unable to find child component of type .* for field 'iface'")
             );
@@ -133,11 +133,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             tester.AssignChildComponents();
 
             Assert.IsTrue((Object)tester.iface == null);
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator OptionalSuppressesMissingErrors()
+        [Test]
+        public void OptionalSuppressesMissingErrors()
         {
             GameObject root = Track(new GameObject("OptionalRoot", typeof(OptionalTester)));
             OptionalTester tester = root.GetComponent<OptionalTester>();
@@ -146,11 +146,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
 
             Assert.IsTrue(tester.missingOptional == null);
             LogAssert.NoUnexpectedReceived();
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator SiblingTagFilterNoMatchLogsError()
+        [Test]
+        public void SiblingTagFilterNoMatchLogsError()
         {
             GameObject root = new("SiblingTagFilterRoot");
             Track(root);
@@ -158,7 +158,8 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             root.AddComponent<BoxCollider>();
             SiblingNoMatchTagTester tester = root.AddComponent<SiblingNoMatchTagTester>();
 
-            LogAssert.Expect(
+            // Emitted via the package logger, which is compiled out in a non-development player.
+            ExpectWallstopLog(
                 LogType.Error,
                 new Regex(
                     @"Unable to find sibling component of type .* for field 'siblingCollider'"
@@ -168,11 +169,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             tester.AssignSiblingComponents();
             Assert.IsTrue(tester.siblingCollider == null);
 
-            yield break;
+            return;
         }
 
-        [UnityTest]
-        public IEnumerator SkipIfAssignedDoesNotOverride()
+        [Test]
+        public void SkipIfAssignedDoesNotOverride()
         {
             GameObject root = new("SkipRoot", typeof(SkipIfAssignedTesterEdgeCase));
             Track(root);
@@ -184,7 +185,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
             tester.AssignSiblingComponents();
 
             Assert.AreSame(preassigned, tester.alreadyAssigned);
-            yield break;
+            return;
         }
     }
 }

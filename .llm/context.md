@@ -50,128 +50,10 @@ Samples~/                  # Sample projects (imported via Package Manager)
 
 ## Skills Reference
 
-Invoke these skills for specific tasks.
-
-**Regenerate with**: `pwsh -NoProfile -File scripts/generate-skills-index.ps1`
-
-<!-- BEGIN GENERATED SKILLS INDEX -->
-<!-- Generated: 2026-04-21 18:45:10 UTC -->
-<!-- Command: pwsh -NoProfile -File scripts/generate-skills-index.ps1 -->
-
-### Core Skills (Always Consider)
-
-| Skill                                                                                        | When to Use                                                                            |
-| -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| [apply-completeness](./skills/apply-completeness.md)                                         | Always do the complete thing when cost is near-zero                                    |
-| [ask-structured-questions](./skills/ask-structured-questions.md)                             | Present questions with context, options, and recommendations                           |
-| [asset-postprocessor-safety](./skills/asset-postprocessor-safety.md)                         | AssetPostprocessor callbacks - avoid SendMessage warnings                              |
-| [avoid-magic-strings](./skills/avoid-magic-strings.md)                                       | ALL code - use nameof() not strings                                                    |
-| [avoid-reflection](./skills/avoid-reflection.md)                                             | ALL code - never reflect on our own types                                              |
-| [bash-pwsh-invocation](./skills/bash-pwsh-invocation.md)                                     | Calling .ps1 scripts from bash/hooks/workflows                                         |
-| [create-csharp-file](./skills/create-csharp-file.md)                                         | Creating any new .cs file                                                              |
-| [create-editor-tool](./skills/create-editor-tool.md)                                         | Creating Editor windows and inspectors                                                 |
-| [create-enum](./skills/create-enum.md)                                                       | Creating a new enum type                                                               |
-| [create-property-drawer](./skills/create-property-drawer.md)                                 | Creating PropertyDrawers for custom attributes                                         |
-| [create-scriptable-object](./skills/create-scriptable-object.md)                             | Creating ScriptableObject data assets                                                  |
-| [create-test](./skills/create-test.md)                                                       | Writing or modifying test files                                                        |
-| [create-unity-meta](./skills/create-unity-meta.md)                                           | After creating ANY new file or folder                                                  |
-| [defensive-editor-programming](./skills/defensive-editor-programming.md)                     | Editor code - handle Unity Editor edge cases                                           |
-| [defensive-programming](./skills/defensive-programming.md)                                   | ALL code - never throw, handle gracefully                                              |
-| [documentation-consistency](./skills/documentation-consistency.md)                           | When writing or reviewing documentation                                                |
-| [editor-api-rules](./skills/editor-api-rules.md)                                             | Forbidden Editor APIs and value handling rules                                         |
-| [editor-caching-patterns](./skills/editor-caching-patterns.md)                               | Caching strategies for Editor code                                                     |
-| [editor-multi-object-editing](./skills/editor-multi-object-editing.md)                       | Multi-object editing patterns and undo support for editor code                         |
-| [editor-singleton-patterns](./skills/editor-singleton-patterns.md)                           | Singleton asset management patterns for Editor code                                    |
-| [editor-undo-complete](./skills/editor-undo-complete.md)                                     | Complete undo policy for editor tooling with enforceable scope boundaries              |
-| [formatting](./skills/formatting.md)                                                         | After ANY file change (CSharpier/Prettier)                                             |
-| [formatting-and-linting](./skills/formatting-and-linting.md)                                 | Before committing, after editing files                                                 |
-| [git-hook-lifecycle-debugging](./skills/git-hook-lifecycle-debugging.md)                     | Hook validation philosophy, framework config, PowerShell exit codes, debugging         |
-| [git-hook-patterns](./skills/git-hook-patterns.md)                                           | Git hook safety, syntax, and debugging patterns (hub)                                  |
-| [git-hook-safety](./skills/git-hook-safety.md)                                               | Hook index safety, permissions, and execution templates                                |
-| [git-hook-syntax-portability](./skills/git-hook-syntax-portability.md)                       | Hook regex, CLI safety, CRLF handling, portable grep patterns                          |
-| [git-safe-operations](./skills/git-safe-operations.md)                                       | Scripts or hooks that interact with git index                                          |
-| [git-staging-helpers](./skills/git-staging-helpers.md)                                       | PowerShell/Bash helpers for safe git staging                                           |
-| [github-actions-shell-foundations](./skills/github-actions-shell-foundations.md)             | Core shell scripting safety for GitHub Actions                                         |
-| [github-actions-shell-scripting](./skills/github-actions-shell-scripting.md)                 | Shell scripting best practices for GitHub Actions                                      |
-| [github-actions-shell-workflow-patterns](./skills/github-actions-shell-workflow-patterns.md) | Workflow integration patterns for GitHub Actions shell steps                           |
-| [high-performance-csharp](./skills/high-performance-csharp.md)                               | ALL code - zero allocation patterns                                                    |
-| [investigate-test-failures](./skills/investigate-test-failures.md)                           | ANY test failure - investigate before fixing                                           |
-| [license-headers](./skills/license-headers.md)                                               | Maintaining MIT license headers in C# files                                            |
-| [linter-reference](./skills/linter-reference.md)                                             | Detailed linter commands, configurations                                               |
-| [manage-skills](./skills/manage-skills.md)                                                   | Creating, updating, splitting, consolidating, or removing skills                       |
-| [markdown-reference](./skills/markdown-reference.md)                                         | Link formatting, escaping, linting rules                                               |
-| [no-regions](./skills/no-regions.md)                                                         | ALL C# code - never use #region/#endregion                                             |
-| [odin-undo-safety](./skills/odin-undo-safety.md)                                             | Safe undo recording patterns for Odin Inspector drawers                                |
-| [optimize-git-hooks](./skills/optimize-git-hooks.md)                                         | How to keep git hooks fast                                                             |
-| [prefer-logging-extensions](./skills/prefer-logging-extensions.md)                           | Unity logging in UnityEngine.Object classes                                            |
-| [property-drawer-examples](./skills/property-drawer-examples.md)                             | Property drawer code examples                                                          |
-| [property-drawer-rules](./skills/property-drawer-rules.md)                                   | PropertyDrawer critical rules and requirements                                         |
-| [review-code-changes](./skills/review-code-changes.md)                                       | Pre-landing code review with two-pass analysis                                         |
-| [review-plan](./skills/review-plan.md)                                                       | Engineering review of implementation plans                                             |
-| [run-retrospective](./skills/run-retrospective.md)                                           | Structured retrospective analyzing what happened, what worked, and what to improve     |
-| [search-codebase](./skills/search-codebase.md)                                               | Finding code, files, or patterns                                                       |
-| [self-regulate-changes](./skills/self-regulate-changes.md)                                   | Know when to stop: risk scoring and hard caps for cascading changes                    |
-| [ship-changes](./skills/ship-changes.md)                                                     | End-to-end workflow for shipping changes: validate, review, version, changelog, commit |
-| [test-data-driven](./skills/test-data-driven.md)                                             | Data-driven testing with TestCase and TestCaseSource                                   |
-| [test-naming-conventions](./skills/test-naming-conventions.md)                               | Test method and TestName naming rules                                                  |
-| [test-odin-drawers](./skills/test-odin-drawers.md)                                           | Odin Inspector drawer testing patterns                                                 |
-| [test-parallelization-rules](./skills/test-parallelization-rules.md)                         | Unity Editor test threading constraints                                                |
-| [test-unity-lifecycle](./skills/test-unity-lifecycle.md)                                     | Track(), DestroyImmediate, object cleanup                                              |
-| [update-documentation](./skills/update-documentation.md)                                     | After ANY feature/bug fix/API change                                                   |
-| [validate-before-commit](./skills/validate-before-commit.md)                                 | Before completing any task (run linters!)                                              |
-| [validation-troubleshooting](./skills/validation-troubleshooting.md)                         | Common validation errors, CI failures, fixes                                           |
-
-### Performance Skills
-
-| Skill                                                                | When to Use                                       |
-| -------------------------------------------------------------------- | ------------------------------------------------- |
-| [avoid-allocations](./skills/avoid-allocations.md)                   | Avoiding heap allocations and boxing              |
-| [gc-architecture-unity](./skills/gc-architecture-unity.md)           | Understanding Unity GC, incremental GC, manual GC |
-| [linq-elimination-patterns](./skills/linq-elimination-patterns.md)   | Converting LINQ to zero-allocation loops          |
-| [memory-allocation-traps](./skills/memory-allocation-traps.md)       | Finding hidden allocation sources                 |
-| [mobile-xr-optimization](./skills/mobile-xr-optimization.md)         | Mobile, VR/AR, 90+ FPS targets                    |
-| [optimize-unity-physics](./skills/optimize-unity-physics.md)         | Physics colliders, raycasts, non-alloc            |
-| [optimize-unity-rendering](./skills/optimize-unity-rendering.md)     | Materials, shaders, batching                      |
-| [performance-audit](./skills/performance-audit.md)                   | Reviewing performance-sensitive code              |
-| [profile-debug-performance](./skills/profile-debug-performance.md)   | Profiling, debugging, measuring performance       |
-| [refactor-to-zero-alloc](./skills/refactor-to-zero-alloc.md)         | Converting allocating code to zero-allocation     |
-| [unity-performance-patterns](./skills/unity-performance-patterns.md) | Unity-specific optimizations (APIs, pooling)      |
-| [use-array-pool](./skills/use-array-pool.md)                         | Working with temporary arrays                     |
-| [use-pooling](./skills/use-pooling.md)                               | Working with temporary collections                |
-
-### Feature Skills
-
-| Skill                                                                          | When to Use                                                       |
-| ------------------------------------------------------------------------------ | ----------------------------------------------------------------- |
-| [add-inspector-attribute](./skills/add-inspector-attribute.md)                 | Improving editor UX with attributes                               |
-| [debug-il2cpp](./skills/debug-il2cpp.md)                                       | IL2CPP build issues or AOT errors                                 |
-| [devcontainer-volume-permissions](./skills/devcontainer-volume-permissions.md) | Docker volume permission fixes for non-root devcontainer users    |
-| [github-actions-script-pattern](./skills/github-actions-script-pattern.md)     | Extract GHA logic to testable scripts                             |
-| [github-pages](./skills/github-pages.md)                                       | GitHub Pages, Jekyll, markdown link format                        |
-| [github-pages-theming](./skills/github-pages-theming.md)                       | GitHub Pages CSS theming, Jekyll theme customization              |
-| [github-workflow-permissions](./skills/github-workflow-permissions.md)         | Workflow permissions, automated PRs, debugging                    |
-| [integrate-odin-inspector](./skills/integrate-odin-inspector.md)               | Odin Inspector integration patterns                               |
-| [integrate-optional-dependency](./skills/integrate-optional-dependency.md)     | Odin, VContainer, Zenject integration patterns                    |
-| [manage-assembly-definitions](./skills/manage-assembly-definitions.md)         | Assembly definition creation, splitting, and reference management |
-| [unity-devcontainer-testing](./skills/unity-devcontainer-testing.md)           | Compile and test Unity C# code in devcontainer                    |
-| [use-algorithmic-structures](./skills/use-algorithmic-structures.md)           | Connectivity, prefix search, bit manipulation, caching            |
-| [use-data-structures](./skills/use-data-structures.md)                         | Selecting appropriate data structures                             |
-| [use-discriminated-union](./skills/use-discriminated-union.md)                 | OneOf/Result types, type-safe unions                              |
-| [use-effects-system](./skills/use-effects-system.md)                           | Buffs, debuffs, stat modifications                                |
-| [use-extension-methods](./skills/use-extension-methods.md)                     | Collection, string, color utilities                               |
-| [use-priority-structures](./skills/use-priority-structures.md)                 | Priority ordering or task scheduling                              |
-| [use-prng](./skills/use-prng.md)                                               | Implementing randomization                                        |
-| [use-queue-structures](./skills/use-queue-structures.md)                       | Rolling history, double-ended queues                              |
-| [use-relational-attributes](./skills/use-relational-attributes.md)             | Auto-wiring components via hierarchy                              |
-| [use-serializable-types](./skills/use-serializable-types.md)                   | Dictionaries, HashSets, Nullable, Type, Guid                      |
-| [use-serializable-types-patterns](./skills/use-serializable-types-patterns.md) | Common patterns for serializable collections                      |
-| [use-serialization](./skills/use-serialization.md)                             | Save files, network, persistence                                  |
-| [use-singleton](./skills/use-singleton.md)                                     | Global managers, service locators, configuration                  |
-| [use-spatial-structure](./skills/use-spatial-structure.md)                     | Spatial queries or proximity logic                                |
-| [use-threading](./skills/use-threading.md)                                     | Main thread dispatch, thread safety                               |
-| [wiki-generation](./skills/wiki-generation.md)                                 | GitHub Wiki deployment, sidebar links                             |
-
-<!-- END GENERATED SKILLS INDEX -->
+The full skill catalog, grouped by category, is in the generated
+**[Skills Index](./skills/index.md)**. Regenerate it after adding or editing any
+skill's trigger comment with `pwsh -NoProfile -File scripts/generate-skills-index.ps1`
+(validated by `scripts/lint-llm-instructions.ps1`).
 
 ## Critical Rules Summary
 
@@ -187,7 +69,7 @@ See [create-csharp-file](./skills/create-csharp-file.md) for detailed C# rules.
 6. One file per MonoBehaviour/ScriptableObject (production AND tests)
 7. NEVER use `?.`, `??`, `??=` on UnityEngine.Object types
 8. Minimal comments -- only explain **why**, never **what**
-9. Generate `.meta` files after creating ANY file/folder (see [create-unity-meta](./skills/create-unity-meta.md)); exception: no `.meta` for dot folders (`.llm/`, `.github/`, `.git/`, `.vscode/`). Use `./scripts/generate-meta.sh <path>`, then run `npm run agent:preflight:fix` immediately.
+9. Generate `.meta` files after creating ANY file/folder (see [create-unity-meta](./skills/create-unity-meta.md)); exception: no `.meta` for dot folders (`.llm/`, `.github/`, `.git/`, `.vscode/`). Use `./scripts/generate-meta.sh <path>` for new or empty folders, then run `npm run agent:preflight:fix` for changed-file `.meta` recovery.
 10. Enums: explicit values, `None`/`Unknown` = 0 with `[Obsolete]` (see [create-enum](./skills/create-enum.md))
 11. Never reflect on our own code; use `internal` + `[InternalsVisibleTo]` (see [avoid-reflection](./skills/avoid-reflection.md))
 12. Never use magic strings; use `nameof()` (see [avoid-magic-strings](./skills/avoid-magic-strings.md))
@@ -219,9 +101,9 @@ Run formatters/linters **immediately after each file change**, not batched at ta
 - **Markdown**: `npm run lint:docs` + `npm run lint:markdown`
 - **YAML**: `npm run lint:yaml` (then `actionlint` for workflows)
 - **Spelling**: `npm run lint:spelling` (add valid terms to `cspell.json`). A Claude Code PostToolUse hook (`scripts/hooks/cspell-post-edit.js`, registered in the tracked [`.claude/settings.json`](../.claude/settings.json) which ships with the repo) auto-runs cspell after every Edit/Write/MultiEdit/NotebookEdit, so typos surface immediately; manual invocation before completion remains the expectation (the hook is a safety net, not a substitute -- it does not fire in CI or when editing outside Claude Code)
-- **Tests**: `pwsh -NoProfile -File scripts/lint-tests.ps1 -FixNullChecks -Paths <changed test files>`
+- **Tests**: `pwsh -NoProfile -File scripts/lint-tests.ps1 -FixNullChecks -Paths <changed test files>`, then `pwsh -NoProfile -File scripts/lint-tests.ps1 -Paths <changed test files>`
 - **Skill files and [context](./context.md)**: `pwsh -NoProfile -File scripts/lint-skill-sizes.ps1` (500-line limit)
-- **Commit prep**: stage files, then run `npm run agent:preflight:fix` (includes changed markdown spelling checks) before any commit attempt
+- **Commit prep**: stage files, then run `npm run agent:preflight:fix` (includes changed spell-checkable file checks) before any commit attempt
 - **Pre-push parity**: run `npm run validate:prepush` (includes full `lint:spelling`) before push; treat git hooks as last-resort only. For the push step itself (setup, redirection, rejection handling) follow [ship-changes Step 9](./skills/ship-changes.md#step-9-push-to-remote)
 
 See [formatting](./skills/formatting.md) and [validate-before-commit](./skills/validate-before-commit.md) for details.
@@ -242,7 +124,8 @@ See [formatting](./skills/formatting.md) and [validate-before-commit](./skills/v
 - If a script derives `REPO_ROOT` / `$repoRoot` from its own location, every `git ls-files` / `git diff --relative` / similar repo-relative git call must also be anchored there (`git -C "$REPO_ROOT" ...` or `cd "$REPO_ROOT"` first). Never combine repo-root-derived filesystem paths with caller-cwd-derived git output.
 - When adding formatter support for a new language, add explicit `[language]` entry in `devcontainer.json`
 - When adding new script calls to git hooks, update the hook's step comments AND the "What the Hook Does" list in [formatting-and-linting](./skills/formatting-and-linting.md)
-- Never redirect git command output to files in the working tree (e.g. `git push 2> pre-push.txt`) — creates gitignored pollution. Let errors stream to stderr; `npm run agent:preflight` detects and `npm run agent:preflight:fix` removes these artifacts
+- Never run `pwsh -File .githooks/<hook>` for extensionless hook launchers. Run the hook directly through Git/shell, or invoke `.githooks/<hook>.ps1` when debugging the PowerShell implementation.
+- Never redirect git command output to files in the working tree (e.g. `git push 2> pre-push.txt`) — creates gitignored pollution. Let errors stream to stderr; pre-push and `npm run agent:preflight:fix` auto-remove gitignored hook artifacts before validation
 
 ---
 

@@ -97,6 +97,7 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
         }
 
         [Test]
+        [WallstopStudios.UnityHelpers.Tests.Core.SkipUnderIL2CPP]
         public void SortedHashSetJsonRoundTripRetainsOrdering()
         {
             SerializableSortedSet<int> original = new() { 42, -5, 99 };
@@ -628,9 +629,11 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
             ScriptableSample valid = Track(ScriptableObject.CreateInstance<ScriptableSample>());
             set._items = new[] { null, valid };
 
-            LogAssert.Expect(
-                LogType.Error,
-                "SerializableSet<WallstopStudios.UnityHelpers.Tests.DataStructures.SerializableSortedSetTests+ScriptableSample> skipped serialized entry at index 0 because the value reference was null."
+            ExpectError(
+                LogType.Warning,
+                System.Text.RegularExpressions.Regex.Escape(
+                    "SerializableSet<WallstopStudios.UnityHelpers.Tests.DataStructures.SerializableSortedSetTests+ScriptableSample> skipped serialized entry at index 0 because the value reference was null."
+                )
             );
 
             set.OnAfterDeserialize();
@@ -800,6 +803,7 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
         }
 
         [Test]
+        [WallstopStudios.UnityHelpers.Tests.Core.SkipUnderIL2CPP]
         public void JsonRoundTripPreservesUserDefinedOrder()
         {
             SerializableSortedSet<int> original = new(new[] { 5, 1, 3 });
@@ -979,6 +983,7 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
         }
 
         [Test]
+        [WallstopStudios.UnityHelpers.Tests.Core.SkipUnderIL2CPP]
         public void ProtoSerializationProducesIndependentCopy()
         {
             SerializableSortedSet<int> original = new() { 3, 1, 5 };
@@ -1615,6 +1620,7 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
         }
 
         [Test]
+        [WallstopStudios.UnityHelpers.Tests.Core.SkipUnderIL2CPP]
         public void ProtoRoundTripPreservesSortedOrderInToArray()
         {
             SerializableSortedSet<int> original = new() { 5, 1, 3, 4, 2 };
@@ -1630,6 +1636,7 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
         }
 
         [Test]
+        [WallstopStudios.UnityHelpers.Tests.Core.SkipUnderIL2CPP]
         public void JsonRoundTripPreservesSortedOrderInToArray()
         {
             SerializableSortedSet<int> original = new() { 5, 1, 3, 4, 2 };

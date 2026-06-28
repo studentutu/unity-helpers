@@ -77,9 +77,32 @@ namespace WallstopStudios.UnityHelpers.Tests.Core.TestUtils
         /// </summary>
         private const int MaxAssetDatabaseWaitFrames = 10;
 
+        private const string ResourcesRoot = "Assets/Resources";
+
+        /// <summary>
+        /// Whether the <c>Assets/Resources</c> root already existed before this fixture ran.
+        /// Captured in <see cref="CommonOneTimeSetUp"/> so <see cref="OneTimeTearDown"/> only
+        /// removes the root when this fixture is the one that created it.
+        /// </summary>
+        /// <remarks>
+        /// Every <c>Assets/Resources/&lt;child&gt;</c> the fixture creates (via
+        /// <see cref="CommonTestBase.EnsureFolderStatic"/>) materializes the bare
+        /// <c>Assets/Resources</c> root as a side effect. <see cref="CleanupAllKnownTestFolders"/>
+        /// deletes the known test child folders but deliberately preserves the root (it is treated
+        /// as production data). In the ephemeral CI project nothing under <c>Assets/</c> is
+        /// committed, so the root does NOT pre-exist and the leftover empty folder is reported by
+        /// Unity's CleanupVerificationTask as an uncleaned new file -- failing the PlayMode run.
+        /// Removing the root here when we created it restores the pre-fixture state.
+        /// </remarks>
+        private bool _resourcesRootExistedBeforeFixture;
+
         public override void CommonOneTimeSetUp()
         {
             base.CommonOneTimeSetUp();
+            // Capture pre-existing state BEFORE any cleanup/creation so teardown can decide whether
+            // this fixture owns the Assets/Resources root. CleanupAllKnownTestFolders never deletes
+            // the root, so this reflects whether the root truly pre-existed.
+            _resourcesRootExistedBeforeFixture = AssetDatabase.IsValidFolder(ResourcesRoot);
             // Pre-cleanup before tests - use batched cleanup
             // Use refreshOnDispose: false since we manually refresh after
             using (AssetDatabaseBatchHelper.BeginBatch(refreshOnDispose: false))
@@ -98,7 +121,53 @@ namespace WallstopStudios.UnityHelpers.Tests.Core.TestUtils
                 CleanupAllKnownTestFolders();
             }
             AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+            // CleanupAllKnownTestFolders removes the child test folders but preserves the
+            // Assets/Resources root. If this fixture materialized that root (it did not
+            // pre-exist) and it is now empty, remove it so the run leaves zero new files.
+            // Done AFTER the batch closes and the AssetDatabase refreshes so the
+            // emptiness check observes the post-cleanup state (deletions issued inside a
+            // StartAssetEditing batch are not reflected by GetSubFolders/FindAssets until
+            // the batch ends and a refresh runs).
+            RemoveResourcesRootIfCreatedByThisFixture();
             base.OneTimeTearDown();
+        }
+
+        /// <summary>
+        /// Deletes the <c>Assets/Resources</c> root only when this fixture created it and it has no
+        /// remaining contents. Safe against a pre-existing production <c>Assets/Resources</c> (it is
+        /// left untouched) and against leftover real assets (a non-empty root is left untouched).
+        /// </summary>
+        private void RemoveResourcesRootIfCreatedByThisFixture()
+        {
+            if (_resourcesRootExistedBeforeFixture)
+            {
+                return;
+            }
+
+            if (!AssetDatabase.IsValidFolder(ResourcesRoot))
+            {
+                return;
+            }
+
+            string[] subFolders = AssetDatabase.GetSubFolders(ResourcesRoot);
+            if (subFolders is { Length: > 0 })
+            {
+                return;
+            }
+
+            string[] containedAssets = AssetDatabase.FindAssets(
+                string.Empty,
+                new[] { ResourcesRoot }
+            );
+            if (containedAssets is { Length: > 0 })
+            {
+                return;
+            }
+
+            if (AssetDatabase.DeleteAsset(ResourcesRoot))
+            {
+                AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+            }
         }
 
         // NOTE: We intentionally do NOT override TearDown to call CleanupAllKnownTestFolders()
@@ -368,19 +437,43 @@ namespace WallstopStudios.UnityHelpers.Tests.Core.TestUtils
                 "Assets/Resources/Wallstop Studios/Unity Helpers",
             };
 
-            // Ensure protected folders exist and wait for recognition
-            yield return CreateAndWaitForFolders(protectedFolders);
+            bool resourcesExisted = AssetDatabase.IsValidFolder("Assets/Resources");
+            bool wallstopStudiosExisted = AssetDatabase.IsValidFolder(
+                "Assets/Resources/Wallstop Studios"
+            );
+            bool unityHelpersExisted = AssetDatabase.IsValidFolder(
+                "Assets/Resources/Wallstop Studios/Unity Helpers"
+            );
 
-            // Act: Run cleanup and wait
-            yield return CleanupAndWait();
-
-            // Assert: Protected folders should still exist
-            foreach (string folder in protectedFolders)
+            try
             {
-                Assert.IsTrue(
-                    AssetDatabase.IsValidFolder(folder),
-                    $"Protected folder '{folder}' should NOT be removed by cleanup"
+                // Ensure protected folders exist and wait for recognition
+                yield return CreateAndWaitForFolders(protectedFolders);
+
+                // Act: Run cleanup and wait
+                yield return CleanupAndWait();
+
+                // Assert: Protected folders should still exist
+                foreach (string folder in protectedFolders)
+                {
+                    Assert.IsTrue(
+                        AssetDatabase.IsValidFolder(folder),
+                        $"Protected folder '{folder}' should NOT be removed by cleanup"
+                    );
+                }
+            }
+            finally
+            {
+                DeleteFolderCreatedByThisTest(
+                    "Assets/Resources/Wallstop Studios/Unity Helpers",
+                    unityHelpersExisted
                 );
+                DeleteFolderCreatedByThisTest(
+                    "Assets/Resources/Wallstop Studios",
+                    wallstopStudiosExisted
+                );
+                DeleteFolderCreatedByThisTest("Assets/Resources", resourcesExisted);
+                AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
             }
         }
 
@@ -469,6 +562,16 @@ namespace WallstopStudios.UnityHelpers.Tests.Core.TestUtils
         {
             yield return null;
             Assert.Pass("UnityTest with IEnumerator is functioning correctly");
+        }
+
+        private static void DeleteFolderCreatedByThisTest(string folderPath, bool existedBefore)
+        {
+            if (existedBefore || !AssetDatabase.IsValidFolder(folderPath))
+            {
+                return;
+            }
+
+            AssetDatabase.DeleteAsset(folderPath);
         }
     }
 

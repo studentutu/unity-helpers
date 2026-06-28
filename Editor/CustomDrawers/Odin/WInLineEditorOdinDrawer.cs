@@ -111,10 +111,10 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
             }
 
             object parent = property.Parent?.ValueEntry?.WeakSmartValue;
-            int parentId = 0;
+            long parentId = 0;
             if (parent is Object unityObject)
             {
-                parentId = unityObject.GetInstanceID();
+                parentId = unityObject.GetUnityObjectId();
             }
             else if (parent != null)
             {

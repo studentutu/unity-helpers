@@ -1,6 +1,10 @@
 // MIT License - Copyright (c) 2025 wallstop
 // Full license text: https://github.com/wallstop/unity-helpers/blob/main/LICENSE
 
+#if UNITY_6000_0_OR_NEWER
+#define UNH_HAS_RIGIDBODY2D_LINEAR_VELOCITY
+#endif
+
 // ReSharper disable once CheckNamespace
 namespace WallstopStudios.UnityHelpers.Core.Extension
 {
@@ -21,7 +25,13 @@ namespace WallstopStudios.UnityHelpers.Core.Extension
                 return;
             }
 
+            // Rigidbody2D.velocity was renamed to linearVelocity in Unity 6000;
+            // older LTS streams (2021.3 / 2022.3) only expose the legacy property.
+#if UNH_HAS_RIGIDBODY2D_LINEAR_VELOCITY
+            rigidBody.linearVelocity = Vector2.zero;
+#else
             rigidBody.velocity = Vector2.zero;
+#endif
             rigidBody.angularVelocity = 0;
             rigidBody.Sleep();
         }

@@ -8,19 +8,21 @@ namespace WallstopStudios.UnityHelpers.Tests.Core
     using System.Collections;
     using System.Collections.Generic;
     using System.IO;
-    using System.Reflection;
     using System.Threading.Tasks;
     using NUnit.Framework;
     using UnityEngine;
     using UnityEngine.SceneManagement;
     using UnityEngine.TestTools;
+    using WallstopStudios.UnityHelpers.Core.Extension;
     using WallstopStudios.UnityHelpers.Core.Helper;
-    using AssetDatabaseBatchHelper = WallstopStudios.UnityHelpers.Editor.Utils.AssetDatabaseBatchHelper;
+    using WallstopStudios.UnityHelpers.Utils;
     using Object = UnityEngine.Object;
 #if UNITY_EDITOR
+    using System.Text.RegularExpressions;
     using UnityEditor.SceneManagement;
     using WallstopStudios.UnityHelpers.Editor.Utils;
     using WallstopStudios.UnityHelpers.Tests.Core.TestUtils;
+    using AssetDatabaseBatchHelper = WallstopStudios.UnityHelpers.Editor.Utils.AssetDatabaseBatchHelper;
 #endif
 
     /// <summary>
@@ -29,12 +31,65 @@ namespace WallstopStudios.UnityHelpers.Tests.Core
     /// </summary>
     public abstract class CommonTestBase
     {
+        /// <summary>
+        /// Upper bound (seconds) for any teardown-time async cleanup wait (tracked async
+        /// disposals, tracked scene unloads). Generous enough never to trip on a healthy
+        /// op (these complete in well under a frame) yet far below the CI no-output
+        /// watchdog window, so a stuck cleanup fails its own test -- and the leg still
+        /// writes results.xml -- instead of stalling the whole run.
+        /// </summary>
+        private const float TrackedDisposalTimeoutSeconds = 30f;
+        private const int TrackedObjectDestroyMaxFrames = 30;
+
         private UnityMainThreadDispatcher.AutoCreationScope _dispatcherScope;
 
         protected readonly List<Object> _trackedObjects = new();
         protected readonly List<IDisposable> _trackedDisposables = new();
         protected readonly List<Scene> _trackedScenes = new();
+
+        // Expected-error capture: the Unity Test Framework re-invokes completed test bodies on scene
+        // ops in batchmode, re-emitting their EXPECTED logs into bystanders. Capturing+suppressing the
+        // expected patterns via a custom log handler keeps them out of the global log entirely, so a
+        // re-run cannot bleed them. Static so a re-run of one fixture's body during another still hits
+        // the registry. PlayMode only (the re-run + frame bleed are PlayMode); EditMode falls back to
+        // LogAssert.Expect.
+        private static readonly System.Collections.Generic.List<(
+            UnityEngine.LogType type,
+            System.Text.RegularExpressions.Regex pattern
+        )> _expectedErrors = new();
+        private static readonly System.Collections.Generic.HashSet<System.Text.RegularExpressions.Regex> _matchedExpectedErrors =
+            new();
+        private static readonly object _expectedErrorLock = new();
+        private static UnityEngine.ILogHandler _expectErrorInnerHandler;
+        private static ExpectedErrorSuppressingHandler _expectErrorHandler;
         protected readonly List<Func<ValueTask>> _trackedAsyncDisposals = new();
+
+        /// <summary>
+        /// PlayMode cross-test leak guard. Captured at the start of every test (in
+        /// <see cref="CommonUnitySetUp"/>): the loaded scenes and the object IDs of every ROOT
+        /// GameObject that already existed in them. Any root alive at teardown, in one of those same
+        /// scenes, whose ID is NOT in the baseline was created by this test; if it survived the
+        /// targeted cleanup it is a leak that would pollute later tests, so the teardown sweep
+        /// (<see cref="CollectLeakedRoots"/> + <see cref="DestroyLeakedRootsAndDescribe"/>) destroys
+        /// it and fails THIS test (the producer). PlayMode only -- EditMode destroys synchronously
+        /// with no frame-boundary bleed, so it never captures and never sweeps.
+        ///
+        /// SCOPE (deliberately narrow to avoid false positives):
+        /// - Only the SCENES that existed at test start are swept. A scene the test LOADS itself
+        ///   (e.g. via <see cref="SceneManager.LoadScene(int)"/>) owns its content; those roots are
+        ///   not the test's leaks.
+        /// - The DontDestroyOnLoad scene is NOT swept (<see cref="SceneManager.GetSceneAt"/> excludes
+        ///   it): leaked RuntimeSingletons there are handled by the registry clear above, and
+        ///   framework infrastructure (e.g. Zenject's pooled prefab parent) must be left alone.
+        /// - Only ROOT GameObjects (not children re-parented under a baseline root) and only
+        ///   GameObjects (not non-object leaks like a dangling sceneLoaded delegate, handled at their
+        ///   source). Keys are
+        ///   <see cref="WallstopStudios.UnityHelpers.Core.Extension.UnityObjectExtensions.GetUnityObjectId"/>
+        ///   (stable per object; forward-compatible with Unity 6000.4 EntityId).
+        /// </summary>
+        private readonly HashSet<long> _testStartRootIds = new();
+        private readonly HashSet<Scene> _testStartScenes = new();
+        private bool _testStartRootsCaptured;
 
 #if UNITY_EDITOR
         /// <summary>
@@ -70,9 +125,6 @@ namespace WallstopStudios.UnityHelpers.Tests.Core
         [SetUp]
         public virtual void BaseSetUp()
         {
-#if REFLEX_PRESENT
-            EnsureReflexSettings();
-#endif
 #if UNITY_EDITOR
             CleanupPackageRootGeneratedArtifacts();
             _previousEditorUiSuppress = EditorUi.Suppress;
@@ -101,6 +153,21 @@ namespace WallstopStudios.UnityHelpers.Tests.Core
             }
 #endif
             InitializeDispatcherScope();
+        }
+
+        [UnitySetUp]
+        public IEnumerator CommonUnitySetUp()
+        {
+            // PlayMode cross-test leak guard: snapshot the roots that exist before this test runs so
+            // the teardown sweep can destroy + attribute anything this test leaks. EditMode is immune
+            // (synchronous destroy, no frame-boundary log bleed), so it never captures and never sweeps.
+            if (Application.isPlaying)
+            {
+                InstallExpectedErrorSuppression();
+                CaptureLeakGuardBaseline();
+            }
+
+            yield break;
         }
 
         protected GameObject NewGameObject(string name = "GameObject")
@@ -231,45 +298,81 @@ namespace WallstopStudios.UnityHelpers.Tests.Core
                 _trackedDisposables.Clear();
             }
 
-            if (!Application.isPlaying && _trackedObjects.Count > 0)
+            if (!Application.isPlaying)
             {
-#if UNITY_EDITOR
-                using (AssetDatabaseBatchHelper.BeginBatch(refreshOnDispose: false))
-#endif
-                {
-                    Object[] snapshot = _trackedObjects.ToArray();
-                    foreach (Object obj in snapshot)
-                    {
-                        if (obj != null)
-                        {
-#if UNITY_EDITOR
-                            // If the object is a persisted asset, use AssetDatabase.DeleteAsset
-                            // DestroyImmediate without allowDestroyingAssets=true will fail for assets
-                            if (UnityEditor.EditorUtility.IsPersistent(obj))
-                            {
-                                string assetPath = UnityEditor.AssetDatabase.GetAssetPath(obj);
-                                if (!string.IsNullOrEmpty(assetPath))
-                                {
-                                    UnityEditor.AssetDatabase.DeleteAsset(assetPath);
-                                    continue;
-                                }
-                            }
-#endif
-                            Object.DestroyImmediate(obj); // UNH-SUPPRESS: Required for EditMode test cleanup
-                        }
-                    }
-                    _trackedObjects.Clear();
-                }
+                DestroyTrackedObjects();
             }
 
             DisposeDispatcherScope();
         }
 
+        /// <summary>
+        /// Destroys every currently tracked <see cref="Object"/> and clears the tracking list.
+        /// </summary>
+        /// <remarks>
+        /// In the editor, an object backed by a persisted asset is removed with
+        /// <see cref="UnityEditor.AssetDatabase.DeleteAsset"/> (which also removes its <c>.meta</c>);
+        /// anything else is destroyed with <c>allowDestroyingAssets: true</c>. That overload is the
+        /// asset-safe one: it can never trigger Unity's "Destroying assets is not permitted to avoid
+        /// data loss" error -- a <see cref="LogType.Error"/> that fails the running test in teardown
+        /// AND leaks the object -- even when an asset path can no longer be resolved (e.g. a subclass
+        /// already deleted the asset, leaving an orphaned persistent wrapper, or
+        /// <c>EditorUtility.IsPersistent</c> and <c>GetAssetPath</c> momentarily disagree). The flag
+        /// is a harmless no-op for in-memory objects, which -- together with the path-based
+        /// <c>DeleteAsset</c> -- covers every kind of object these fixtures track (in-memory objects
+        /// and standalone assets).
+        /// </remarks>
+        protected void DestroyTrackedObjects()
+        {
+            if (_trackedObjects.Count == 0)
+            {
+                return;
+            }
+
+#if UNITY_EDITOR
+            using (AssetDatabaseBatchHelper.BeginBatch(refreshOnDispose: false))
+#endif
+            {
+                Object[] snapshot = _trackedObjects.ToArray();
+                foreach (Object obj in snapshot)
+                {
+                    if (obj == null)
+                    {
+                        continue;
+                    }
+#if UNITY_EDITOR
+                    string assetPath = UnityEditor.AssetDatabase.GetAssetPath(obj);
+                    if (!string.IsNullOrEmpty(assetPath))
+                    {
+                        UnityEditor.AssetDatabase.DeleteAsset(assetPath);
+                        continue;
+                    }
+                    Object.DestroyImmediate(obj, true); // UNH-SUPPRESS: asset-safe test cleanup
+#else
+                    Object.DestroyImmediate(obj); // UNH-SUPPRESS: Required for test cleanup
+#endif
+                }
+                _trackedObjects.Clear();
+            }
+        }
+
         [UnityTearDown]
         public virtual IEnumerator UnityTearDown()
         {
+            // Deferred so the rest of teardown (object destroy, dispatcher-scope dispose,
+            // singleton clear) ALWAYS runs even if a disposal times out -- otherwise a stuck
+            // disposal would leak state into the next test. Surfaced after cleanup, below.
+            string disposalFailure = null;
+            string trackedObjectFailure = null;
             if (_trackedAsyncDisposals.Count > 0)
             {
+                // Bounded wait: an async disposal that never completes (e.g. a batchmode
+                // scene op that never signals) MUST NOT hang the leg. A hang produces no
+                // output, the CI watchdog tree-kills Unity, and results.xml is never
+                // written -- so ~thousands of passing tests report as "tests did not run."
+                // A SINGLE total deadline across all disposals bounds the whole teardown wait
+                // (a per-disposal cap could sum past the watchdog window with many disposals).
+                float disposalEndTime = Time.realtimeSinceStartup + TrackedDisposalTimeoutSeconds;
                 foreach (Func<ValueTask> producer in _trackedAsyncDisposals.ToArray())
                 {
                     if (producer == null)
@@ -280,7 +383,24 @@ namespace WallstopStudios.UnityHelpers.Tests.Core
                     ValueTask task = producer();
                     while (!task.IsCompleted)
                     {
+                        if (Time.realtimeSinceStartup > disposalEndTime)
+                        {
+                            // Record + abandon the wait; do NOT throw here. The failure is
+                            // surfaced after all cleanup runs so the next test starts clean.
+                            disposalFailure =
+                                "Tracked async disposal did not complete within "
+                                + $"{TrackedDisposalTimeoutSeconds:0.###}s during teardown of "
+                                + $"{TestContext.CurrentContext.Test.FullName}. A disposal that "
+                                + "never completes hangs the whole PlayMode leg (no results.xml); "
+                                + "ensure TrackAsyncDisposal targets complete in batchmode.";
+                            break;
+                        }
                         yield return null;
+                    }
+
+                    if (disposalFailure != null)
+                    {
+                        break;
                     }
                 }
                 _trackedAsyncDisposals.Clear();
@@ -297,8 +417,51 @@ namespace WallstopStudios.UnityHelpers.Tests.Core
                     }
 
                     Object.Destroy(obj); // UNH-SUPPRESS: Required for PlayMode test cleanup
+                }
+
+                for (int i = 0; i < TrackedObjectDestroyMaxFrames; i++)
+                {
+                    bool hasLiveObject = false;
+                    foreach (Object obj in snapshot)
+                    {
+                        if (obj != null)
+                        {
+                            hasLiveObject = true;
+                            break;
+                        }
+                    }
+
+                    if (!hasLiveObject)
+                    {
+                        break;
+                    }
+
                     yield return null;
                 }
+
+                List<string> liveTrackedObjects = null;
+                foreach (Object obj in snapshot)
+                {
+                    if (obj == null)
+                    {
+                        continue;
+                    }
+
+                    liveTrackedObjects ??= new List<string>();
+                    liveTrackedObjects.Add(
+                        $"{obj.name} ({obj.GetType().FullName}, instance {obj.GetUnityObjectId()})"
+                    );
+                }
+
+                if (liveTrackedObjects is { Count: > 0 })
+                {
+                    trackedObjectFailure =
+                        $"Tracked object cleanup left {liveTrackedObjects.Count} object(s) alive "
+                        + $"after {TrackedObjectDestroyMaxFrames} frame(s) during teardown of "
+                        + $"{TestContext.CurrentContext.Test.FullName}: "
+                        + string.Join(", ", liveTrackedObjects);
+                }
+
                 _trackedObjects.Clear();
             }
 
@@ -325,7 +488,560 @@ namespace WallstopStudios.UnityHelpers.Tests.Core
 
             EditorUi.Suppress = _previousEditorUiSuppress;
 #endif
+            string dispatcherFailure = null;
+            if (Application.isPlaying)
+            {
+                dispatcherFailure = DrainUnityMainThreadDispatchersForTeardown();
+                yield return null;
+                string followUpDispatcherFailure = DrainUnityMainThreadDispatchersForTeardown();
+                if (dispatcherFailure == null)
+                {
+                    dispatcherFailure = followUpDispatcherFailure;
+                }
+            }
+
             DisposeDispatcherScope();
+
+            // Cross-test singleton-leak guard (PlayMode only). RuntimeSingleton<T> types
+            // (UnityMainThreadDispatcher, CoroutineHandler, ...) clear their static _instance only
+            // on domain reload / scene load -- NOT between PlayMode tests in the same domain -- so a
+            // singleton created (directly or incidentally) by one test otherwise survives into the
+            // next, which fails "no instance on first access" assertions and lets dispatcher
+            // instances accumulate across the suite. Clearing here nulls every registered singleton's
+            // cached reference so the next test starts clean (the dispatcher's GameObjects are also
+            // destroyed by DisposeDispatcherScope above). EditMode destroys synchronously already, so
+            // this is scoped to PlayMode to keep the green EditMode legs untouched.
+            if (Application.isPlaying)
+            {
+                int dispatcherDestroyFrames = 10;
+                while (
+                    UnityMainThreadDispatcher.GetLiveDispatcherCount() > 0
+                    && dispatcherDestroyFrames > 0
+                )
+                {
+                    dispatcherDestroyFrames--;
+                    yield return null;
+                }
+
+                string singletonLeaksBeforeClear =
+                    RuntimeSingletonRegistry.DescribeLiveInstancesForTesting();
+                RuntimeSingletonRegistry.ClearAllRegisteredInstances();
+                int singletonDestroyFrames = TrackedObjectDestroyMaxFrames;
+                string singletonLeaksAfterClear =
+                    RuntimeSingletonRegistry.DescribeLiveInstancesForTesting();
+                while (
+                    !string.IsNullOrWhiteSpace(singletonLeaksAfterClear)
+                    && singletonDestroyFrames > 0
+                )
+                {
+                    singletonDestroyFrames--;
+                    yield return null;
+                    singletonLeaksAfterClear =
+                        RuntimeSingletonRegistry.DescribeLiveInstancesForTesting();
+                }
+
+                if (!string.IsNullOrWhiteSpace(singletonLeaksAfterClear))
+                {
+                    dispatcherFailure ??=
+                        "[uh-leak] RuntimeSingleton object(s) still resident after registry "
+                        + "cleanup during teardown of "
+                        + $"{TestContext.CurrentContext.Test.FullName}. Before cleanup: "
+                        + $"{singletonLeaksBeforeClear}. After cleanup: {singletonLeaksAfterClear}";
+                }
+
+                dispatcherDestroyFrames = 10;
+                while (
+                    UnityMainThreadDispatcher.GetLiveDispatcherCount() > 0
+                    && dispatcherDestroyFrames > 0
+                )
+                {
+                    dispatcherDestroyFrames--;
+                    yield return null;
+                }
+
+                // Leak diagnostic: a UnityMainThreadDispatcher still resident after the scope tore
+                // down + the registry cleared means a leak the cleanup could not reach (an orphaned
+                // duplicate). Surface it as one [uh-leak] line naming the just-finished test so a
+                // regression self-identifies in unity.log and fails the producer test instead of a
+                // later bystander.
+                int residentDispatchers = UnityMainThreadDispatcher.GetLiveDispatcherCount();
+                if (residentDispatchers > 0)
+                {
+                    dispatcherFailure ??=
+                        $"[uh-leak] {residentDispatchers} UnityMainThreadDispatcher object(s) "
+                        + "still resident after teardown of "
+                        + $"{TestContext.CurrentContext.Test.FullName}. "
+                        + UnityMainThreadDispatcher.DescribeLiveDispatchersForTesting();
+                }
+            }
+
+            // FINAL safety net (PlayMode only): destroy any root GameObject this test created that
+            // survived the targeted cleanup above (tracked-object destroy, dispatcher-scope dispose,
+            // singleton-registry clear), regardless of whether it was Track()'d. This closes the gap
+            // where an untracked / production-spawned / DI-spawned object outlives its test and
+            // pollutes a later one -- the root cause of this suite's cross-test flakiness.
+            //
+            // Candidates are settle-rechecked first: a non-baseline root may simply be mid-deferred-
+            // destroy from the targeted cleanup above. Object.Destroy and DontDestroyOnLoad singleton
+            // teardown flush at frame end, and the registry's Resources.FindObjectsOfTypeAll poll can
+            // report a singleton "gone" a frame before GetRootGameObjects stops returning it -- so an
+            // immediate enumeration would false-flag a singleton the registry IS correctly destroying.
+            // Only roots that survive the settle window are GENUINE leaks; those are destroyed and
+            // reported. The failure is surfaced AFTER the log reconcile below so any OnDestroy logs
+            // flush into THIS test.
+            string sweepFailure = null;
+            if (Application.isPlaying)
+            {
+                List<GameObject> leakedRoots = CollectLeakedRoots();
+                int settleFrames = TrackedObjectDestroyMaxFrames;
+                while (leakedRoots != null && settleFrames > 0)
+                {
+                    settleFrames--;
+                    yield return null;
+                    leakedRoots = CollectLeakedRoots();
+                }
+
+                if (leakedRoots != null)
+                {
+                    sweepFailure = DestroyLeakedRootsAndDescribe(leakedRoots);
+                    for (int i = 0; i < TrackedObjectDestroyMaxFrames; i++)
+                    {
+                        yield return null;
+                    }
+                }
+
+                _testStartRootsCaptured = false;
+            }
+
+            // Cross-test log-pollution guard (PlayMode only), run BEFORE any failure is surfaced. A
+            // synchronous or late-flushed [Error] -- including OnDestroy logs from the tracked-object
+            // destroy, the dispatcher/singleton clear, and the scorched-earth sweep above -- otherwise
+            // bleeds across the frame boundary into the NEXT test's scope, so an innocent later test
+            // fails for an error this fixture produced. Pump frames to flush any pending logs, then
+            // reconcile so an UNEXPECTED [Error] fails THIS fixture (where a LogAssert.Expect can fix
+            // it) instead of a bystander. Compliant tests that LogAssert.Expect their errors are
+            // unaffected. EditMode reconciles synchronously at test end already (no frame bleed), so
+            // this is scoped to PlayMode to keep the green EditMode legs untouched.
+            string expectedErrorFailure = null;
+            if (Application.isPlaying)
+            {
+                expectedErrorFailure = RestoreExpectedErrorSuppressionAndVerify();
+            }
+            if (Application.isPlaying)
+            {
+                DrainUnityMainThreadDispatchersForTeardown();
+                yield return null;
+                DrainUnityMainThreadDispatchersForTeardown();
+                LogAssert.NoUnexpectedReceived();
+            }
+
+            // All state cleanup has now run (objects destroyed, dispatcher scope disposed, singletons
+            // cleared, leaks swept) and logs are reconciled, so the next test starts clean regardless
+            // of which failure fires. Surface them AFTER the reconcile so deferred OnDestroy logs from
+            // the cleanups cannot bleed; order is root-cause priority (a hang/leak is more actionable
+            // than the noise it may have produced).
+            if (disposalFailure != null)
+            {
+                Assert.Fail(disposalFailure);
+            }
+
+            if (trackedObjectFailure != null)
+            {
+                Assert.Fail(trackedObjectFailure);
+            }
+
+            if (dispatcherFailure != null)
+            {
+                Assert.Fail(dispatcherFailure);
+            }
+
+            if (sweepFailure != null)
+            {
+                Assert.Fail(sweepFailure);
+            }
+
+            if (expectedErrorFailure != null)
+            {
+                Assert.Fail(expectedErrorFailure);
+            }
+        }
+
+        /// <summary>
+        /// Snapshots the leak-guard baseline: the loaded scenes and the IDs of their existing root
+        /// GameObjects. <see cref="SceneManager.GetSceneAt"/> excludes DontDestroyOnLoad, so framework
+        /// infrastructure and leaked singletons there are out of scope (the registry clear handles the
+        /// latter). PlayMode only.
+        /// </summary>
+        private void CaptureLeakGuardBaseline()
+        {
+            _testStartRootIds.Clear();
+            _testStartScenes.Clear();
+
+            int sceneCount = SceneManager.sceneCount;
+            for (int i = 0; i < sceneCount; i++)
+            {
+                Scene scene = SceneManager.GetSceneAt(i);
+                if (!scene.IsValid() || !scene.isLoaded)
+                {
+                    continue;
+                }
+
+                _testStartScenes.Add(scene);
+                foreach (GameObject root in scene.GetRootGameObjects())
+                {
+                    if (root != null)
+                    {
+                        _testStartRootIds.Add(root.GetUnityObjectId());
+                    }
+                }
+            }
+
+            _testStartRootsCaptured = true;
+        }
+
+        /// <summary>
+        /// Returns the root GameObjects alive now -- in a scene that existed at baseline -- whose ID
+        /// was NOT in the baseline (i.e. created by this test), or <c>null</c> when there are none (the
+        /// common fast path). Does NOT destroy anything -- the caller settle-rechecks to distinguish a
+        /// genuine leak from a root that is merely mid-deferred-destroy. Scenes the test LOADED itself
+        /// (absent from the baseline scene set) are skipped -- their content is not this test's leak.
+        /// No-op unless a PlayMode baseline was captured.
+        /// </summary>
+        private List<GameObject> CollectLeakedRoots()
+        {
+            if (!_testStartRootsCaptured)
+            {
+                return null;
+            }
+
+            List<GameObject> leaked = null;
+            int sceneCount = SceneManager.sceneCount;
+            for (int i = 0; i < sceneCount; i++)
+            {
+                Scene scene = SceneManager.GetSceneAt(i);
+                if (!scene.IsValid() || !scene.isLoaded || !_testStartScenes.Contains(scene))
+                {
+                    continue;
+                }
+
+                foreach (GameObject root in scene.GetRootGameObjects())
+                {
+                    if (root == null || _testStartRootIds.Contains(root.GetUnityObjectId()))
+                    {
+                        continue;
+                    }
+
+                    leaked ??= new List<GameObject>();
+                    leaked.Add(root);
+                }
+            }
+
+            return leaked;
+        }
+
+        /// <summary>
+        /// Destroys the given leaked roots (deferred <see cref="Object.Destroy(Object)"/>) and returns
+        /// a one-line <c>[uh-leak]</c> diagnostic naming them and the producing test, or <c>null</c>
+        /// if the list held nothing live.
+        /// </summary>
+        private string DestroyLeakedRootsAndDescribe(List<GameObject> leaked)
+        {
+            if (leaked == null)
+            {
+                return null;
+            }
+
+            List<string> descriptions = new(leaked.Count);
+            foreach (GameObject root in leaked)
+            {
+                if (root == null)
+                {
+                    continue;
+                }
+
+                descriptions.Add(DescribeRoot(root));
+                Object.Destroy(root); // UNH-SUPPRESS: scorched-earth cross-test leak cleanup
+            }
+
+            if (descriptions.Count == 0)
+            {
+                return null;
+            }
+
+            return "[uh-leak] scorched-earth swept "
+                + $"{descriptions.Count} untracked root GameObject(s) leaked by "
+                + $"{TestContext.CurrentContext.Test.FullName}: {string.Join(", ", descriptions)}. "
+                + "Every GameObject a PlayMode test creates must be destroyed before teardown "
+                + "(Track(...) it, or destroy it explicitly); a survivor pollutes later tests.";
+        }
+
+        private static string DescribeRoot(GameObject root)
+        {
+            string componentType = "GameObject";
+            Component[] components = root.GetComponents<Component>();
+            for (int i = 0; i < components.Length; i++)
+            {
+                Component component = components[i];
+                if (component != null && component is not Transform)
+                {
+                    componentType = component.GetType().Name;
+                    break;
+                }
+            }
+
+            return $"'{root.name}' ({componentType}, scene '{root.scene.name}', "
+                + $"instance {root.GetUnityObjectId()}, active={root.activeInHierarchy})";
+        }
+
+        /// <summary>
+        /// Test hook for the leak-guard self-test: re-captures the current roots as this test's
+        /// baseline (mirrors <see cref="CommonUnitySetUp"/>), so a test can establish a known
+        /// baseline after creating objects it expects the sweep to spare. PlayMode only.
+        /// </summary>
+        protected void CaptureLeakGuardBaselineForTests()
+        {
+            CaptureLeakGuardBaseline();
+        }
+
+        /// <summary>
+        /// Test hook for the leak-guard self-test: runs the teardown leak sweep immediately and
+        /// returns its diagnostic (null when nothing leaked), destroying any non-baseline root.
+        /// </summary>
+        protected string RunLeakGuardSweepForTests()
+        {
+            return DestroyLeakedRootsAndDescribe(CollectLeakedRoots());
+        }
+
+        /// <summary>
+        /// Test hook for the leak-guard self-test: the number of root GameObjects captured in the
+        /// current baseline. Non-zero in PlayMode proves <see cref="CommonUnitySetUp"/> actually
+        /// snapshotted the runner infrastructure (so a silent capture regression can't pass the
+        /// self-test).
+        /// </summary>
+        protected int LeakGuardBaselineCountForTests => _testStartRootIds.Count;
+
+        /// <summary>
+        /// True when the package logger (<see cref="WallstopStudiosLogger"/>) actually emits at
+        /// runtime in THIS build. Its <c>Log/LogDebug/LogWarn/LogError</c> bodies are compiled out
+        /// unless <c>ENABLE_UBERLOGGING</c> (auto-defined for editor/dev/debug builds) or one of the
+        /// granular <c>*_LOGGING</c> symbols is set -- so a NON-development IL2CPP player produces NO
+        /// such logs. A test that asserts a log routed through the package logger must skip that
+        /// assertion when this is false, otherwise it fails with "expected log did not appear" for a
+        /// log the build intentionally omits. Mirrors the exact gate in
+        /// <see cref="WallstopStudiosLogger"/>; kept as a <c>static readonly</c> (not <c>const</c>)
+        /// so <c>if (WallstopLoggingCompiledIn)</c> guards do not trip the unreachable-code warning
+        /// that the assembly's warnings-as-errors setting would otherwise promote to a build break.
+        /// </summary>
+        protected static readonly bool WallstopLoggingCompiledIn =
+#if ENABLE_UBERLOGGING || DEBUG_LOGGING || WARN_LOGGING || ERROR_LOGGING || DEVELOPMENT_BUILD || DEBUG || UNITY_EDITOR
+            true;
+#else
+            false;
+#endif
+
+        /// <summary>
+        /// Registers a <see cref="LogAssert.Expect(LogType, Regex)"/> expectation only when the
+        /// package logger is compiled in for this build (see <see cref="WallstopLoggingCompiledIn"/>).
+        /// Use for logs produced via <see cref="WallstopStudiosLogger"/> (<c>component.Log/LogWarn/
+        /// LogError</c>) so the expectation is silently skipped in a NON-development player where those
+        /// bodies are no-ops. For logs emitted via raw <c>UnityEngine.Debug.Log*</c> (which are NOT
+        /// stripped) keep using <see cref="LogAssert.Expect(LogType, Regex)"/> directly.
+        /// </summary>
+        protected static void ExpectWallstopLog(
+            UnityEngine.LogType type,
+            System.Text.RegularExpressions.Regex pattern
+        )
+        {
+            if (!WallstopLoggingCompiledIn)
+            {
+                return;
+            }
+
+            LogAssert.Expect(type, pattern);
+        }
+
+        /// <summary>
+        /// Registers an EXPECTED error/warning log pattern that is captured + SUPPRESSED (kept out of
+        /// the global Unity log) for the rest of the current PlayMode test, instead of asserted via
+        /// LogAssert.Expect. This makes the assertion immune to the Unity Test Framework re-invoking a
+        /// completed test body on a later scene op (which would otherwise re-emit the log into a
+        /// bystander). The pattern must still be matched at least once by teardown, or the test fails
+        /// (same guarantee as LogAssert.Expect's "expected log did not appear"). EditMode (where the
+        /// suppressing handler is not installed) falls back to LogAssert.Expect.
+        /// </summary>
+        protected static void ExpectError(UnityEngine.LogType type, string pattern) =>
+            ExpectError(type, new System.Text.RegularExpressions.Regex(pattern));
+
+        protected static void ExpectError(
+            UnityEngine.LogType type,
+            System.Text.RegularExpressions.Regex pattern
+        )
+        {
+            lock (_expectedErrorLock)
+            {
+                if (_expectErrorHandler != null)
+                {
+                    _expectedErrors.Add((type, pattern));
+                    return;
+                }
+            }
+            UnityEngine.TestTools.LogAssert.Expect(type, pattern);
+        }
+
+        // Custom log handler: for Error/Warning/Assert/Exception logs matching a registered expected
+        // pattern (same LogType), record the match and SUPPRESS (do not forward to the inner handler,
+        // which is what keeps it out of LogAssert/the console). Everything else forwards unchanged.
+        private sealed class ExpectedErrorSuppressingHandler : UnityEngine.ILogHandler
+        {
+            private readonly UnityEngine.ILogHandler _inner;
+
+            public ExpectedErrorSuppressingHandler(UnityEngine.ILogHandler inner)
+            {
+                _inner = inner;
+            }
+
+            public void LogFormat(
+                UnityEngine.LogType logType,
+                UnityEngine.Object context,
+                string format,
+                params object[] args
+            )
+            {
+                if (
+                    logType == UnityEngine.LogType.Error
+                    || logType == UnityEngine.LogType.Warning
+                    || logType == UnityEngine.LogType.Assert
+                    || logType == UnityEngine.LogType.Exception
+                )
+                {
+                    string message;
+                    try
+                    {
+                        message =
+                            args != null && args.Length > 0 ? string.Format(format, args) : format;
+                    }
+                    catch
+                    {
+                        message = format;
+                    }
+
+                    lock (_expectedErrorLock)
+                    {
+                        for (int i = 0; i < _expectedErrors.Count; i++)
+                        {
+                            if (
+                                _expectedErrors[i].type == logType
+                                && _expectedErrors[i].pattern.IsMatch(message)
+                            )
+                            {
+                                _matchedExpectedErrors.Add(_expectedErrors[i].pattern);
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                _inner.LogFormat(logType, context, format, args);
+            }
+
+            public void LogException(System.Exception exception, UnityEngine.Object context)
+            {
+                _inner.LogException(exception, context);
+            }
+        }
+
+        private static void InstallExpectedErrorSuppression()
+        {
+            if (_expectErrorHandler != null)
+            {
+                return;
+            }
+            _expectErrorInnerHandler = UnityEngine.Debug.unityLogger.logHandler;
+            _expectErrorHandler = new ExpectedErrorSuppressingHandler(_expectErrorInnerHandler);
+            UnityEngine.Debug.unityLogger.logHandler = _expectErrorHandler;
+        }
+
+        // Restores the real handler and returns a failure string for any expected pattern never matched
+        // (or null). Always clears the registry so the next test starts clean.
+        private static string RestoreExpectedErrorSuppressionAndVerify()
+        {
+            lock (_expectedErrorLock)
+            {
+                if (
+                    _expectErrorHandler != null
+                    && ReferenceEquals(
+                        UnityEngine.Debug.unityLogger.logHandler,
+                        _expectErrorHandler
+                    )
+                )
+                {
+                    UnityEngine.Debug.unityLogger.logHandler = _expectErrorInnerHandler;
+                }
+                _expectErrorHandler = null;
+                _expectErrorInnerHandler = null;
+
+                string failure = null;
+                foreach (
+                    (
+                        UnityEngine.LogType type,
+                        System.Text.RegularExpressions.Regex pattern
+                    ) in _expectedErrors
+                )
+                {
+                    if (!_matchedExpectedErrors.Contains(pattern))
+                    {
+                        failure =
+                            (failure ?? "Expected error log(s) never matched: ")
+                            + $"[{type}] {pattern} ; ";
+                    }
+                }
+                _expectedErrors.Clear();
+                _matchedExpectedErrors.Clear();
+                return failure;
+            }
+        }
+
+        /// <summary>
+        /// Registers a <see cref="LogAssert"/> expectation for the exact <c>[Error]</c> a relational
+        /// component assignment logs when a REQUIRED field cannot be resolved. Centralizes the log
+        /// FORMAT -- the <c>&lt;time&gt;|&lt;name&gt;[&lt;type&gt;]|message</c> shape produced by the
+        /// package logger -- so the dozen-plus child/parent/sibling tests share ONE source of truth
+        /// (mirroring the producer in <c>BaseRelationalComponentAttribute</c>) instead of hand-copied
+        /// regexes that silently rot if the format changes. Caller-supplied values are regex-escaped,
+        /// so pass plain display names (e.g. <c>"UnityEngine.SpriteRenderer[]"</c>).
+        /// </summary>
+        /// <param name="ownerName">GameObject name hosting the component (e.g. "Child-Missing").</param>
+        /// <param name="ownerType">Owning component type name (e.g. "ChildMissingTester").</param>
+        /// <param name="relationship">"child", "parent", or "sibling".</param>
+        /// <param name="fieldType">Field type display name (e.g. "UnityEngine.SpriteRenderer").</param>
+        /// <param name="fieldName">Field name (e.g. "requiredRenderer").</param>
+        protected static void ExpectMissingRelationalComponentError(
+            string ownerName,
+            string ownerType,
+            string relationship,
+            string fieldType,
+            string fieldName
+        )
+        {
+            // The "Unable to find ..." error is emitted via the package logger
+            // (component.LogError in RelationalComponentProcessor.LogMissingComponentError), whose
+            // body is compiled out in a NON-development player. Skip the expectation there so the
+            // test does not fail for a log the build intentionally omits; the behavioral asserts
+            // (field left null, etc.) still run and validate the resolution result.
+            if (!WallstopLoggingCompiledIn)
+            {
+                return;
+            }
+
+            static string Escape(string value) =>
+                System.Text.RegularExpressions.Regex.Escape(value);
+
+            string pattern =
+                $@"^\d+(\.\d+)?\|{Escape(ownerName)}\[{Escape(ownerType)}\]\|Unable to find "
+                + $"{relationship} component of type {Escape(fieldType)} for field "
+                + $"'{Escape(fieldName)}'$";
+
+            ExpectError(LogType.Error, pattern);
         }
 
         /// <summary>
@@ -356,6 +1072,31 @@ namespace WallstopStudios.UnityHelpers.Tests.Core
         }
 
 #if UNITY_EDITOR
+        /// <summary>
+        /// Registers an expectation for Unity's benign "No script asset for ScriptableObject"
+        /// importer warning so a fixture that legitimately persists a raw base
+        /// <see cref="ScriptableObject"/> (via <c>ScriptableObject.CreateInstance&lt;ScriptableObject&gt;()</c>
+        /// plus <see cref="UnityEditor.AssetDatabase.CreateAsset"/>) does not fail under
+        /// <see cref="LogAssert.NoUnexpectedReceived"/>.
+        /// </summary>
+        /// <remarks>
+        /// A base <see cref="ScriptableObject"/> has no backing <c>MonoScript</c>, so Unity's importer
+        /// emits this warning when the asset is imported, re-serialized, or deleted (most reliably during
+        /// a clean CI import). The warning originates inside Unity's importer, not in production cleanup
+        /// code, so the only thing to do is tolerate it.
+        ///
+        /// CI evidence (Unity 2021/2022/6000, clean editmode import) shows the warning fires
+        /// consistently for these fixtures, so <see cref="LogAssert.Expect(LogType, Regex)"/> is the
+        /// correct, tightly scoped choice: it consumes exactly this one message and nothing else.
+        /// <see cref="LogAssert.ignoreFailingMessages"/> was rejected because it suppresses ALL failing
+        /// messages for its scope, which would mask genuine regressions. Call this immediately before
+        /// the asset is imported/deleted and before <see cref="LogAssert.NoUnexpectedReceived"/>.
+        /// </remarks>
+        protected static void ExpectNoScriptAssetForScriptableObjectWarning()
+        {
+            LogAssert.Expect(LogType.Warning, new Regex("No script asset for "));
+        }
+
         private static void CleanupPackageRootGeneratedArtifacts()
         {
             string packageRoot = GetPackageRoot();
@@ -523,36 +1264,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Core
             }
 #endif
 
-            if (_trackedObjects.Count > 0)
-            {
-#if UNITY_EDITOR
-                using (AssetDatabaseBatchHelper.BeginBatch(refreshOnDispose: false))
-#endif
-                {
-                    Object[] snapshot = _trackedObjects.ToArray();
-                    foreach (Object obj in snapshot)
-                    {
-                        if (obj != null)
-                        {
-#if UNITY_EDITOR
-                            // If the object is a persisted asset, use AssetDatabase.DeleteAsset
-                            // DestroyImmediate without allowDestroyingAssets=true will fail for assets
-                            if (UnityEditor.EditorUtility.IsPersistent(obj))
-                            {
-                                string assetPath = UnityEditor.AssetDatabase.GetAssetPath(obj);
-                                if (!string.IsNullOrEmpty(assetPath))
-                                {
-                                    UnityEditor.AssetDatabase.DeleteAsset(assetPath);
-                                    continue;
-                                }
-                            }
-#endif
-                            Object.DestroyImmediate(obj); // UNH-SUPPRESS: Required for final test cleanup
-                        }
-                    }
-                    _trackedObjects.Clear();
-                }
-            }
+            DestroyTrackedObjects();
 
 #if UNITY_EDITOR
             // Asset deletions above can schedule AssetPostprocessor drains. Flush them
@@ -606,28 +1318,14 @@ namespace WallstopStudios.UnityHelpers.Tests.Core
             }
 
             DisposeDispatcherScope();
-            UnityMainThreadDispatcher.SetAutoCreationEnabled(true);
         }
-
-#if REFLEX_PRESENT
-        private static void EnsureReflexSettings()
-        {
-            Type supportType = Type.GetType(
-                "WallstopStudios.UnityHelpers.Tests.TestUtils.ReflexTestSupport, WallstopStudios.UnityHelpers.Tests.Runtime",
-                throwOnError: false
-            );
-            MethodInfo ensureMethod = supportType?.GetMethod(
-                "EnsureReflexSettings",
-                BindingFlags.Public | BindingFlags.Static
-            );
-            ensureMethod?.Invoke(null, null);
-        }
-#endif
 
         private void InitializeDispatcherScope()
         {
             DisposeDispatcherScope();
-            _dispatcherScope = UnityMainThreadDispatcher.CreateTestScope(destroyImmediate: true);
+            _dispatcherScope = UnityMainThreadDispatcher.CreateTestScope(
+                destroyImmediate: !Application.isPlaying
+            );
         }
 
         private void DisposeDispatcherScope()
@@ -639,6 +1337,34 @@ namespace WallstopStudios.UnityHelpers.Tests.Core
 
             _dispatcherScope.Dispose();
             _dispatcherScope = null;
+        }
+
+        private static string DrainUnityMainThreadDispatchersForTeardown()
+        {
+            const int MaxDrainPasses = 8;
+            for (int i = 0; i < MaxDrainPasses; i++)
+            {
+                int pendingActionCount =
+                    UnityMainThreadDispatcher.GetPendingActionCountForTesting();
+                if (pendingActionCount <= 0)
+                {
+                    return null;
+                }
+
+                UnityMainThreadDispatcher.DrainPendingActionsForTesting();
+            }
+
+            int remainingPendingActionCount =
+                UnityMainThreadDispatcher.GetPendingActionCountForTesting();
+            if (remainingPendingActionCount <= 0)
+            {
+                return null;
+            }
+
+            return $"[uh-leak] {remainingPendingActionCount} UnityMainThreadDispatcher action(s) "
+                + "remained queued after teardown drain of "
+                + $"{TestContext.CurrentContext.Test.FullName}. "
+                + UnityMainThreadDispatcher.DescribeLiveDispatchersForTesting();
         }
 
         private static async ValueTask UnloadSceneAsync(Scene scene)
@@ -654,10 +1380,74 @@ namespace WallstopStudios.UnityHelpers.Tests.Core
                 return;
             }
 
+            // Bounded wait: a scene unload that never reports done (a batchmode edge case)
+            // must not hang teardown forever -- that stalls the leg and loses results.xml.
+            // Give up after a generous cap and surface it; the domain/editor tears down
+            // regardless, so a not-yet-unloaded scene at this point is harmless.
+            float endTime = Time.realtimeSinceStartup + TrackedDisposalTimeoutSeconds;
             while (!unload.isDone)
             {
+                if (Time.realtimeSinceStartup > endTime)
+                {
+                    Debug.LogWarning(
+                        $"[uh-leak] Scene '{scene.name}' did not finish unloading within "
+                            + $"{TrackedDisposalTimeoutSeconds:0.###}s; abandoning the wait to "
+                            + "avoid hanging the run."
+                    );
+                    return;
+                }
                 await Task.Yield();
             }
+        }
+
+        /// <summary>
+        /// Polls frames until a Unity object reports as destroyed (its overloaded <c>== null</c>
+        /// becomes true), or <paramref name="maxFrames"/> elapses. <see cref="Object.Destroy(Object)"/>
+        /// is ASYNCHRONOUS in PlayMode — the managed wrapper is not nulled until Unity processes
+        /// the deferred destruction, and the exact frame lag varies by editor version and CI load,
+        /// so the "Destroy then one <c>yield return null</c>, then assert null" pattern is flaky.
+        /// Poll instead. Returns quietly on timeout so the caller's own assertion produces the
+        /// test-specific failure message. For <c>[UnityTest]</c> fixtures. Runtime-safe (no editor
+        /// API), so it is available to the standalone player build too.
+        /// </summary>
+        protected static IEnumerator WaitUntilDestroyed(Object obj, int maxFrames = 30)
+        {
+            if (obj == null)
+            {
+                yield break;
+            }
+
+            Type objectType = obj.GetType();
+            string objectName = obj.name;
+            long objectId = obj.GetUnityObjectId();
+
+            for (int i = 0; i < maxFrames; i++)
+            {
+                if (obj == null)
+                {
+                    yield break;
+                }
+                yield return null;
+            }
+
+            int liveObjectCount = -1;
+            try
+            {
+                liveObjectCount = Resources.FindObjectsOfTypeAll(objectType).Length;
+            }
+            catch (Exception ex)
+            {
+                TestContext.WriteLine(
+                    $"WaitUntilDestroyed failed to count live {objectType.FullName} objects: {ex.Message}"
+                );
+            }
+
+            TestContext.WriteLine(
+                $"WaitUntilDestroyed timed out after {maxFrames} frame(s). "
+                    + $"Object '{objectName}' ({objectType.FullName}, instance {objectId}) "
+                    + $"still reports alive. Application.isPlaying={Application.isPlaying}, "
+                    + $"live objects of same type={liveObjectCount}."
+            );
         }
 
 #if UNITY_EDITOR
@@ -1201,6 +1991,194 @@ namespace WallstopStudios.UnityHelpers.Tests.Core
                 }
                 return result;
             }
+        }
+
+        /// <summary>
+        /// Coroutine: force the AssetDatabase to reconcile, then yield frames until the
+        /// asset at <paramref name="assetPath"/> is no longer loadable (or the timeout
+        /// elapses). A raw <see cref="System.IO.File.Delete(string)"/> or a deferred
+        /// <see cref="UnityEditor.AssetDatabase.DeleteAsset(string)"/> becomes visible to
+        /// the AssetDatabase ASYNCHRONOUSLY, and the lag differs BY EDITOR VERSION
+        /// (2021.3 / 6000 retain the in-memory object longer than 2022.3), so the classic
+        /// "one Refresh + one frame, then assert null" pattern is version-flaky. Poll
+        /// instead. On timeout this returns quietly so the caller's own assertion produces
+        /// the test-specific failure message. Editor-only; for <c>[UnityTest]</c> fixtures.
+        /// </summary>
+        protected static IEnumerator WaitUntilAssetUnloaded(
+            string assetPath,
+            float timeoutSeconds = 5f
+        )
+        {
+            float endTime = Time.realtimeSinceStartup + timeoutSeconds;
+            while (true)
+            {
+                using (AssetDatabaseBatchHelper.PauseBatch())
+                {
+                    UnityEditor.AssetDatabase.Refresh(
+                        UnityEditor.ImportAssetOptions.ForceSynchronousImport
+                    );
+                }
+                if (UnityEditor.AssetDatabase.LoadAssetAtPath<Object>(assetPath) == null)
+                {
+                    yield break;
+                }
+                if (Time.realtimeSinceStartup > endTime)
+                {
+                    TestContext.WriteLine(
+                        $"WaitUntilAssetUnloaded timed out after {timeoutSeconds:0.###} second(s). "
+                            + DescribeAssetDatabaseState(assetPath)
+                    );
+                    yield break;
+                }
+                yield return null;
+            }
+        }
+
+        /// <summary>
+        /// Coroutine: force the AssetDatabase to reconcile, then yield frames until the
+        /// asset at <paramref name="assetPath"/> is loadable (or the timeout elapses).
+        /// Editor-only; for <c>[UnityTest]</c> fixtures.
+        /// </summary>
+        protected static IEnumerator WaitUntilAssetLoaded(
+            string assetPath,
+            float timeoutSeconds = 5f
+        )
+        {
+            float endTime = Time.realtimeSinceStartup + timeoutSeconds;
+            while (true)
+            {
+                using (AssetDatabaseBatchHelper.PauseBatch())
+                {
+                    UnityEditor.AssetDatabase.Refresh(
+                        UnityEditor.ImportAssetOptions.ForceSynchronousImport
+                    );
+                }
+                if (UnityEditor.AssetDatabase.LoadAssetAtPath<Object>(assetPath) != null)
+                {
+                    yield break;
+                }
+                if (Time.realtimeSinceStartup > endTime)
+                {
+                    TestContext.WriteLine(
+                        $"WaitUntilAssetLoaded timed out after {timeoutSeconds:0.###} second(s). "
+                            + DescribeAssetDatabaseState(assetPath)
+                    );
+                    yield break;
+                }
+                yield return null;
+            }
+        }
+
+        /// <summary>
+        /// Synchronous counterpart of <see cref="WaitUntilAssetUnloaded"/> for non-coroutine
+        /// (<c>[Test]</c>) fixtures: repeatedly forces a synchronous AssetDatabase refresh
+        /// until the asset at <paramref name="assetPath"/> is gone or
+        /// <paramref name="maxRefreshes"/> is reached. Uses no real-time sleep (editor
+        /// refreshes are synchronous), so it does not trip the UNH010 wait-time lint.
+        /// Editor-only.
+        /// </summary>
+        protected static void ForceAssetUnloaded(string assetPath, int maxRefreshes = 10)
+        {
+            for (int i = 0; i < maxRefreshes; i++)
+            {
+                using (AssetDatabaseBatchHelper.PauseBatch())
+                {
+                    UnityEditor.AssetDatabase.Refresh(
+                        UnityEditor.ImportAssetOptions.ForceSynchronousImport
+                    );
+                }
+                if (UnityEditor.AssetDatabase.LoadAssetAtPath<Object>(assetPath) == null)
+                {
+                    return;
+                }
+            }
+
+            TestContext.WriteLine(
+                $"ForceAssetUnloaded timed out after {maxRefreshes} refresh(es). "
+                    + DescribeAssetDatabaseState(assetPath)
+            );
+        }
+
+        /// <summary>
+        /// Polls until the folder at <paramref name="folderPath"/> becomes a valid AssetDatabase
+        /// folder, forcing a synchronous refresh each iteration, or <paramref name="maxRefreshes"/>
+        /// is reached. <see cref="UnityEditor.AssetDatabase.CreateFolder"/> becomes visible to
+        /// <see cref="UnityEditor.AssetDatabase.IsValidFolder"/> ASYNCHRONOUSLY, and the lag varies
+        /// by scheduling (a SINGLE_THREADED leg exposed a "create then one refresh, then assert
+        /// valid" race that the default leg did not), so poll instead of assuming one refresh
+        /// settles it. Returns quietly on timeout so the caller's own assertion fails specifically.
+        /// Uses no real-time sleep (refreshes are synchronous), so it does not trip UNH010.
+        /// Editor-only; for <c>[UnityTest]</c> fixtures.
+        /// </summary>
+        protected static IEnumerator WaitUntilFolderValid(string folderPath, int maxRefreshes = 10)
+        {
+            for (int i = 0; i < maxRefreshes; i++)
+            {
+                if (UnityEditor.AssetDatabase.IsValidFolder(folderPath))
+                {
+                    yield break;
+                }
+                using (AssetDatabaseBatchHelper.PauseBatch())
+                {
+                    UnityEditor.AssetDatabase.Refresh(
+                        UnityEditor.ImportAssetOptions.ForceSynchronousImport
+                    );
+                }
+                yield return null;
+            }
+
+            TestContext.WriteLine(
+                $"WaitUntilFolderValid timed out after {maxRefreshes} refresh(es). "
+                    + $"folderPath='{folderPath}', "
+                    + $"isValidFolder={UnityEditor.AssetDatabase.IsValidFolder(folderPath)}."
+            );
+        }
+
+        private static string DescribeAssetDatabaseState(string assetPath)
+        {
+            string absolutePath = string.Empty;
+            string metaPath = string.Empty;
+            bool fileExists = false;
+            bool metaExists = false;
+            try
+            {
+                string projectRoot = Path.GetDirectoryName(Application.dataPath);
+                if (!string.IsNullOrEmpty(projectRoot) && !string.IsNullOrEmpty(assetPath))
+                {
+                    absolutePath = Path.Combine(
+                        projectRoot,
+                        assetPath.Replace('/', Path.DirectorySeparatorChar)
+                    );
+                    metaPath = absolutePath + ".meta";
+                    fileExists = File.Exists(absolutePath);
+                    metaExists = File.Exists(metaPath);
+                }
+            }
+            catch (Exception ex)
+            {
+                TestContext.WriteLine(
+                    $"Failed to inspect filesystem state for asset '{assetPath}': {ex.Message}"
+                );
+            }
+
+            Object loadedAsset = UnityEditor.AssetDatabase.LoadAssetAtPath<Object>(assetPath);
+            UnityEditor.AssetImporter importer = UnityEditor.AssetImporter.GetAtPath(assetPath);
+            string guid = UnityEditor.AssetDatabase.AssetPathToGUID(assetPath);
+
+            return $"assetPath='{assetPath}', absolutePath='{absolutePath}', "
+                + $"fileExists={fileExists}, metaPath='{metaPath}', metaExists={metaExists}, "
+                + $"guid='{guid}', loadedAsset={DescribeUnityObject(loadedAsset)}, "
+                + $"importer={(importer == null ? "null" : importer.GetType().FullName)}.";
+        }
+
+        private static string DescribeUnityObject(Object obj)
+        {
+            if (obj == null)
+            {
+                return "null";
+            }
+
+            return $"{obj.GetType().FullName}('{obj.name}', instance {obj.GetUnityObjectId()})";
         }
 #endif
 

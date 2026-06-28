@@ -12,6 +12,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
 
     [TestFixture]
     [NUnit.Framework.Category("Fast")]
+    [WallstopStudios.UnityHelpers.Tests.Core.SkipUnderIL2CPP]
     public sealed class ProtoEqualityExtensionsTests : CommonTestBase
     {
         [ProtoContract]

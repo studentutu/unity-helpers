@@ -13,13 +13,8 @@ Use this reference when you need:
 - Complete linter command documentation
 - Configuration file locations and settings
 - Understanding what specific rules check
-- Details about npm script internals
 
 For the quick validation workflow, see [validate-before-commit](./validate-before-commit.md).
-For fixing common errors, see [validation-troubleshooting](./validation-troubleshooting.md).
-
-> **Note:** This is a comprehensive reference for linter details. For the quick pre-commit workflow,
-> see [validate-before-commit](./validate-before-commit.md).
 
 ---
 
@@ -99,7 +94,7 @@ The config linter catches case-redundant dictionary entries (error, blocking) an
 
 ### Lint-Error-Code Coverage (Contract)
 
-`npm run validate:lint-error-codes` enforces that every `^[A-Z]{2,}\d{3}$` token emitted by `scripts/lint-*.{ps1,js}`, `scripts/tests/test-lint-*.{ps1,js,sh}`, or `.githooks/*` has its prefix registered with cspell; on drift it prints a copy-pasteable JSON patch. Regression test: `scripts/tests/test-validate-lint-error-codes.ps1`. Wired into `validate:content`, `validate:tests`, and pre-push (when any file in those three scan roots, `cspell.json`, the validator, or its test changes).
+`npm run validate:lint-error-codes` enforces that every `^[A-Z]{2,}\d{3}$` token emitted by `scripts/lint-*.{ps1,js}`, `scripts/tests/test-lint-*.{ps1,js,sh}`, or `.githooks/*` has its prefix registered with cspell; on drift it prints a copy-pasteable JSON patch. Regression test: `scripts/tests/test-validate-lint-error-codes.ps1`. Wired into `validate:content`, `validate:tests`, and CI; run it before pushing when any file in those scan roots, `cspell.json`, the validator, or its test changes.
 
 ### Inline Ignores
 
@@ -157,7 +152,7 @@ These rules are disabled in this project:
 ### Command
 
 ```bash
-npm run lint:docs
+npm run lint:docs # full scan; use scripts/lint-doc-links.ps1 -Paths <files> for scoped checks
 ```
 
 ### What It Checks
@@ -329,6 +324,17 @@ pwsh -NoProfile -File scripts/lint-tests.ps1
 4. **UNH003**: Test classes missing `CommonTestBase` inheritance
 5. **UNH004**: Underscores in test names
 6. **UNH005**: `Assert.IsNull`/`Assert.IsNotNull` (should use `Assert.IsTrue` for Unity null checks)
+7. **UNH011**: Editor-only references (`UnityEditor`, `WallstopStudios.UnityHelpers.Editor`) in
+   player-compiled test code (anything under `Tests/` except `Tests/Editor/`) must be inside
+   `#if UNITY_EDITOR`. Otherwise the editor assembly is stripped from the standalone player build
+   and the leg fails with `CS0234` before any test runs. Add `// UNH-SUPPRESS UNH011` to opt out.
+8. **UNH012**: A test must never `yield return` a `WaitForEndOfFrame` (e.g.
+   `yield return new WaitForEndOfFrame();` or `yield return Buffers.WaitForEndOfFrame;`). Under
+   `-batchmode -nographics` (the headless CI legs) there is no end-of-frame callback, so the yield
+   never resumes: the PlayMode run hangs until it is force-killed and emits a misleading `total=0`
+   `results.xml` that aborts the whole leg. Use `yield return null` (the production helper is
+   batchmode-safe). A bare reference without `yield return` is not flagged. Add `// UNH-SUPPRESS`
+   to opt out.
 
 All Unity object creation in tests must use `Track()`:
 

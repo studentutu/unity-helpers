@@ -10,6 +10,7 @@ namespace WallstopStudios.UnityHelpers.Integrations.VContainer
     using UnityEngine;
     using UnityEngine.SceneManagement;
     using WallstopStudios.UnityHelpers.Core.Attributes;
+    using WallstopStudios.UnityHelpers.Core.Extension;
     using WallstopStudios.UnityHelpers.Tags;
     using WallstopStudios.UnityHelpers.Utils;
 
@@ -46,6 +47,16 @@ namespace WallstopStudios.UnityHelpers.Integrations.VContainer
 
         internal void OnSceneLoaded(Scene scene, LoadSceneMode mode)
         {
+            // Additive-only, matching this class's summary and the Reflex sibling. A single-mode
+            // LoadScene replaces the scene (the scoped container is normally torn down with it), so
+            // re-assigning here is wrong -- and a listener that outlived its container would re-emit
+            // another fixture's required-field [Error] into whatever later test triggered the load
+            // (e.g. any later PlayMode test that performs a scene load).
+            if (mode != LoadSceneMode.Additive)
+            {
+                return;
+            }
+
             if (!scene.IsValid())
             {
                 return;
@@ -66,9 +77,9 @@ namespace WallstopStudios.UnityHelpers.Integrations.VContainer
             if (relationalTypes.Count == 0)
             {
                 // Fallback: scan all components once and assign when type has relational fields
-                Component[] all = includeInactive
-                    ? UnityEngine.Object.FindObjectsOfType<Component>(true)
-                    : UnityEngine.Object.FindObjectsOfType<Component>(false);
+                Component[] all = UnityObjectExtensions.FindObjectsOfTypeShim<Component>(
+                    includeInactive
+                );
 
                 for (int i = 0; i < all.Length; i++)
                 {
@@ -195,9 +206,9 @@ namespace WallstopStudios.UnityHelpers.Integrations.VContainer
                 }
             }
 
-            Component[] all = includeInactive
-                ? UnityEngine.Object.FindObjectsOfType<Component>(true)
-                : UnityEngine.Object.FindObjectsOfType<Component>(false);
+            Component[] all = UnityObjectExtensions.FindObjectsOfTypeShim<Component>(
+                includeInactive
+            );
 
             foreach (Component component in all)
             {

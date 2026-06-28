@@ -1,11 +1,24 @@
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [string[]]$Paths,
+    [string]$ModifiedPathList,
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$AdditionalPaths,
     [switch]$DryRun,
     [switch]$VerboseOutput
 )
 
+# cspell:ignore hlsl sln
+
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Get-Item $PSScriptRoot).Parent.FullName
+$effectivePaths = @()
+if ($Paths -and $Paths.Count -gt 0) {
+    $effectivePaths += $Paths
+}
+if ($AdditionalPaths -and $AdditionalPaths.Count -gt 0) {
+    $effectivePaths += $AdditionalPaths
+}
 
 # =============================================================================
 # LINE ENDING POLICY (must match .gitattributes, .prettierrc.json, .yamllint.yaml)
@@ -41,6 +54,10 @@ $lfPathPatterns = @(
     '^_includes/.*\.html$'  # Jekyll includes (_includes/*.html)
 )
 
+$trackedTextPathPatterns = @(
+    '^\.gitignore$'
+)
+
 function Test-ShouldUseLf([string]$path) {
     # Normalize path separators to forward slashes for consistent matching
     $normalizedPath = $path -replace '\\', '/'
@@ -61,21 +78,31 @@ function Test-ShouldUseLf([string]$path) {
     return $false
 }
 
+function Test-ShouldCheckPath([string]$path) {
+    $normalizedPath = $path -replace '\\', '/'
+    $ext = [System.IO.Path]::GetExtension($path).TrimStart('.').ToLowerInvariant()
+    if ($extensions -contains $ext) {
+        return $true
+    }
+
+    foreach ($pattern in $trackedTextPathPatterns) {
+        if ($normalizedPath -match $pattern) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
 function Get-TrackedFiles {
     $files = (& git -C $repoRoot ls-files -z) -split "`0" | Where-Object { $_ -ne '' }
-    return $files | Where-Object {
-        $ext = [System.IO.Path]::GetExtension($_).TrimStart('.').ToLowerInvariant()
-        $extensions -contains $ext
-    }
+    return $files | Where-Object { Test-ShouldCheckPath $_ }
 }
 
 function Get-TargetFiles([string[]]$paths, [string[]]$trackedFiles) {
     if (-not $paths -or $paths.Count -eq 0) {
         return $trackedFiles
     }
-
-    $trackedSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    foreach ($file in $trackedFiles) { $trackedSet.Add($file) | Out-Null }
 
     $targets = New-Object System.Collections.Generic.List[string]
     foreach ($path in $paths) {
@@ -84,10 +111,11 @@ function Get-TargetFiles([string[]]$paths, [string[]]$trackedFiles) {
         if (-not $resolved) { continue }
 
         $fullPath = $resolved.Path
+        if (-not [System.IO.File]::Exists($fullPath)) { continue }
+
         $relative = [System.IO.Path]::GetRelativePath($repoRoot, $fullPath)
         $normalized = $relative -replace '\\', '/'
-
-        if ($trackedSet.Contains($normalized)) {
+        if (Test-ShouldCheckPath $normalized) {
             $targets.Add($normalized) | Out-Null
         }
     }
@@ -109,8 +137,8 @@ $eolFixed = 0
 $bomRemoved = 0
 $modified = New-Object System.Collections.Generic.List[string]
 
-$tracked = Get-TrackedFiles
-$targets = Get-TargetFiles $Paths $tracked
+$tracked = if ($effectivePaths.Count -gt 0) { @() } else { Get-TrackedFiles }
+$targets = Get-TargetFiles $effectivePaths $tracked
 foreach ($path in $targets) {
     $fullPath = Join-Path $repoRoot $path
     try { $bytes = [System.IO.File]::ReadAllBytes($fullPath) } catch { continue }
@@ -144,6 +172,19 @@ foreach ($path in $targets) {
         $modified.Add($path) | Out-Null
         if ($VerboseOutput) { Write-Host "Fixed: $path" }
     }
+}
+
+if (-not [string]::IsNullOrWhiteSpace($ModifiedPathList)) {
+    $modifiedText = if ($modified.Count -gt 0) {
+        ($modified -join ([string][char]0)) + ([string][char]0)
+    }
+    else {
+        ''
+    }
+    [System.IO.File]::WriteAllBytes(
+        $ModifiedPathList,
+        [System.Text.UTF8Encoding]::new($false).GetBytes($modifiedText)
+    )
 }
 
 Write-Host "Files fixed: $changed (EOL:$eolFixed, BOMRemoved:$bomRemoved)"

@@ -17,6 +17,83 @@ function Write-Error-Custom($msg) {
   Write-Host "[validate-npm-package] $msg" -ForegroundColor Red
 }
 
+function ConvertTo-PackageRelativePath {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$BasePath,
+    [Parameter(Mandatory = $true)]
+    [string]$Path
+  )
+
+  $rootPath = [System.IO.Path]::GetFullPath($BasePath)
+  $childPath = [System.IO.Path]::GetFullPath($Path)
+
+  return [System.IO.Path]::GetRelativePath($rootPath, $childPath).Replace('\', '/')
+}
+
+function Get-TrackedPackageFiles {
+  param(
+    [string]$RepoRoot,
+    [string[]]$PackageRoots
+  )
+
+  $trackedRoots = @($PackageRoots | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+  if ($trackedRoots.Count -eq 0) {
+    return @()
+  }
+
+  $trackedFiles = (& git -C $RepoRoot ls-files -z -- @trackedRoots) -split "`0" | Where-Object { $_ -ne '' }
+  if ($LASTEXITCODE -ne 0) {
+    throw "git ls-files failed while collecting tracked package files."
+  }
+
+  return @(
+    $trackedFiles |
+      ForEach-Object { $_ -replace '\\', '/' } |
+      Sort-Object
+  )
+}
+
+function Get-PackedPackageFiles {
+  param(
+    [string]$PackageDir
+  )
+
+  return @(
+    Get-ChildItem -LiteralPath $PackageDir -Recurse -File -Force |
+      ForEach-Object {
+        ConvertTo-PackageRelativePath -BasePath $PackageDir -Path $_.FullName
+      } |
+      Sort-Object
+  )
+}
+
+function Test-ExpectedPackageExclusion {
+  param(
+    [string]$RelativePath
+  )
+
+  $excludePatterns = @(
+    '.gitkeep',
+    '*.dll',
+    '*.pdb',
+    '*.tmp',
+    '*.log',
+    '*.rsp'
+  )
+
+  $fileName = Split-Path -Leaf $RelativePath
+  foreach ($pattern in $excludePatterns) {
+    if (($RelativePath -like $pattern) -or ($fileName -like $pattern)) {
+      return $true
+    }
+  }
+
+  return $false
+}
+
+$repoRoot = (Get-Location).Path
+
 # Step 1: Create a temporary directory for npm pack
 $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) "npm-package-validation-$(Get-Random)"
 Write-Info "Creating temporary directory: $tempDir"
@@ -55,9 +132,159 @@ try {
 
   # Step 5: Validate Unity folders and meta files
   $errors = @()
+
+  $forbiddenPackageEntries = @(
+    '.artifacts',
+    '.cursor',
+    '.git',
+    '.github',
+    '.githooks',
+    '.llm',
+    '.mcp.json',
+    'node_modules',
+    'package-lock.json',
+    'Tests'
+  )
+
+  $allowedTopLevelEntries = @(
+    'CHANGELOG.md',
+    'CHANGELOG.md.meta',
+    'Editor',
+    'Editor.meta',
+    'LICENSE',
+    'LICENSE.meta',
+    'README.md',
+    'README.md.meta',
+    'Runtime',
+    'Runtime.meta',
+    'Samples~',
+    'Shaders',
+    'Shaders.meta',
+    'Styles',
+    'Styles.meta',
+    'URP',
+    'URP.meta',
+    'docs',
+    'docs.meta',
+    'link.xml',
+    'link.xml.meta',
+    'package.json',
+    'package.json.meta',
+    'scripts',
+    'scripts.meta'
+  )
+
+  foreach ($entry in $forbiddenPackageEntries) {
+    $entryPath = Join-Path $packageDir $entry
+    if (Test-Path $entryPath) {
+      $errors += "Forbidden development entry included in npm package: $entry"
+    }
+  }
+
+  $topLevelEntries = Get-ChildItem -LiteralPath $packageDir -Force | ForEach-Object { $_.Name }
+  foreach ($entry in $topLevelEntries) {
+    if ($entry -cnotin $allowedTopLevelEntries) {
+      $errors += "Unexpected top-level entry included in npm package: $entry"
+    }
+  }
+
+  $scriptsDir = Join-Path $packageDir 'scripts'
+  if (Test-Path -LiteralPath $scriptsDir) {
+    $allowedScriptsEntries = @(
+      'postinstall-hooks.js',
+      'postinstall-hooks.js.meta'
+    )
+    $scriptEntries = Get-ChildItem -LiteralPath $scriptsDir -Recurse -File -Force | ForEach-Object {
+      ConvertTo-PackageRelativePath -BasePath $scriptsDir -Path $_.FullName
+    }
+    foreach ($entry in $scriptEntries) {
+      if ($entry -cnotin $allowedScriptsEntries) {
+        $errors += "Unexpected script included in npm package: scripts/$entry"
+      }
+    }
+  }
+
+  $requiredPackageEntries = @(
+    'CHANGELOG.md',
+    'CHANGELOG.md.meta',
+    'Editor',
+    'Editor.meta',
+    'LICENSE',
+    'LICENSE.meta',
+    'README.md',
+    'README.md.meta',
+    'Runtime',
+    'Runtime.meta',
+    'Samples~',
+    'scripts.meta',
+    'scripts/postinstall-hooks.js',
+    'scripts/postinstall-hooks.js.meta',
+    'Shaders',
+    'Shaders.meta',
+    'Styles',
+    'Styles.meta',
+    'URP',
+    'URP.meta',
+    'link.xml',
+    'link.xml.meta',
+    'package.json',
+    'package.json.meta'
+  )
+  foreach ($entry in $requiredPackageEntries) {
+    $entryPath = Join-Path $packageDir $entry
+    if (-not (Test-Path -LiteralPath $entryPath)) {
+      $errors += "Missing required package entry: $entry"
+    }
+  }
+
+  $packageContentRoots = @(
+    'CHANGELOG.md',
+    'CHANGELOG.md.meta',
+    'Editor',
+    'Editor.meta',
+    'LICENSE',
+    'LICENSE.meta',
+    'README.md',
+    'README.md.meta',
+    'Runtime',
+    'Runtime.meta',
+    'Samples~',
+    'Shaders',
+    'Shaders.meta',
+    'Styles',
+    'Styles.meta',
+    'URP',
+    'URP.meta',
+    'docs',
+    'docs.meta',
+    'link.xml',
+    'link.xml.meta',
+    'package.json',
+    'package.json.meta',
+    'scripts.meta',
+    'scripts/postinstall-hooks.js',
+    'scripts/postinstall-hooks.js.meta'
+  )
+
+  $allowedCsRoots = @('Runtime/', 'Editor/', 'Samples~/', 'Styles/')
+  $packedCsFiles = Get-ChildItem -LiteralPath $packageDir -Recurse -File -Filter '*.cs' -Force | ForEach-Object {
+    ConvertTo-PackageRelativePath -BasePath $packageDir -Path $_.FullName
+  }
+  foreach ($entry in $packedCsFiles) {
+    $isAllowed = $false
+    foreach ($root in $allowedCsRoots) {
+      if ($entry.StartsWith($root, [System.StringComparison]::Ordinal)) {
+        $isAllowed = $true
+        break
+      }
+    }
+    if (-not $isAllowed) {
+      $errors += "C# source outside Unity package roots included in npm package: $entry"
+    }
+  }
   
   # Folders that should be in the npm package
-  $unityFolders = @('Runtime', 'Editor')
+  $unityFolders = @('Runtime', 'Editor', 'Samples~', 'Shaders', 'Styles', 'URP')
   
   foreach ($folder in $unityFolders) {
     $folderPath = Join-Path $packageDir $folder
@@ -69,19 +296,21 @@ try {
     
     Write-Info "Validating folder: $folder"
     
-    # Check if folder has .meta file
-    $folderMetaPath = "$folderPath.meta"
-    if (-not (Test-Path $folderMetaPath)) {
-      $errors += "Missing .meta file for folder: $folder"
+    # Check if folder has .meta file. Samples~ is the Unity package-manager
+    # convention for samples and intentionally has no root folder .meta.
+    if ($folder -ne 'Samples~') {
+      $folderMetaPath = "$folderPath.meta"
+      if (-not (Test-Path $folderMetaPath)) {
+        $errors += "Missing .meta file for folder: $folder"
+      }
     }
     
     # Get all files and subdirectories in this folder (recursively)
-    $items = Get-ChildItem -Path $folderPath -Recurse
+    $items = Get-ChildItem -LiteralPath $folderPath -Recurse -Force
     
     foreach ($item in $items) {
       # Get relative path for better error messages
-      $relativePath = $item.FullName.Replace("$packageDir\", "").Replace("$packageDir/", "")
-      $relativePath = $relativePath -replace '\\', '/'
+      $relativePath = ConvertTo-PackageRelativePath -BasePath $packageDir -Path $item.FullName
       
       # Skip .meta files themselves
       if ($item.Name -like "*.meta") {
@@ -102,67 +331,21 @@ try {
     }
   }
 
-  # Step 6: Validate that Runtime and Editor content matches git repo
+  # Step 6: Validate that packed release payload matches git repo
   Write-Info "Validating that npm package content matches git repository..."
   
-  foreach ($folder in $unityFolders) {
-    $gitFolderPath = Join-Path (Get-Location) $folder
-    $npmFolderPath = Join-Path $packageDir $folder
-    
-    if (-not (Test-Path $gitFolderPath)) {
-      Write-Info "Git folder does not exist: $folder (skipping comparison)"
-      continue
+  $gitPackageFiles = Get-TrackedPackageFiles -RepoRoot $repoRoot -PackageRoots $packageContentRoots
+  $npmPackageFiles = Get-PackedPackageFiles -PackageDir $packageDir
+
+  foreach ($gitFile in $gitPackageFiles) {
+    if (($gitFile -cnotin $npmPackageFiles) -and (-not (Test-ExpectedPackageExclusion -RelativePath $gitFile))) {
+      $errors += "File in git repo but missing in npm package: $gitFile"
     }
-    
-    if (-not (Test-Path $npmFolderPath)) {
-      $errors += "Folder missing in npm package: $folder"
-      continue
-    }
-    
-    # Get all files in git repo for this folder
-    $gitFiles = Get-ChildItem -Path $gitFolderPath -Recurse -File | ForEach-Object {
-      $_.FullName.Replace("$gitFolderPath\", "").Replace("$gitFolderPath/", "") -replace '\\', '/'
-    }
-    
-    # Get all files in npm package for this folder
-    $npmFiles = Get-ChildItem -Path $npmFolderPath -Recurse -File | ForEach-Object {
-      $_.FullName.Replace("$npmFolderPath\", "").Replace("$npmFolderPath/", "") -replace '\\', '/'
-    }
-    
-    # Check for files in git that are missing in npm
-    foreach ($gitFile in $gitFiles) {
-      if ($gitFile -notin $npmFiles) {
-        # Check if this is an expected exclusion
-        $isExcluded = $false
-        
-        # Excluded patterns from the build process
-        $excludePatterns = @(
-          '*.dll',          # Built DLLs in Editor/Analyzers
-          '*.pdb',          # Debug symbols
-          '*.tmp',          # Temporary files
-          '*.log',          # Log files
-          '*.rsp'           # Response files
-        )
-        
-        foreach ($pattern in $excludePatterns) {
-          if ($gitFile -like $pattern) {
-            $isExcluded = $true
-            break
-          }
-        }
-        
-        if (-not $isExcluded) {
-          $errors += "File in git repo but missing in npm package: $folder/$gitFile"
-        }
-      }
-    }
-    
-    # Check for files in npm that shouldn't be there (extra files not in git)
-    foreach ($npmFile in $npmFiles) {
-      if ($npmFile -notin $gitFiles) {
-        # This might be OK (e.g., generated files), but worth noting
-        Write-Info "File in npm package but not in git repo: $folder/$npmFile"
-      }
+  }
+
+  foreach ($npmFile in $npmPackageFiles) {
+    if ($npmFile -cnotin $gitPackageFiles) {
+      $errors += "File in npm package but not tracked in git repo: $npmFile"
     }
   }
 

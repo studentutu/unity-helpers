@@ -59,6 +59,25 @@ function Get-RepoRoot {
   return (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 }
 
+function Get-PowerShellSingleQuotedArrayEntries {
+  param(
+    [string]$Content,
+    [string]$VariableName
+  )
+
+  $escapedName = [regex]::Escape($VariableName)
+  $arrayPattern = '(?ms)\${0}\s*=\s*@\((?<body>.*?)\)' -f $escapedName
+  $match = [regex]::Match($Content, $arrayPattern)
+  if (-not $match.Success) {
+    return @()
+  }
+
+  return @(
+    [regex]::Matches($match.Groups['body'].Value, "'(?<entry>[^']+)'") |
+      ForEach-Object { $_.Groups['entry'].Value }
+  )
+}
+
 function Assert-NoNewlineWriteHasFinalLfNormalization {
   param(
     [string]$ScriptPath,
@@ -785,6 +804,28 @@ function Run-ReleaseDrafterChangelogVersionContractTests {
   }
 
   $workflowContent = Get-Content -Path $workflowPath -Raw
+  $workflowLines = @($workflowContent -split "`r?`n")
+  $onBlockLines = @()
+  $insideOnBlock = $false
+  foreach ($line in $workflowLines) {
+    if ($line -ceq 'on:') {
+      $insideOnBlock = $true
+      continue
+    }
+    if ($insideOnBlock -and $line -match '^\S') {
+      break
+    }
+    if ($insideOnBlock) {
+      $onBlockLines += $line
+    }
+  }
+  $hasPushTrigger = @($onBlockLines | Where-Object { $_ -match '^\s+push\s*:' }).Count -gt 0
+  $hasWorkflowDispatchTrigger = @($onBlockLines | Where-Object { $_ -match '^\s+workflow_dispatch\s*:' }).Count -gt 0
+
+  Write-TestResult `
+    -TestName 'release-drafter is manual-only so release publishes cannot race draft updates' `
+    -Passed ((-not $hasPushTrigger) -and $hasWorkflowDispatchTrigger) `
+    -Message 'Expected release-drafter.yml to expose workflow_dispatch without an automatic push trigger.'
 
   Write-TestResult `
     -TestName 'release-drafter extracts latest changelog header before version selection' `
@@ -878,7 +919,6 @@ function Run-ReleaseDrafterChangelogVersionContractTests {
     -Passed ($workflowContent -match '-F tag_name="\$VERSION"' -and $workflowContent -match '-F name="\$VERSION"') `
     -Message 'Expected release PATCH request to include tag_name/name fields from VERSION.'
 
-  $workflowLines = @($workflowContent -split "`r?`n")
   $earlyExitAfterChangelogNotice = $false
   for ($i = 0; $i -lt $workflowLines.Count; $i++) {
     if ($workflowLines[$i] -match 'Changelog section already exists') {
@@ -904,6 +944,513 @@ function Run-ReleaseDrafterChangelogVersionContractTests {
     -TestName 'release-drafter preserves existing release body when changelog section already exists' `
     -Passed ($workflowContent.Contains('cp "${RUNNER_TEMP}/current_body.md" "${RUNNER_TEMP}/new_body.md"')) `
     -Message 'Expected current release body to be preserved when changelog section already exists.'
+}
+
+function Run-ReleaseWorkflowChangelogContractTests {
+  Write-Host ""
+  Write-Host "Release workflow changelog heading contracts:" -ForegroundColor Magenta
+  Write-Host ""
+
+  $repoRoot = Get-RepoRoot
+  $workflowPaths = @(
+    Join-Path $repoRoot '.github/workflows/release-tag.yml'
+    Join-Path $repoRoot '.github/workflows/release.yml'
+  )
+  $publishWorkflowPath = Join-Path $repoRoot '.github/workflows/release.yml'
+  $publishWorkflowContent = Get-Content -Path $publishWorkflowPath -Raw
+
+  $missingSectionHelper = @()
+  $rawHeadingGrep = @()
+  foreach ($workflowPath in $workflowPaths) {
+    if (-not (Test-Path $workflowPath)) {
+      $missingSectionHelper += "missing: $workflowPath"
+      continue
+    }
+
+    $content = Get-Content -Path $workflowPath -Raw
+    $relativePath = [System.IO.Path]::GetRelativePath($repoRoot, $workflowPath).Replace('\', '/')
+    if ($content -notmatch 'Get-ChangelogSection') {
+      $missingSectionHelper += $relativePath
+    }
+    if ($content -match 'grep\s+-Eq\s+"\^##\s+\\\[') {
+      $rawHeadingGrep += $relativePath
+    }
+  }
+
+  Write-TestResult `
+    -TestName 'release tag/publish workflows validate changelog release-note content' `
+    -Passed ($missingSectionHelper.Count -eq 0) `
+    -Message "Missing Get-ChangelogSection usage: $($missingSectionHelper -join '; ')"
+
+  Write-TestResult `
+    -TestName 'release tag/publish workflows avoid raw changelog heading grep' `
+    -Passed ($rawHeadingGrep.Count -eq 0) `
+    -Message "Raw heading grep found in: $($rawHeadingGrep -join '; ')"
+
+  $strictReleaseTagRegex = '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+  $acceptedReleaseTags = @('0.0.0', '1.2.3', '10.20.30')
+  $rejectedReleaseTags = @(
+    '01.2.3',
+    '1.02.3',
+    '1.2.03',
+    'v1.2.3',
+    '1.2',
+    '1.2.3.4',
+    '1.2.x',
+    '1.2.3-alpha'
+  )
+  $verifierHasStrictReleaseTagRegex = $publishWorkflowContent.Contains("grep -Eq '$strictReleaseTagRegex'")
+  $strictRegexAcceptsExpectedTags = @(
+    $acceptedReleaseTags | Where-Object { $_ -notmatch $strictReleaseTagRegex }
+  ).Count -eq 0
+  $strictRegexRejectsExpectedTags = @(
+    $rejectedReleaseTags | Where-Object { $_ -match $strictReleaseTagRegex }
+  ).Count -eq 0
+
+  $publishTriggerDelegatesStrictnessToVerifier = (
+    $publishWorkflowContent.Contains('- "[0-9]*.[0-9]*.[0-9]*"') -and
+    -not $publishWorkflowContent.Contains('- "[0-9]+.[0-9]+.[0-9]+"') -and
+    $publishWorkflowContent.Contains('Release tags must use unprefixed X.Y.Z semver.') -and
+    $verifierHasStrictReleaseTagRegex -and
+    $strictRegexAcceptsExpectedTags -and
+    $strictRegexRejectsExpectedTags
+  )
+
+  Write-TestResult `
+    -TestName 'release publish workflow uses unambiguous tag glob before strict verification' `
+    -Passed $publishTriggerDelegatesStrictnessToVerifier `
+    -Message 'Expected release.yml tag filter to use an unambiguous digit-start glob while verify-tag enforces exact no-leading-zero semver.'
+}
+
+function Run-ReleaseWorkflowGitHubCliContractTests {
+  Write-Host ""
+  Write-Host "Release workflow GitHub CLI contracts:" -ForegroundColor Magenta
+  Write-Host ""
+
+  $repoRoot = Get-RepoRoot
+  $workflowPath = Join-Path $repoRoot '.github/workflows/release.yml'
+  $workflowContent = Get-Content -Path $workflowPath -Raw
+  $repoEnvPattern = 'GH_REPO:\s*\$\{\{\s*github\.repository\s*\}\}'
+
+  $publishHasRepo = $workflowContent -match "(?ms)- name: Publish GitHub Release.*?env:.*?${repoEnvPattern}.*?run:"
+  $verifyHasRepo = $workflowContent -match "(?ms)- name: Verify GitHub Release assets.*?env:.*?${repoEnvPattern}.*?run:"
+
+  Write-TestResult `
+    -TestName 'release publish gh commands set repository context' `
+    -Passed $publishHasRepo `
+    -Message 'Expected Publish GitHub Release to set GH_REPO from github.repository.'
+
+  Write-TestResult `
+    -TestName 'release asset verification gh commands set repository context' `
+    -Passed $verifyHasRepo `
+    -Message 'Expected Verify GitHub Release assets to set GH_REPO from github.repository.'
+}
+
+function Run-ReleasePublishWorkflowBudgetContractTests {
+  Write-Host ""
+  Write-Host "Release publish workflow budget contracts:" -ForegroundColor Magenta
+  Write-Host ""
+
+  $repoRoot = Get-RepoRoot
+  $workflowPath = Join-Path $repoRoot '.github/workflows/release.yml'
+  $workflowContent = Get-Content -Path $workflowPath -Raw
+  $exporterPath = Join-Path $repoRoot 'scripts/unity/export-unitypackage.sh'
+  $exporterContent = Get-Content -Path $exporterPath -Raw
+
+  $jobTimeoutMatch = [regex]::Match(
+    $workflowContent,
+    '(?ms)^\s*unitypackage:\s*.*?^\s*timeout-minutes:\s*(?<minutes>\d+)\s*$'
+  )
+  $lockTimeoutMatch = [regex]::Match(
+    $workflowContent,
+    '(?ms)^\s*- name: Acquire organization Unity lock\s*\r?\n(?:(?!^\s*- name:).)*?^\s+with:\s*\r?\n(?:(?!^\s*- name:).)*?^\s+timeout-minutes:\s*["'']?(?<minutes>\d+)["'']?\s*$'
+  )
+  $unityTimeoutMatch = [regex]::Match(
+    $exporterContent,
+    'UNITY_TIMEOUT="\$\{UNITY_TIMEOUT:-(?<seconds>\d+)\}"'
+  )
+
+  $jobTimeoutMinutes = if ($jobTimeoutMatch.Success) { [int]$jobTimeoutMatch.Groups['minutes'].Value } else { 0 }
+  $lockTimeoutMinutes = if ($lockTimeoutMatch.Success) { [int]$lockTimeoutMatch.Groups['minutes'].Value } else { 0 }
+  $unityTimeoutMinutes = if ($unityTimeoutMatch.Success) { [int][Math]::Ceiling(([int]$unityTimeoutMatch.Groups['seconds'].Value) / 60.0) } else { 0 }
+  $minimumOverheadMinutes = 30
+  $requiredJobTimeoutMinutes = $lockTimeoutMinutes + $unityTimeoutMinutes + $minimumOverheadMinutes
+  $timeoutBudgetIsCoherent = (
+    $jobTimeoutMatch.Success -and
+    $lockTimeoutMatch.Success -and
+    $unityTimeoutMatch.Success -and
+    $jobTimeoutMinutes -ge $requiredJobTimeoutMinutes
+  )
+
+  Write-TestResult `
+    -TestName 'release unitypackage job timeout covers lock wait and export budget' `
+    -Passed $timeoutBudgetIsCoherent `
+    -Message "Expected unitypackage job timeout to be at least lock timeout + Unity export timeout + ${minimumOverheadMinutes}m overhead. Job=${jobTimeoutMinutes}m, lock=${lockTimeoutMinutes}m, Unity=${unityTimeoutMinutes}m, required=${requiredJobTimeoutMinutes}m."
+}
+
+function Run-ReleasePrepareWorkflowContractTests {
+  Write-Host ""
+  Write-Host "Release prepare workflow contracts:" -ForegroundColor Magenta
+  Write-Host ""
+
+  $repoRoot = Get-RepoRoot
+  $workflowPath = Join-Path $repoRoot '.github/workflows/release-prepare.yml'
+  $workflowContent = Get-Content -Path $workflowPath -Raw
+
+  $usesRobustGitBranchLookup = (
+    $workflowContent.Contains('git ls-remote --exit-code --heads origin "${branch}"') -and
+    $workflowContent.Contains('branch_lookup_exit=$?') -and
+    $workflowContent.Contains('if [ "${branch_lookup_exit}" -ne 2 ]; then') -and
+    $workflowContent.Contains('Failed to check whether branch ${branch} already exists.') -and
+    -not $workflowContent.Contains('git/ref/heads/${branch}') -and
+    -not $workflowContent.Contains('if git ls-remote --exit-code --heads origin "${branch}"')
+  )
+  $usesRobustGitTagLookup = (
+    $workflowContent.Contains('tag_lookup_output="$(gh api -i "repos/${GITHUB_REPOSITORY}/git/ref/tags/${version}" 2>&1)"') -and
+    $workflowContent.Contains('tag_lookup_exit=$?') -and
+    $workflowContent.Contains('if [ "${tag_lookup_exit}" -eq 0 ]; then') -and
+    $workflowContent.Contains('Failed to check whether tag ${version} already exists.') -and
+    $workflowContent.Contains('"status":"404"') -and
+    $workflowContent.Contains('grep -E ''(^HTTP/[0-9.]+ 404( |$)|"status":"404")'' >/dev/null') -and
+    -not $workflowContent.Contains('gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${version}" >/dev/null 2>&1') -and
+    -not ($workflowContent -match 'gh api[^\r\n]+\|\|\s*true') -and
+    -not ($workflowContent -match 'grep -Eq .*\bstatus')
+  )
+  $notesIndex = $workflowContent.IndexOf('scripts/release-tools/write-release-notes.ps1')
+  $branchPushIndex = $workflowContent.IndexOf('push origin "HEAD:refs/heads/${BRANCH}"')
+  $generatesNotesBeforePushingBranch = (
+    $notesIndex -ge 0 -and
+    $branchPushIndex -ge 0 -and
+    $notesIndex -lt $branchPushIndex
+  )
+
+  Write-TestResult `
+    -TestName 'release prepare checks existing release branches with robust git heads lookup' `
+    -Passed $usesRobustGitBranchLookup `
+    -Message 'Expected release-prepare.yml to treat git ls-remote exit 2 as absent while failing other lookup errors.'
+
+  Write-TestResult `
+    -TestName 'release prepare checks existing tags without hiding API failures' `
+    -Passed $usesRobustGitTagLookup `
+    -Message 'Expected release-prepare.yml to treat tag lookup 404 as absent while failing auth, rate-limit, and other API errors.'
+
+  Write-TestResult `
+    -TestName 'release prepare validates release notes before pushing branch' `
+    -Passed $generatesNotesBeforePushingBranch `
+    -Message 'Expected write-release-notes.ps1 to run before pushing release/X.Y.Z so failed note generation leaves no remote branch.'
+}
+
+function Run-ReleaseTagWorkflowContractTests {
+  Write-Host ""
+  Write-Host "Release tag workflow contracts:" -ForegroundColor Magenta
+  Write-Host ""
+
+  $repoRoot = Get-RepoRoot
+  $workflowPath = Join-Path $repoRoot '.github/workflows/release-tag.yml'
+  $workflowContent = Get-Content -Path $workflowPath -Raw
+
+  $hasTagTargetCheck = (
+    $workflowContent.Contains('tag_target="$(git rev-list -n 1 "${version}")"') -and
+    $workflowContent.Contains('[ "${tag_target}" = "${GITHUB_SHA}" ]') -and
+    $workflowContent.Contains('already exists at ${tag_target}, not release commit ${GITHUB_SHA}')
+  )
+
+  $credentialStepIndex = $workflowContent.IndexOf('- name: Check auto-commit GitHub App credentials', [StringComparison]::Ordinal)
+  $tokenStepIndex = $workflowContent.IndexOf('- name: Generate auto-commit GitHub App token', [StringComparison]::Ordinal)
+  $hasCredentialCheck = (
+    $credentialStepIndex -ge 0 -and
+    $tokenStepIndex -gt $credentialStepIndex -and
+    $workflowContent.Contains('AUTO_COMMIT_APP_ID: ${{ secrets.AUTO_COMMIT_APP_ID }}') -and
+    $workflowContent.Contains('AUTO_COMMIT_APP_PRIVATE_KEY: ${{ secrets.AUTO_COMMIT_APP_PRIVATE_KEY }}') -and
+    $workflowContent.Contains('required to push release tags')
+  )
+
+  $hasDefaultBranchGate = (
+    $workflowContent.Contains('github.ref_name == github.event.repository.default_branch') -and
+    $workflowContent -notmatch "(?ms)on:\s*\r?\n\s*push:\s*\r?\n\s*branches:"
+  )
+
+  $checkoutStepIndex = $workflowContent.IndexOf('- name: Checkout', [StringComparison]::Ordinal)
+  $checkoutFetchTagsIndex = if ($checkoutStepIndex -ge 0) {
+    $workflowContent.IndexOf('fetch-tags: true', $checkoutStepIndex, [StringComparison]::Ordinal)
+  } else {
+    -1
+  }
+  $subjectCheckIndex = $workflowContent.IndexOf('subject="$(git log -1 --format=%s)"', [StringComparison]::Ordinal)
+  $nonReleaseExitIndex = $workflowContent.IndexOf('Head commit is not a release commit; nothing to do.', [StringComparison]::Ordinal)
+  $existingTagNoOpIndex = $workflowContent.IndexOf('git show-ref --verify --quiet "refs/tags/${version}"', [StringComparison]::Ordinal)
+  $untaggedWarningIndex = $workflowContent.IndexOf('Version ${version} is untagged and CHANGELOG.md documents it', [StringComparison]::Ordinal)
+  $nonReleaseProceedFalseIndex = if ($subjectCheckIndex -ge 0) {
+    $workflowContent.IndexOf('echo "proceed=false" >> "${GITHUB_OUTPUT}"', $subjectCheckIndex, [StringComparison]::Ordinal)
+  } else {
+    -1
+  }
+  $nonReleaseExitZeroIndex = if ($nonReleaseProceedFalseIndex -ge 0) {
+    $workflowContent.IndexOf('exit 0', $nonReleaseProceedFalseIndex, [StringComparison]::Ordinal)
+  } else {
+    -1
+  }
+  $releaseHeadingValidationIndex = if ($nonReleaseExitZeroIndex -ge 0) {
+    $workflowContent.IndexOf('Release commit for ${version} has no CHANGELOG.md section with release-note content.', $nonReleaseExitZeroIndex, [StringComparison]::Ordinal)
+  } else {
+    -1
+  }
+  $tagLookupIndex = $workflowContent.IndexOf('tag_lookup_output="$(gh api -i "repos/${GITHUB_REPOSITORY}/git/ref/tags/${version}"', [StringComparison]::Ordinal)
+  $tagMismatchIndex = $workflowContent.IndexOf('already exists at ${tag_target}, not release commit ${GITHUB_SHA}', [StringComparison]::Ordinal)
+  $releaseSectionValidationIndex = if ($nonReleaseExitZeroIndex -ge 0) {
+    $workflowContent.IndexOf('Get-ChangelogSection -Content $content -Version $env:CHANGELOG_VERSION', $nonReleaseExitZeroIndex, [StringComparison]::Ordinal)
+  } else {
+    -1
+  }
+  $checksTagsAfterReleaseDetection = (
+    $subjectCheckIndex -ge 0 -and
+    $nonReleaseExitIndex -gt $subjectCheckIndex -and
+    $nonReleaseProceedFalseIndex -gt $nonReleaseExitIndex -and
+    $nonReleaseExitZeroIndex -gt $nonReleaseProceedFalseIndex -and
+    $releaseSectionValidationIndex -gt $nonReleaseExitZeroIndex -and
+    $releaseHeadingValidationIndex -gt $nonReleaseExitZeroIndex -and
+    $tagLookupIndex -gt $releaseHeadingValidationIndex -and
+    $tagMismatchIndex -gt $tagLookupIndex
+  )
+  $checksLocalTagBeforeUntaggedWarning = (
+    $subjectCheckIndex -ge 0 -and
+    $existingTagNoOpIndex -gt $subjectCheckIndex -and
+    $untaggedWarningIndex -gt $existingTagNoOpIndex -and
+    $existingTagNoOpIndex -lt $nonReleaseProceedFalseIndex
+  )
+  $fetchesTagsBeforeLocalTaggedNoOp = (
+    $checkoutStepIndex -ge 0 -and
+    $checkoutFetchTagsIndex -gt $checkoutStepIndex -and
+    $checkoutFetchTagsIndex -lt $existingTagNoOpIndex
+  )
+  $usesRobustTagLookup = (
+    $tagLookupIndex -ge 0 -and
+    $workflowContent.Contains('tag_lookup_exit=$?') -and
+    $workflowContent.Contains('if [ "${tag_lookup_exit}" -eq 0 ]; then') -and
+    $workflowContent.Contains('Failed to check whether tag ${version} already exists.') -and
+    $workflowContent.Contains('"status":"404"') -and
+    $workflowContent.Contains('grep -E ''(^HTTP/[0-9.]+ 404( |$)|"status":"404")'' >/dev/null') -and
+    -not ($workflowContent -match 'gh api[^\r\n]+\|\|\s*true') -and
+    -not ($workflowContent -match 'grep -Eq .*\bstatus')
+  )
+
+  Write-TestResult `
+    -TestName 'release tag workflow fails when existing tag points elsewhere' `
+    -Passed $hasTagTargetCheck `
+    -Message 'Expected release-tag.yml to compare existing tag target with GITHUB_SHA and error on mismatches.'
+
+  Write-TestResult `
+    -TestName 'release tag workflow checks existing tags only after release detection' `
+    -Passed $checksTagsAfterReleaseDetection `
+    -Message 'Expected release-tag.yml to exit cleanly for non-release package/changelog pushes before checking existing tag targets.'
+
+  Write-TestResult `
+    -TestName 'release tag workflow validates changelog release-note content before tag lookup' `
+    -Passed ($releaseSectionValidationIndex -gt $nonReleaseExitZeroIndex -and $releaseSectionValidationIndex -lt $tagLookupIndex) `
+    -Message 'Expected release-tag.yml to call Get-ChangelogSection before checking or creating a release tag.'
+
+  Write-TestResult `
+    -TestName 'release tag workflow checks existing tags without hiding API failures' `
+    -Passed $usesRobustTagLookup `
+    -Message 'Expected release-tag.yml to treat tag lookup 404 as absent while failing auth, rate-limit, and other API errors.'
+
+  Write-TestResult `
+    -TestName 'release tag workflow suppresses untagged warning for locally-known tags' `
+    -Passed $checksLocalTagBeforeUntaggedWarning `
+    -Message 'Expected release-tag.yml to check refs/tags/${version} before warning that the documented version is untagged.'
+
+  Write-TestResult `
+    -TestName 'release tag workflow fetches tags before local tagged no-op check' `
+    -Passed $fetchesTagsBeforeLocalTaggedNoOp `
+    -Message 'Expected release-tag.yml checkout to fetch tags before using local refs/tags/${version} for the non-release no-op path.'
+
+  Write-TestResult `
+    -TestName 'release tag workflow checks app credentials before token action' `
+    -Passed $hasCredentialCheck `
+    -Message 'Expected release-tag.yml to validate AUTO_COMMIT_APP_* before create-github-app-token.'
+
+  Write-TestResult `
+    -TestName 'release tag workflow runs on repository default branch' `
+    -Passed $hasDefaultBranchGate `
+    -Message 'Expected release-tag.yml to avoid hard-coded main/master branch filters and gate on github.event.repository.default_branch.'
+}
+
+function Run-ReleasePackageContentContractTests {
+  Write-Host ""
+  Write-Host "Release package content contracts:" -ForegroundColor Magenta
+  Write-Host ""
+
+  $repoRoot = Get-RepoRoot
+  $requiredUnityPackageEntries = @(
+    'Editor',
+    'Editor.meta',
+    'Runtime',
+    'Runtime.meta',
+    'Samples~',
+    'Shaders',
+    'Shaders.meta',
+    'Styles',
+    'Styles.meta',
+    'URP',
+    'URP.meta',
+    'link.xml',
+    'link.xml.meta'
+  )
+  $requiredPackageFilesEntries = @(
+    $requiredUnityPackageEntries
+    'scripts.meta'
+    'scripts/postinstall-hooks.js'
+    'scripts/postinstall-hooks.js.meta'
+  )
+  $requiredUnityPackageFolders = @(
+    'Editor',
+    'Runtime',
+    'Samples~',
+    'Shaders',
+    'Styles',
+    'URP'
+  )
+
+  $packagePath = Join-Path $repoRoot 'package.json'
+  $package = Get-Content -Path $packagePath -Raw | ConvertFrom-Json
+  $packageFiles = @($package.files)
+  $missingPackageFiles = @($requiredPackageFilesEntries | Where-Object { $_ -notin $packageFiles })
+
+  Write-TestResult `
+    -TestName 'package.json files allowlist includes all required release package entries' `
+    -Passed ($missingPackageFiles.Count -eq 0) `
+    -Message "Missing package.json files entries: $($missingPackageFiles -join ', ')"
+
+  $validatorPath = Join-Path $repoRoot 'scripts/validate-npm-package.ps1'
+  $validatorContent = Get-Content -Path $validatorPath -Raw
+  $validatorRequiredEntries = Get-PowerShellSingleQuotedArrayEntries `
+    -Content $validatorContent `
+    -VariableName 'requiredPackageEntries'
+  $validatorAllowedTopLevelEntries = Get-PowerShellSingleQuotedArrayEntries `
+    -Content $validatorContent `
+    -VariableName 'allowedTopLevelEntries'
+  $validatorUnityFolders = Get-PowerShellSingleQuotedArrayEntries `
+    -Content $validatorContent `
+    -VariableName 'unityFolders'
+  $validatorPackageContentRoots = Get-PowerShellSingleQuotedArrayEntries `
+    -Content $validatorContent `
+    -VariableName 'packageContentRoots'
+  $missingValidatorRequiredEntries = @($requiredPackageFilesEntries | Where-Object { $_ -notin $validatorRequiredEntries })
+  $requiredValidatorAllowedTopLevelEntries = @('scripts', 'scripts.meta')
+  $missingValidatorAllowedTopLevelEntries = @($requiredValidatorAllowedTopLevelEntries | Where-Object { $_ -notin $validatorAllowedTopLevelEntries })
+  $nestedValidatorAllowedTopLevelEntries = @($validatorAllowedTopLevelEntries | Where-Object { $_.Contains('/') -or $_.Contains('\') })
+  $missingValidatorUnityFolders = @($requiredUnityPackageFolders | Where-Object { $_ -notin $validatorUnityFolders })
+  $missingValidatorPackageContentRoots = @($requiredPackageFilesEntries | Where-Object { $_ -notin $validatorPackageContentRoots })
+  $validatorUsesCaseSensitiveMembership = (
+    $validatorContent.Contains('$entry -cnotin $allowedTopLevelEntries') -and
+    $validatorContent.Contains('$entry -cnotin $allowedScriptsEntries') -and
+    $validatorContent.Contains('$gitFile -cnotin $npmPackageFiles') -and
+    $validatorContent.Contains('$npmFile -cnotin $gitPackageFiles')
+  )
+  $validatorPreservesCaseOnlyPathVariants = -not $validatorContent.Contains('Sort-Object -Unique')
+  $validatorComparesWholePackagePayload = (
+    $validatorContent.Contains('Get-TrackedPackageFiles -RepoRoot $repoRoot -PackageRoots $packageContentRoots') -and
+    $validatorContent.Contains('Get-PackedPackageFiles -PackageDir $packageDir') -and
+    $validatorContent.Contains('Get-ChildItem -LiteralPath $PackageDir -Recurse -File -Force') -and
+    $validatorContent.Contains('git -C $RepoRoot ls-files -z -- @trackedRoots') -and
+    -not $validatorContent.Contains('Test-Path -LiteralPath (Join-Path $RepoRoot $_)') -and
+    $missingValidatorPackageContentRoots.Count -eq 0
+  )
+  $validatorChecksHiddenScriptEntries = $validatorContent.Contains('Get-ChildItem -LiteralPath $scriptsDir -Recurse -File -Force')
+  $validatorChecksHiddenPackedCsFiles = $validatorContent.Contains("Get-ChildItem -LiteralPath `$packageDir -Recurse -File -Filter '*.cs' -Force")
+  $validatorChecksHiddenUnityFolderEntries = $validatorContent.Contains('Get-ChildItem -LiteralPath $folderPath -Recurse -Force')
+  $validatorUsesStructuredRelativePaths = (
+    $validatorContent.Contains('function ConvertTo-PackageRelativePath') -and
+    $validatorContent.Contains('[System.IO.Path]::GetRelativePath($rootPath, $childPath)') -and
+    -not $validatorContent.Contains('.FullName.Replace(')
+  )
+  $productionPowerShellScriptsWithStringPathExtraction = @(
+    Get-ChildItem -LiteralPath (Join-Path $repoRoot 'scripts') -Recurse -File -Filter '*.ps1' |
+      Where-Object { $_.FullName -notmatch '[\\/](scripts[\\/])?tests[\\/]' } |
+      Where-Object { (Get-Content -LiteralPath $_.FullName -Raw).Contains('.FullName.Replace(') } |
+      ForEach-Object { [System.IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
+  )
+
+  Write-TestResult `
+    -TestName 'npm package validator requires all release package entries' `
+    -Passed ($missingValidatorRequiredEntries.Count -eq 0) `
+    -Message "Missing validator required entries: $($missingValidatorRequiredEntries -join ', ')"
+
+  Write-TestResult `
+    -TestName 'npm package validator allows shipped scripts folder metadata' `
+    -Passed ($missingValidatorAllowedTopLevelEntries.Count -eq 0) `
+    -Message "Missing validator allowed top-level entries: $($missingValidatorAllowedTopLevelEntries -join ', ')"
+
+  Write-TestResult `
+    -TestName 'npm package validator top-level allowlist contains only top-level entries' `
+    -Passed ($nestedValidatorAllowedTopLevelEntries.Count -eq 0) `
+    -Message "Nested entries in top-level allowlist: $($nestedValidatorAllowedTopLevelEntries -join ', ')"
+
+  Write-TestResult `
+    -TestName 'npm package validator compares all shipped Unity roots against git' `
+    -Passed ($missingValidatorUnityFolders.Count -eq 0) `
+    -Message "Missing validator Unity folders: $($missingValidatorUnityFolders -join ', ')"
+
+  Write-TestResult `
+    -TestName 'npm package validator compares whole release payload against git' `
+    -Passed $validatorComparesWholePackagePayload `
+    -Message "Missing validator package content roots: $($missingValidatorPackageContentRoots -join ', ')"
+
+  Write-TestResult `
+    -TestName 'npm package validator checks hidden Unity folder entries for metadata' `
+    -Passed $validatorChecksHiddenUnityFolderEntries `
+    -Message 'Expected Unity folder metadata validation to enumerate with -LiteralPath and -Force, matching packed payload parity.'
+
+  Write-TestResult `
+    -TestName 'npm package validator checks hidden scripts entries against allowlist' `
+    -Passed $validatorChecksHiddenScriptEntries `
+    -Message 'Expected scripts folder allowlist validation to enumerate with -LiteralPath and -Force.'
+
+  Write-TestResult `
+    -TestName 'npm package validator checks hidden C# files for root restrictions' `
+    -Passed $validatorChecksHiddenPackedCsFiles `
+    -Message 'Expected packed C# root validation to enumerate with -LiteralPath and -Force.'
+
+  Write-TestResult `
+    -TestName 'npm package validator uses structured relative path extraction' `
+    -Passed $validatorUsesStructuredRelativePaths `
+    -Message 'Expected validate-npm-package.ps1 to use GetRelativePath instead of string replacement on FullName.'
+
+  Write-TestResult `
+    -TestName 'production PowerShell scripts avoid string-based FullName relative paths' `
+    -Passed ($productionPowerShellScriptsWithStringPathExtraction.Count -eq 0) `
+    -Message "Scripts still using string-based FullName relative path extraction: $($productionPowerShellScriptsWithStringPathExtraction -join ', ')"
+
+  Write-TestResult `
+    -TestName 'npm package validator uses case-sensitive package membership checks' `
+    -Passed $validatorUsesCaseSensitiveMembership `
+    -Message 'Expected validate-npm-package.ps1 to reject differently-cased package paths with -cnotin.'
+
+  Write-TestResult `
+    -TestName 'npm package validator preserves case-only path variants before membership checks' `
+    -Passed $validatorPreservesCaseOnlyPathVariants `
+    -Message 'Expected validate-npm-package.ps1 not to collapse case-only path variants with Sort-Object -Unique.'
+
+  $exporterPath = Join-Path $repoRoot 'scripts/unity/export-unitypackage.sh'
+  $exporterContent = Get-Content -Path $exporterPath -Raw
+  $requiredLoop = [regex]::Match(
+    $exporterContent,
+    '(?ms)for entry in \\\s*(?<entries>.*?)\s*do\s*\r?\n\s*copy_package_entry "\$\{entry\}" required'
+  )
+  $requiredExportEntries = @()
+  if ($requiredLoop.Success) {
+    $requiredExportEntries = @(
+      $requiredLoop.Groups['entries'].Value -split "`r?`n" |
+        ForEach-Object { $_.Trim().TrimEnd('\').Trim() } |
+        Where-Object { $_ }
+    )
+  }
+  $missingExportEntries = @($requiredUnityPackageEntries | Where-Object { $_ -notin $requiredExportEntries })
+
+  Write-TestResult `
+    -TestName 'Unity package exporter stages all shipped Unity roots from npm pack' `
+    -Passed ($requiredLoop.Success -and $missingExportEntries.Count -eq 0) `
+    -Message "Missing exporter required entries: $($missingExportEntries -join ', ')"
 }
 
 function Print-SummaryAndExit {
@@ -932,4 +1479,10 @@ Run-HookInstallContractTests
 Run-RepoLocalPrettierContractTests
 Run-PrePushLastResortGuidanceContractTests
 Run-ReleaseDrafterChangelogVersionContractTests
+Run-ReleaseWorkflowChangelogContractTests
+Run-ReleaseWorkflowGitHubCliContractTests
+Run-ReleasePublishWorkflowBudgetContractTests
+Run-ReleasePrepareWorkflowContractTests
+Run-ReleaseTagWorkflowContractTests
+Run-ReleasePackageContentContractTests
 Print-SummaryAndExit

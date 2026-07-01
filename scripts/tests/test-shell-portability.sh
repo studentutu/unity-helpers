@@ -246,6 +246,112 @@ else
         "Guard line ${guard_line}, create-test-project line ${create_line}, mkdir line ${mkdir_line}"
 fi
 
+echo ""
+echo "--- B3: Unity package export project stays below artifacts root ---"
+
+run_test
+unity_export_package="$REPO_ROOT/scripts/unity/export-unitypackage.sh"
+root_guard_line=$(grep -nF '"${PROJECT_DIR}" == "${ARTIFACTS_ROOT}"' "$unity_export_package" | head -n 1 | cut -d: -f1)
+outside_guard_line=$(grep -nF '"${PROJECT_DIR}" != "${ARTIFACTS_ROOT}/"*' "$unity_export_package" | head -n 1 | cut -d: -f1)
+delete_line=$(grep -nF 'rm -rf "${PROJECT_DIR}"' "$unity_export_package" | head -n 1 | cut -d: -f1)
+if [[ -z "$root_guard_line" || -z "$outside_guard_line" || -z "$delete_line" ]]; then
+    fail "Unity package export project guard is missing expected structure" \
+        "root_guard_line='${root_guard_line}', outside_guard_line='${outside_guard_line}', delete_line='${delete_line}'"
+elif (( root_guard_line < delete_line && outside_guard_line < delete_line )); then
+    pass "Unity package export refuses artifacts root before deleting the project directory"
+else
+    fail "Unity package export validates project path too late" \
+        "Root guard line ${root_guard_line}, outside guard line ${outside_guard_line}, delete line ${delete_line}"
+fi
+
+echo ""
+echo "--- B4: Unity package export supports bare output filenames ---"
+
+run_test
+dirname_line=$(grep -nF 'string outputDirectory = Path.GetDirectoryName(outputPath);' "$unity_export_package" | head -n 1 | cut -d: -f1)
+fallback_line=$(grep -nF 'outputDirectory = Directory.GetCurrentDirectory();' "$unity_export_package" | head -n 1 | cut -d: -f1)
+create_line=$(grep -nF 'Directory.CreateDirectory(outputDirectory);' "$unity_export_package" | head -n 1 | cut -d: -f1)
+if [[ -z "$dirname_line" || -z "$fallback_line" || -z "$create_line" ]]; then
+    fail "Unity package export output-directory fallback is missing expected structure" \
+        "dirname_line='${dirname_line}', fallback_line='${fallback_line}', create_line='${create_line}'"
+elif (( dirname_line < fallback_line && fallback_line < create_line )); then
+    pass "Unity package export falls back to the current directory for bare output filenames"
+else
+    fail "Unity package export applies output-directory fallback too late" \
+        "dirname line ${dirname_line}, fallback line ${fallback_line}, create line ${create_line}"
+fi
+
+echo ""
+echo "--- B5: Unity package export stages package content roots ---"
+
+run_test
+stage_project="$REPO_ROOT/.artifacts/unity/shell-portability-unitypackage-stage"
+stage_log="$(mktemp)"
+rm -rf "$stage_project"
+if bash "$unity_export_package" --stage-only --project-dir "$stage_project" >"$stage_log" 2>&1; then
+    staged_root="$stage_project/Assets/WallstopStudios/UnityHelpers"
+    required_stage_entries=(
+        "Runtime"
+        "Runtime.meta"
+        "Editor"
+        "Editor.meta"
+        "Samples"
+        "Shaders"
+        "Shaders.meta"
+        "Styles"
+        "Styles.meta"
+        "URP"
+        "URP.meta"
+        "link.xml"
+        "link.xml.meta"
+    )
+    missing_stage_entries=()
+    for entry in "${required_stage_entries[@]}"; do
+        if [[ ! -e "$staged_root/$entry" ]]; then
+            missing_stage_entries+=("$entry")
+        fi
+    done
+
+    if (( ${#missing_stage_entries[@]} == 0 )); then
+        pass "Unity package export stage contains all shipped package roots"
+    else
+        fail "Unity package export stage is missing package roots" \
+            "Missing entries: ${missing_stage_entries[*]}"
+    fi
+else
+    stage_tail="$(tail -n 40 "$stage_log" 2>/dev/null || true)"
+    fail "Unity package export stage-only command failed" "$stage_tail"
+fi
+rm -rf "$stage_project"
+rm -f "$stage_log"
+
+echo ""
+echo "--- B6: Unity package export rejects incomplete package metadata ---"
+
+run_test
+metadata_fixture="$(mktemp -d)"
+metadata_log="$(mktemp)"
+mkdir -p "$metadata_fixture/scripts/unity" "$metadata_fixture/.github"
+cp "$unity_export_package" "$metadata_fixture/scripts/unity/export-unitypackage.sh"
+printf '{ "release": "2022.3.45f1" }\n' > "$metadata_fixture/.github/unity-versions.json"
+printf '{ "name": "fixture-package" }\n' > "$metadata_fixture/package.json"
+if bash "$metadata_fixture/scripts/unity/export-unitypackage.sh" \
+    --stage-only \
+    --project-dir "$metadata_fixture/.artifacts/unity/unitypackage-stage" \
+    >"$metadata_log" 2>&1; then
+    fail "Unity package export fails fast when package metadata is incomplete" \
+        "Expected export-unitypackage.sh to reject package.json without version."
+else
+    if grep -Fq 'must define non-empty string name and version fields' "$metadata_log"; then
+        pass "Unity package export fails fast when package metadata is incomplete"
+    else
+        metadata_tail="$(tail -n 40 "$metadata_log" 2>/dev/null || true)"
+        fail "Unity package export reports incomplete package metadata clearly" "$metadata_tail"
+    fi
+fi
+rm -rf "$metadata_fixture"
+rm -f "$metadata_log"
+
 # =============================================================================
 # Section C: Inappropriate stderr suppression in git hooks
 # =============================================================================

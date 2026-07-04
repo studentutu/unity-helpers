@@ -31,17 +31,37 @@ namespace WallstopStudios.UnityHelpers.Tests.Runtime.Random
     {
         private const int NumGeneratorChecks = 1_000;
         private const int NormalIterations = 1_000;
+        private const int DefaultFastNoiseMapIterations = 6;
+        private const int NoiseMapExclusiveMaxDimension = 75;
+        private const string RandomSampleCountEnvironmentVariable = "UH_RANDOM_SAMPLE_COUNT";
+        private const string NoiseMapIterationsEnvironmentVariable =
+            "UH_RANDOM_NOISE_MAP_ITERATIONS";
 
         // The distribution tests dominate suite runtime: each loops SampleCount
         // times across ~21 PRNG subclasses (~half a billion iterations at the
         // historical count). The fast default keeps the MAIN suite quick while
         // staying statistically valid (see the sqrt deviation floor in
-        // TestAndVerify); the perf/stress CI job exports UH_RANDOM_SAMPLE_COUNT =
-        // ThoroughSampleCount to restore the original, tighter bias-detection
-        // sensitivity. Override the env var for a thorough local run.
+        // TestAndVerify); the weekly benchmark Random lane exports the sample
+        // count and noise-map iteration env vars to restore the original,
+        // broader coverage. Override the env vars for a thorough local run.
         private const int DefaultFastSampleCount = 250_000;
-        private const int ThoroughSampleCount = 12_750_000;
-        private static readonly int SampleCount = ResolveSampleCount();
+        private static readonly int SampleCount = ResolvePositiveIntEnvironmentVariable(
+            RandomSampleCountEnvironmentVariable,
+            DefaultFastSampleCount
+        );
+        private static readonly int NoiseMapIterationCount = ResolvePositiveIntEnvironmentVariable(
+            NoiseMapIterationsEnvironmentVariable,
+            DefaultFastNoiseMapIterations
+        );
+        private static readonly (int Width, int Height)[] FastNoiseMapDimensions =
+        {
+            (1, 1),
+            (1, NoiseMapExclusiveMaxDimension - 1),
+            (NoiseMapExclusiveMaxDimension - 1, 1),
+            (8, 8),
+            (17, 31),
+            (NoiseMapExclusiveMaxDimension - 1, NoiseMapExclusiveMaxDimension - 1),
+        };
 
         // Floor for the allowed per-bin deviation, in standard deviations. Counts
         // over `sampleLength` bins are ~Poisson(average) with stddev sqrt(average),
@@ -795,17 +815,25 @@ namespace WallstopStudios.UnityHelpers.Tests.Runtime.Random
         public void NextNoiseMap()
         {
             IRandom random = NewRandom();
-            for (int i = 0; i < NormalIterations; ++i)
+            int iteration = 0;
+            foreach ((int width, int height) in EnumerateNoiseMapDimensions(random))
             {
-                int width = random.Next(1, 75);
-                int height = random.Next(1, 75);
                 float[,] noise = new float[width, height];
                 random.NextNoiseMap(noise);
                 foreach (float value in noise)
                 {
-                    Assert.LessOrEqual(0f, value);
-                    Assert.GreaterOrEqual(1.1f, value);
+                    Assert.GreaterOrEqual(
+                        value,
+                        0f,
+                        $"Noise value underflow at iteration {iteration}, size {width}x{height}."
+                    );
+                    Assert.LessOrEqual(
+                        value,
+                        1f,
+                        $"Noise value overflow at iteration {iteration}, size {width}x{height}."
+                    );
                 }
+                ++iteration;
             }
         }
 
@@ -842,15 +870,41 @@ namespace WallstopStudios.UnityHelpers.Tests.Runtime.Random
             return Math.Min(_samples.Length, sampleLength ?? _samples.Length);
         }
 
-        private static int ResolveSampleCount()
+        private static int ResolvePositiveIntEnvironmentVariable(
+            string variableName,
+            int defaultValue
+        )
         {
-            string raw = Environment.GetEnvironmentVariable("UH_RANDOM_SAMPLE_COUNT");
+            string raw = Environment.GetEnvironmentVariable(variableName);
             if (!string.IsNullOrWhiteSpace(raw) && int.TryParse(raw, out int parsed) && parsed > 0)
             {
                 return parsed;
             }
 
-            return DefaultFastSampleCount;
+            return defaultValue;
+        }
+
+        private static IEnumerable<(int Width, int Height)> EnumerateNoiseMapDimensions(
+            IRandom random
+        )
+        {
+            if (NoiseMapIterationCount <= FastNoiseMapDimensions.Length)
+            {
+                for (int i = 0; i < NoiseMapIterationCount; ++i)
+                {
+                    yield return FastNoiseMapDimensions[i];
+                }
+
+                yield break;
+            }
+
+            for (int i = 0; i < NoiseMapIterationCount; ++i)
+            {
+                yield return (
+                    random.Next(1, NoiseMapExclusiveMaxDimension),
+                    random.Next(1, NoiseMapExclusiveMaxDimension)
+                );
+            }
         }
 
         private void TestAndVerify(

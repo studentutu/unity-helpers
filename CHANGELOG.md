@@ -1,11 +1,22 @@
 # Changelog
 
+<!-- cspell:ignore Prd -->
+
 All notable changes to Unity Helpers will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### Added
+
+- **Asset change detection loop reset utility**: Added `AssetChangeDetectionUtility.ResetLoopProtection()` so editor tooling can resume `[DetectAssetChanged]` dispatch after a recursive callback has tripped loop protection, without requiring a domain reload.
+- **Feel-good randomness helpers**: Added `ExactAveragePrd`, `BadLuckProtection`, and `WeightedShuffleBag<T>` for player-facing randomness that reduces streak frustration while keeping deterministic, testable behavior. `ExactAveragePrd` solves the pseudo-random distribution coefficient for a configured long-run average, `BadLuckProtection` implements pity-timer chance ramps and optional hard guarantees, and `WeightedShuffleBag<T>` emits exact weighted ticket counts before repeating. The helpers expose explicit restore APIs so save/load systems can persist pity/deck state.
+
+### Fixed
+
+- **Optional Odin Inspector integration without unguarded Odin assemblies**: `RuntimeSingleton<T>`, `ScriptableObjectSingleton<T>`, and `AttributeEffect` now use Odin serialized base classes only when the `odininspector` package is installed and the package-owned `WALLSTOP_UNITY_HELPERS_ODIN_INSPECTOR` define is active; otherwise they fall back to Unity base classes. Projects that still define the global `ODIN_INSPECTOR` symbol without shipping Sirenix assemblies no longer fail package compilation, while Odin projects keep the serialized base behavior automatically.
 
 ## [3.4.0] - 2026-07-01
 

@@ -146,7 +146,7 @@ jobs:
           matched="$(jq --argjson labels "$(printf '%s\n' "${required[@]}" | jq -R . | jq -s .)" '
             [ .[]
               | select(.status == "online")
-              | select(($labels | all(. as $l | (.labels // []) | map(.name) | index($l) | type == "number")))
+              | select((($labels - ((.labels // []) | map(.name))) | length) == 0)
             ] | length
           ' < "${runners_json}")"
           echo "Runners satisfying ${REQUIRED_LABELS}: ${matched}"
@@ -169,12 +169,15 @@ jobs:
       - runner-preflight
     # Skip the self-hosted matrix entirely when license/lock secrets are absent,
     # so a secret-less repo does not queue forever on a nonexistent runner.
-    if: ${{ needs.matrix-config.outputs.has-required-secrets == 'true' }}
+    if: >-
+      ${{
+        needs.matrix-config.outputs.has-required-secrets == 'true'
+      }}
     runs-on: [self-hosted, Windows, RAM-64GB]
-    timeout-minutes: 660
+    timeout-minutes: 1200
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         unity-version: ${{ fromJSON(needs.matrix-config.outputs.unity-versions) }}
         test-mode:
@@ -182,7 +185,7 @@ jobs:
           - playmode
     steps:
       - name: Enable Git long paths
-        shell: pwsh
+        shell: powershell
         env:
           GIT_CONFIG_GLOBAL: ${{ runner.temp }}/uh-gitconfig
         run: git config --global core.longpaths true
@@ -195,7 +198,65 @@ jobs:
           lfs: true
           persist-credentials: false
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22.18.0"
+
+      # Single source of truth for the assembly include list: the same
+      # asmdef-discovery.js module. For benchmarks we OPT IN to the perf
+      # assemblies (*.Tests.Runtime.Performance) via include-perf.
+      - name: Compute benchmark assembly list
+        id: compute
+        uses: ./.github/actions/compute-unity-assemblies
+        with:
+          include-perf: "true"
+          target: "${{ matrix.test-mode }}"
+
+      - name: Maintain Unity editor on selected runner
+        if: ${{ steps.compute.outputs.is-empty != 'true' }}
+        timeout-minutes: 360
+        shell: powershell
+        run: |
+          $artifactsPath = '.artifacts/unity/benchmarks/${{ matrix.unity-version }}-${{ matrix.test-mode }}'
+          $maintenanceDiagnosticsRoot = Join-Path $artifactsPath 'provisioning/runner-maintenance'
+          New-Item -ItemType Directory -Force -Path $maintenanceDiagnosticsRoot | Out-Null
+          $provisioningProfile = 'EditorOnly'
+          $maintenanceScript = Join-Path $env:GITHUB_WORKSPACE 'scripts\unity\maintain-windows-runner.ps1'
+          if (-not (Test-Path -LiteralPath $maintenanceScript -PathType Leaf)) {
+            throw "Runner maintenance script not found: $maintenanceScript"
+          }
+          . $maintenanceScript
+          $maintenanceExitCode = Invoke-WindowsRunnerMaintenance `
+            -UnityVersions '${{ matrix.unity-version }}' `
+            -ProvisioningProfile $provisioningProfile `
+            -DiagnosticsRoot $maintenanceDiagnosticsRoot
+          if ($maintenanceExitCode -ne 0) {
+            throw "Runner maintenance failed with exit code $maintenanceExitCode."
+          }
+          $pwshCandidates = @(
+            (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'),
+            $(if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} 'PowerShell\7\pwsh.exe' })
+          )
+          $pathPwsh = Get-Command pwsh -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1
+          if ($pathPwsh -and $pathPwsh -notlike '*\Microsoft\WindowsApps\pwsh.exe') {
+            $pwshCandidates += $pathPwsh
+          }
+          $pwshCandidates = @(
+            $pwshCandidates |
+              Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+              Select-Object -Unique
+          )
+          $pwshPath = @($pwshCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })[0]
+          if (-not $pwshPath) {
+            throw 'PowerShell 7 maintenance completed, but pwsh.exe was not found for later GitHub Actions steps.'
+          }
+          $pwshDirectory = Split-Path -Parent $pwshPath
+          $pwshDirectory | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          Write-Host "Added PowerShell 7 to GITHUB_PATH: $pwshDirectory"
+
       - name: Print runner diagnostics
+        if: ${{ steps.compute.outputs.is-empty != 'true' }}
         # Never use plain `shell: bash` on self-hosted Windows runners (the WSL
         # stub at C:\Windows\System32\bash.exe can win PATH resolution and fail).
         uses: ./.github/actions/print-self-hosted-runner-diagnostics
@@ -203,6 +264,7 @@ jobs:
           matrix-note: "default (organization lock wraps the Unity section)"
 
       - name: Cache Unity Library and package caches
+        if: ${{ steps.compute.outputs.is-empty != 'true' }}
         uses: actions/cache@v6
         env:
           PACKAGE_HASH: >-
@@ -221,22 +283,8 @@ jobs:
             .artifacts/unity/cache/${{ matrix.unity-version }}
           key: Library-bench-${{ runner.os }}-${{ runner.arch }}-${{ matrix.unity-version }}-${{ matrix.test-mode }}-${{ env.PACKAGE_HASH }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: "22.18.0"
-
-      # Single source of truth for the assembly include list: the same
-      # asmdef-discovery.js module. For benchmarks we OPT IN to the perf
-      # assemblies (*.Tests.Runtime.Performance) via include-perf.
-      - name: Compute benchmark assembly list
-        id: compute
-        uses: ./.github/actions/compute-unity-assemblies
-        with:
-          include-perf: "true"
-          target: "${{ matrix.test-mode }}"
-
       - name: Validate Unity license secrets
+        if: ${{ steps.compute.outputs.is-empty != 'true' }}
         uses: ./.github/actions/validate-unity-license
         env:
           UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
@@ -273,8 +321,9 @@ jobs:
           retention-days: 90
 
       - name: Acquire organization Unity lock
+        id: unity_lock
         if: ${{ steps.compute.outputs.is-empty != 'true' }}
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@v1
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@v1.2.0
         with:
           lock-name: wallstop-organization-builds
           holder-id-suffix: ${{ matrix.unity-version }}-${{ matrix.test-mode }}
@@ -339,15 +388,15 @@ jobs:
             -ArtifactsPath '.artifacts/unity/benchmarks-random/${{ matrix.unity-version }}'
 
       - name: Return Unity license
-        if: always()
+        if: ${{ always() && steps.unity_lock.outcome == 'success' }}
         uses: ./.github/actions/return-unity-license
         env:
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
 
       - name: Release organization Unity lock
-        if: always()
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@v1
+        if: ${{ always() && steps.unity_lock.outcome == 'success' }}
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@v1.2.0
         with:
           lock-name: wallstop-organization-builds
           holder-id-suffix: ${{ matrix.unity-version }}-${{ matrix.test-mode }}

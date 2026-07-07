@@ -29,6 +29,11 @@ namespace WallstopStudios.UnityHelpers.Editor.Utils.WGroup
         internal static bool Enabled { get; set; }
 
         /// <summary>
+        /// Counts grouped property draw operations that diagnostics actually log.
+        /// </summary>
+        internal static int DrawPropertyLogCount { get; private set; }
+
+        /// <summary>
         /// When set, only logs for groups matching this name (substring match).
         /// Leave null to log all groups.
         /// </summary>
@@ -36,13 +41,8 @@ namespace WallstopStudios.UnityHelpers.Editor.Utils.WGroup
 
         private const string LogPrefix = "[WGroupIndent] ";
 
-        private static bool ShouldLog(string groupName)
+        private static bool MatchesGroupNameFilter(string groupName)
         {
-            if (!Enabled)
-            {
-                return false;
-            }
-
             if (!string.IsNullOrEmpty(GroupNameFilter))
             {
                 if (string.IsNullOrEmpty(groupName))
@@ -60,6 +60,16 @@ namespace WallstopStudios.UnityHelpers.Editor.Utils.WGroup
             }
 
             return true;
+        }
+
+        private static bool ShouldLog(string groupName)
+        {
+            return Enabled && MatchesGroupNameFilter(groupName);
+        }
+
+        internal static void ResetCounters()
+        {
+            DrawPropertyLogCount = 0;
         }
 
         internal static void LogPushPadding(
@@ -122,6 +132,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Utils.WGroup
                 return;
             }
 
+            ++DrawPropertyLogCount;
             Debug.Log(
                 $"{LogPrefix}DrawProperty: group={groupName ?? "(null)"}, "
                     + $"property={propertyPath}, indentLevel={indentLevel}, "

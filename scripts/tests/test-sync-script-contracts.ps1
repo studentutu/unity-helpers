@@ -21,7 +21,7 @@ Param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# cspell:ignore Eqi
+# cspell:ignore cnotin Eqi asmdefs odininspector WALLSTOP
 
 $script:TestsPassed = 0
 $script:TestsFailed = 0
@@ -417,6 +417,464 @@ function Run-UnityCiScriptContractTests {
     -TestName 'run-ci-tests.ps1 defines every Write-Ci* helper it calls' `
     -Passed ($missingDefinitions.Count -eq 0) `
     -Message "Missing helper definitions: $($missingDefinitions -join ', ')"
+}
+
+function Run-TestFixtureTempFolderContractTests {
+  Write-Host ""
+  Write-Host "Shared test fixture temp-folder contracts:" -ForegroundColor Magenta
+  Write-Host ""
+
+  $repoRoot = Get-RepoRoot
+  $fixturePaths = @(
+    'Tests/Editor/TestAssets/SharedEditorTestFixtures.cs',
+    'Tests/Editor/TestAssets/SharedPrefabTestFixtures.cs',
+    'Tests/Editor/TestAssets/SharedTextureTestFixtures.cs',
+    'Tests/Editor/Sprites/SpriteSheetExtractor/SharedSpriteTestFixtures.cs',
+    'Tests/Editor/TestUtils/FolderTemplateManager.cs'
+  )
+
+  $missingFiles = New-Object System.Collections.Generic.List[string]
+  $rawCreateFolderViolations = New-Object System.Collections.Generic.List[string]
+  $missingEnsureFolder = New-Object System.Collections.Generic.List[string]
+  $missingTempCleanup = New-Object System.Collections.Generic.List[string]
+
+  foreach ($relativePath in $fixturePaths) {
+    $path = Join-Path $repoRoot $relativePath
+    if (-not (Test-Path $path)) {
+      $missingFiles.Add($relativePath) | Out-Null
+      continue
+    }
+
+    $content = Get-Content -Path $path -Raw
+    if ($content -notmatch 'Assets/Temp') {
+      continue
+    }
+
+    if ($content -match 'AssetDatabase\.CreateFolder\s*\(') {
+      $rawCreateFolderViolations.Add($relativePath) | Out-Null
+    }
+
+    if ($content -notmatch 'AssetDatabaseBatchHelper\.EnsureAssetFolder\s*\(') {
+      $missingEnsureFolder.Add($relativePath) | Out-Null
+    }
+
+    if ($content -notmatch 'TempFolderCleanupUtility\.CleanupTempDuplicates') {
+      $missingTempCleanup.Add($relativePath) | Out-Null
+    }
+  }
+
+  Write-TestResult `
+    -TestName 'shared temp fixture managers exist' `
+    -Passed ($missingFiles.Count -eq 0) `
+    -Message "Missing fixture manager files: $($missingFiles -join ', ')"
+
+  Write-TestResult `
+    -TestName 'shared temp fixture managers avoid raw AssetDatabase.CreateFolder' `
+    -Passed ($rawCreateFolderViolations.Count -eq 0) `
+    -Message "Use AssetDatabaseBatchHelper.EnsureAssetFolder instead: $($rawCreateFolderViolations -join ', ')"
+
+  Write-TestResult `
+    -TestName 'shared temp fixture managers use EnsureAssetFolder' `
+    -Passed ($missingEnsureFolder.Count -eq 0) `
+    -Message "Missing AssetDatabaseBatchHelper.EnsureAssetFolder: $($missingEnsureFolder -join ', ')"
+
+  Write-TestResult `
+    -TestName 'shared temp fixture managers clean numbered Temp duplicates' `
+    -Passed ($missingTempCleanup.Count -eq 0) `
+    -Message "Missing TempFolderCleanupUtility cleanup: $($missingTempCleanup -join ', ')"
+}
+
+function Run-OptionalOdinIntegrationContractTests {
+  Write-Host ""
+  Write-Host "Optional Odin integration contracts:" -ForegroundColor Magenta
+  Write-Host ""
+
+  $repoRoot = Get-RepoRoot
+  $sourceRoots = @('Runtime', 'Editor', 'Tests')
+  $sourceFiles = New-Object System.Collections.Generic.List[string]
+  foreach ($sourceRoot in $sourceRoots) {
+    $rootPath = Join-Path $repoRoot $sourceRoot
+    if (-not (Test-Path $rootPath)) {
+      continue
+    }
+
+    Get-ChildItem -Path $rootPath -Recurse -Filter '*.cs' -File |
+      ForEach-Object { $sourceFiles.Add($_.FullName) | Out-Null }
+  }
+
+  $odinSymbol = 'WALLSTOP_UNITY_HELPERS_ODIN_INSPECTOR'
+  $odinSymbolPattern = [regex]::Escape($odinSymbol)
+  $expressionRequiresOdinSymbol = {
+    param([string]$Expression)
+
+    if ([string]::IsNullOrWhiteSpace($Expression)) {
+      return $false
+    }
+
+    if ($Expression -notmatch "\b$odinSymbolPattern\b") {
+      return $false
+    }
+
+    if ($Expression -match '\|\|') {
+      return $false
+    }
+
+    if ($Expression -match "!\s*\(*\s*$odinSymbolPattern\b") {
+      return $false
+    }
+
+    return $true
+  }
+  $directOdinGuardViolations = New-Object System.Collections.Generic.List[string]
+  $unguardedSirenixReferences = New-Object System.Collections.Generic.List[string]
+  foreach ($sourceFile in $sourceFiles) {
+    $relativePath = [System.IO.Path]::GetRelativePath($repoRoot, $sourceFile).Replace('\', '/')
+    $lines = @(Get-Content -Path $sourceFile)
+    $preprocessorStack = New-Object System.Collections.Generic.List[object]
+    $insideBlockComment = $false
+
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+      $codeLine = $lines[$i]
+
+      if ($insideBlockComment) {
+        $commentEnd = $codeLine.IndexOf('*/')
+        if ($commentEnd -lt 0) {
+          continue
+        }
+
+        $codeLine = $codeLine.Substring($commentEnd + 2)
+        $insideBlockComment = $false
+      }
+
+      while ($codeLine.Contains('/*')) {
+        $commentStart = $codeLine.IndexOf('/*')
+        $commentEnd = $codeLine.IndexOf('*/', $commentStart + 2)
+        if ($commentEnd -lt 0) {
+          $codeLine = $codeLine.Substring(0, $commentStart)
+          $insideBlockComment = $true
+          break
+        }
+
+        $codeLine =
+          $codeLine.Substring(0, $commentStart) +
+          $codeLine.Substring($commentEnd + 2)
+      }
+
+      $codeLine = [regex]::Replace($codeLine, '//.*$', '')
+      $trimmedCodeLine = $codeLine.TrimStart()
+      if ([string]::IsNullOrWhiteSpace($trimmedCodeLine)) {
+        continue
+      }
+
+      if ($trimmedCodeLine -match '^#\s*(?<directive>if|elif)\b(?<expr>.*)$') {
+        $directive = $Matches['directive']
+        $expression = $Matches['expr']
+        if ($expression -match '\bODIN_INSPECTOR\b') {
+          $directOdinGuardViolations.Add("${relativePath}:$($i + 1)") | Out-Null
+        }
+
+        if ($directive -eq 'if') {
+          $parentGuard =
+            $preprocessorStack.Count -gt 0 -and
+            [bool]$preprocessorStack[$preprocessorStack.Count - 1].CurrentGuard
+          $currentGuard = $parentGuard -or (& $expressionRequiresOdinSymbol $expression)
+          $preprocessorStack.Add(
+            [PSCustomObject]@{
+              ParentGuard = $parentGuard
+              CurrentGuard = $currentGuard
+            }
+          ) | Out-Null
+        }
+        elseif ($preprocessorStack.Count -gt 0) {
+          $currentFrame = $preprocessorStack[$preprocessorStack.Count - 1]
+          $currentFrame.CurrentGuard = [bool]$currentFrame.ParentGuard -or
+            (& $expressionRequiresOdinSymbol $expression)
+        }
+
+        continue
+      }
+
+      if ($trimmedCodeLine -match '^#\s*else\b') {
+        if ($preprocessorStack.Count -gt 0) {
+          $currentFrame = $preprocessorStack[$preprocessorStack.Count - 1]
+          $currentFrame.CurrentGuard = [bool]$currentFrame.ParentGuard
+        }
+
+        continue
+      }
+
+      if ($trimmedCodeLine -match '^#\s*endif\b') {
+        if ($preprocessorStack.Count -gt 0) {
+          $preprocessorStack.RemoveAt($preprocessorStack.Count - 1)
+        }
+
+        continue
+      }
+
+      $guardIsActive =
+        $preprocessorStack.Count -gt 0 -and
+        [bool]$preprocessorStack[$preprocessorStack.Count - 1].CurrentGuard
+
+      $hasCompileTimeSirenixReference = $codeLine -match '^\s*using\s+Sirenix\.' -or
+        $codeLine -match ':\s*OdinAttributeDrawer\s*<' -or
+        $codeLine -match '\bSerialized(?:MonoBehaviour|ScriptableObject)\b' -or
+        $codeLine -match 'typeof\s*\(\s*Serialized(?:MonoBehaviour|ScriptableObject)\s*\)' -or
+        $codeLine -match '^\s*\[ShowIf\s*\('
+
+      if ($hasCompileTimeSirenixReference -and -not $guardIsActive) {
+        $unguardedSirenixReferences.Add("${relativePath}:$($i + 1)") | Out-Null
+      }
+    }
+  }
+
+  Write-TestResult `
+    -TestName 'Odin preprocessor guards use package-owned symbol' `
+    -Passed ($directOdinGuardViolations.Count -eq 0) `
+    -Message "Direct ODIN_INSPECTOR guards: $($directOdinGuardViolations -join ', ')"
+
+  Write-TestResult `
+    -TestName 'Sirenix compile-time references are inside package-symbol branches' `
+    -Passed ($unguardedSirenixReferences.Count -eq 0) `
+    -Message "Unguarded references: $($unguardedSirenixReferences -join ', ')"
+
+  $runtimeOdinBaseContracts = @(
+    @{
+      Path = 'Runtime/Utils/RuntimeSingleton.cs'
+      Alias = 'RuntimeSingletonBase'
+      OdinBase = 'SerializedMonoBehaviour'
+      UnityBase = 'MonoBehaviour'
+      ClassPattern = 'class\s+RuntimeSingleton\s*<\s*T\s*>\s*:\s*RuntimeSingletonBase\b'
+    },
+    @{
+      Path = 'Runtime/Utils/ScriptableObjectSingleton.cs'
+      Alias = 'ScriptableObjectSingletonBase'
+      OdinBase = 'SerializedScriptableObject'
+      UnityBase = 'ScriptableObject'
+      ClassPattern = 'class\s+ScriptableObjectSingleton\s*<\s*T\s*>\s*:\s*ScriptableObjectSingletonBase\b'
+    },
+    @{
+      Path = 'Runtime/Tags/AttributeEffect.cs'
+      Alias = 'AttributeEffectBase'
+      OdinBase = 'SerializedScriptableObject'
+      UnityBase = 'ScriptableObject'
+      ClassPattern = 'class\s+AttributeEffect\s*:\s*AttributeEffectBase\s*,\s*IEquatable\s*<\s*AttributeEffect\s*>'
+    }
+  )
+  $missingRuntimeOdinBaseContracts = New-Object System.Collections.Generic.List[string]
+  foreach ($contract in $runtimeOdinBaseContracts) {
+    $contractPath = Join-Path $repoRoot $contract.Path
+    if (-not (Test-Path $contractPath)) {
+      $missingRuntimeOdinBaseContracts.Add("$($contract.Path): missing file") | Out-Null
+      continue
+    }
+
+    $content = Get-Content -Path $contractPath -Raw
+    $alias = [regex]::Escape($contract.Alias)
+    $odinBase = [regex]::Escape($contract.OdinBase)
+    $unityBase = [regex]::Escape($contract.UnityBase)
+    $conditionalAliasPattern =
+      "(?s)#\s*if\s+$odinSymbolPattern\b.*?using\s+$alias\s*=\s*Sirenix\.OdinInspector\.$odinBase\s*;.*?#\s*else\b.*?using\s+$alias\s*=\s*UnityEngine\.$unityBase\s*;.*?#\s*endif\b"
+    if ($content -notmatch $conditionalAliasPattern) {
+      $missingRuntimeOdinBaseContracts.Add("$($contract.Path): missing conditional $($contract.Alias) alias") | Out-Null
+    }
+
+    if ($content -notmatch $contract.ClassPattern) {
+      $missingRuntimeOdinBaseContracts.Add("$($contract.Path): class does not inherit from $($contract.Alias)") | Out-Null
+    }
+  }
+
+  Write-TestResult `
+    -TestName 'runtime Odin base types use conditional aliases with Unity fallbacks' `
+    -Passed ($missingRuntimeOdinBaseContracts.Count -eq 0) `
+    -Message "Missing contracts: $($missingRuntimeOdinBaseContracts -join ', ')"
+
+  $requiredOdinSymbolAsmdefs = @(
+    'Runtime/WallstopStudios.UnityHelpers.asmdef',
+    'Editor/WallstopStudios.UnityHelpers.Editor.asmdef',
+    'Tests/Editor/CustomDrawers/WallstopStudios.UnityHelpers.Tests.Editor.CustomDrawers.asmdef',
+    'Tests/Editor/CustomEditors/WallstopStudios.UnityHelpers.Tests.Editor.CustomEditors.asmdef',
+    'Tests/Editor/Utils/Odin/WallstopStudios.UnityHelpers.Tests.Editor.Utils.Odin.asmdef',
+    'Tests/Editor/WallstopStudios.UnityHelpers.Tests.Editor.asmdef',
+    'Tests/Runtime/WallstopStudios.UnityHelpers.Tests.Runtime.asmdef'
+  )
+  $missingOdinVersionDefines = New-Object System.Collections.Generic.List[string]
+  foreach ($asmdefRelativePath in $requiredOdinSymbolAsmdefs) {
+    $asmdefPath = Join-Path $repoRoot $asmdefRelativePath
+    if (-not (Test-Path $asmdefPath)) {
+      $missingOdinVersionDefines.Add("${asmdefRelativePath}: missing file") | Out-Null
+      continue
+    }
+
+    $asmdef = Get-Content -Path $asmdefPath -Raw | ConvertFrom-Json
+    $hasVersionDefine = $false
+    foreach ($versionDefine in @($asmdef.versionDefines)) {
+      if (
+        [string]$versionDefine.name -eq 'odininspector' -and
+        [string]$versionDefine.define -eq $odinSymbol -and
+        [string]$versionDefine.expression
+      ) {
+        $hasVersionDefine = $true
+        break
+      }
+    }
+
+    if (-not $hasVersionDefine) {
+      $missingOdinVersionDefines.Add($asmdefRelativePath) | Out-Null
+    }
+  }
+
+  Write-TestResult `
+    -TestName 'runtime, editor, and Odin test asmdefs define package-owned Odin symbol from package presence' `
+    -Passed ($missingOdinVersionDefines.Count -eq 0) `
+    -Message "Missing odininspector versionDefines: $($missingOdinVersionDefines -join ', ')"
+
+  $missingOdinOverrideReferences = New-Object System.Collections.Generic.List[string]
+  $odinEditorApiAsmdefs = @(
+    'Tests/Editor/CustomDrawers/WallstopStudios.UnityHelpers.Tests.Editor.CustomDrawers.asmdef',
+    'Tests/Editor/CustomEditors/WallstopStudios.UnityHelpers.Tests.Editor.CustomEditors.asmdef',
+    'Tests/Editor/WallstopStudios.UnityHelpers.Tests.Editor.asmdef'
+  )
+  foreach ($asmdefRelativePath in $requiredOdinSymbolAsmdefs) {
+    $asmdefPath = Join-Path $repoRoot $asmdefRelativePath
+    if (-not (Test-Path $asmdefPath)) {
+      continue
+    }
+
+    $asmdef = Get-Content -Path $asmdefPath -Raw | ConvertFrom-Json
+    $overrideReferences = $asmdef.PSObject.Properties['overrideReferences'] -and
+      $asmdef.overrideReferences -eq $true
+    if (-not $overrideReferences) {
+      continue
+    }
+
+    $precompiledReferences = @($asmdef.precompiledReferences)
+    $requiredReferences = @(
+      'Sirenix.Serialization.dll',
+      'Sirenix.OdinInspector.Attributes.dll'
+    )
+    if ($asmdefRelativePath -in $odinEditorApiAsmdefs) {
+      $requiredReferences += 'Sirenix.OdinInspector.Editor.dll'
+    }
+
+    foreach ($requiredReference in $requiredReferences) {
+      if ($requiredReference -notin $precompiledReferences) {
+        $missingOdinOverrideReferences.Add("${asmdefRelativePath}: ${requiredReference}") | Out-Null
+      }
+    }
+  }
+
+  Write-TestResult `
+    -TestName 'Odin-enabled overrideReferences test asmdefs keep Odin assemblies visible' `
+    -Passed ($missingOdinOverrideReferences.Count -eq 0) `
+    -Message "Missing Odin precompiledReferences: $($missingOdinOverrideReferences -join ', ')"
+
+  $generalEditorUtilsAsmdefPath = Join-Path $repoRoot 'Tests/Editor/Utils/WallstopStudios.UnityHelpers.Tests.Editor.Utils.asmdef'
+  $generalEditorUtilsAsmdef = Get-Content -Path $generalEditorUtilsAsmdefPath -Raw | ConvertFrom-Json
+  $generalEditorUtilsSirenixPrecompiledReferences = @(
+    @($generalEditorUtilsAsmdef.precompiledReferences) |
+      Where-Object { [string]$_ -match '^Sirenix\.' }
+  )
+  $generalEditorUtilsOdinVersionDefines = @(
+    @($generalEditorUtilsAsmdef.versionDefines) |
+      Where-Object {
+        [string]$_.name -eq 'odininspector' -or
+        [string]$_.define -eq $odinSymbol
+      }
+  )
+  $odinEditorUtilsAsmdefPath = Join-Path $repoRoot 'Tests/Editor/Utils/Odin/WallstopStudios.UnityHelpers.Tests.Editor.Utils.Odin.asmdef'
+  $odinEditorUtilsAsmdef = Get-Content -Path $odinEditorUtilsAsmdefPath -Raw | ConvertFrom-Json
+  $odinEditorUtilsDefineConstraints = @($odinEditorUtilsAsmdef.defineConstraints)
+  $odinEditorUtilsHasOdinConstraint = $odinSymbol -in $odinEditorUtilsDefineConstraints
+  $odinEditorUtilsHasUnityTestsConstraint = 'UNITY_INCLUDE_TESTS' -in $odinEditorUtilsDefineConstraints
+  $odinEditorUtilsTestPath = Join-Path $repoRoot 'Tests/Editor/Utils/Odin/ScriptableObjectSingletonOdinTests.cs'
+  $odinEditorUtilsTestContent = if (Test-Path $odinEditorUtilsTestPath) {
+    Get-Content -Path $odinEditorUtilsTestPath -Raw
+  } else {
+    ''
+  }
+  $odinEditorUtilsTestKeepsSingletonBaseCoverage = (
+    $odinEditorUtilsTestContent -match '#\s*if\s+UNITY_EDITOR\s+&&\s+WALLSTOP_UNITY_HELPERS_ODIN_INSPECTOR' -and
+    $odinEditorUtilsTestContent.Contains('using Sirenix.OdinInspector;') -and
+    $odinEditorUtilsTestContent -match 'ScriptableObjectSingletonOdinTests\s*:\s*CommonTestBase' -and
+    $odinEditorUtilsTestContent.Contains('Track(') -and
+    $odinEditorUtilsTestContent.Contains('ScriptableObject.CreateInstance<OdinScriptableObjectSingletonTestTarget>()') -and
+    $odinEditorUtilsTestContent.Contains('Is.InstanceOf<SerializedScriptableObject>()') -and
+    $odinEditorUtilsTestContent -match 'OdinScriptableObjectSingletonTestTarget\s*:\s*ScriptableObjectSingleton<\s*OdinScriptableObjectSingletonTestTarget\s*>'
+  )
+  $runtimeAssemblyInfoContent = Get-Content -Path (Join-Path $repoRoot 'Runtime/AssemblyInfo.cs') -Raw
+  $editorAssemblyInfoContent = Get-Content -Path (Join-Path $repoRoot 'Editor/AssemblyInfo.cs') -Raw
+  $assemblyReferenceValidationContent = Get-Content -Path (Join-Path $repoRoot 'Tests/Editor/Validation/AssemblyReferenceValidationTests.cs') -Raw
+  $odinEditorUtilsIvtEntry = 'InternalsVisibleTo("WallstopStudios.UnityHelpers.Tests.Editor.Utils.Odin")'
+  $odinEditorUtilsValidationAllowsAbsentOptionalAsmdef = (
+    $runtimeAssemblyInfoContent.Contains($odinEditorUtilsIvtEntry) -and
+    $editorAssemblyInfoContent.Contains($odinEditorUtilsIvtEntry) -and
+    $assemblyReferenceValidationContent.Contains('UnityIncludeTestsDefine = "UNITY_INCLUDE_TESTS"') -and
+    $assemblyReferenceValidationContent.Contains('ShouldSkipWhenUnloaded') -and
+    $assemblyReferenceValidationContent.Contains('ExtractDefineConstraintsFromAsmdef') -and
+    $assemblyReferenceValidationContent.Contains('Optional test assembly not compiled because one or more define constraints are absent')
+  )
+
+  Write-TestResult `
+    -TestName 'editor utils tests isolate Odin-only coverage in an Odin-gated asmdef' `
+    -Passed (
+      $generalEditorUtilsSirenixPrecompiledReferences.Count -eq 0 -and
+      $generalEditorUtilsOdinVersionDefines.Count -eq 0 -and
+      $odinEditorUtilsHasOdinConstraint -and
+      $odinEditorUtilsHasUnityTestsConstraint -and
+      $odinEditorUtilsTestKeepsSingletonBaseCoverage -and
+      $odinEditorUtilsValidationAllowsAbsentOptionalAsmdef
+    ) `
+    -Message "General utils Sirenix references: $($generalEditorUtilsSirenixPrecompiledReferences -join ', '); general utils Odin versionDefines: $($generalEditorUtilsOdinVersionDefines -join ', '); Odin utils constraints: $($odinEditorUtilsDefineConstraints -join ', '); Odin singleton coverage present: $odinEditorUtilsTestKeepsSingletonBaseCoverage; optional asmdef validation present: $odinEditorUtilsValidationAllowsAbsentOptionalAsmdef"
+
+  $runtimeAsmdefPath = Join-Path $repoRoot 'Runtime/WallstopStudios.UnityHelpers.asmdef'
+  $runtimeAsmdef = Get-Content -Path $runtimeAsmdefPath -Raw | ConvertFrom-Json
+  $runtimePrecompiledReferences = @($runtimeAsmdef.precompiledReferences)
+  $runtimeOverrideReferences = $runtimeAsmdef.PSObject.Properties['overrideReferences'] -and
+    $runtimeAsmdef.overrideReferences -eq $true
+  $runtimeHasOdinVersionDefine = @(
+    @($runtimeAsmdef.versionDefines) |
+      Where-Object {
+        [string]$_.name -eq 'odininspector' -and
+        [string]$_.define -eq $odinSymbol -and
+        [string]$_.expression
+      }
+  ).Count -gt 0
+  $runtimeSirenixPrecompiledReferences = @(
+    $runtimePrecompiledReferences |
+      Where-Object { [string]$_ -match '^Sirenix\.' }
+  )
+
+  Write-TestResult `
+    -TestName 'runtime asmdef uses editor-style auto references for optional Odin bases' `
+    -Passed (
+      $runtimeHasOdinVersionDefine -and
+      -not $runtimeOverrideReferences -and
+      $runtimeSirenixPrecompiledReferences.Count -eq 0
+    ) `
+    -Message "Runtime Odin versionDefine present: $runtimeHasOdinVersionDefine; overrideReferences: $runtimeOverrideReferences; runtime Sirenix precompiledReferences: $($runtimeSirenixPrecompiledReferences -join ', ')"
+
+  $editorAsmdefPath = Join-Path $repoRoot 'Editor/WallstopStudios.UnityHelpers.Editor.asmdef'
+  $editorAsmdef = Get-Content -Path $editorAsmdefPath -Raw | ConvertFrom-Json
+  $editorOverrideReferences = $editorAsmdef.PSObject.Properties['overrideReferences'] -and
+    $editorAsmdef.overrideReferences -eq $true
+  $editorPrecompiledReferences = @($editorAsmdef.precompiledReferences)
+  $requiredEditorOdinReferences = @(
+    'Sirenix.Serialization.dll',
+    'Sirenix.OdinInspector.Attributes.dll',
+    'Sirenix.OdinInspector.Editor.dll'
+  )
+  $missingEditorOdinReferences = @()
+  if ($editorOverrideReferences) {
+    $missingEditorOdinReferences = @(
+      $requiredEditorOdinReferences |
+        Where-Object { $_ -notin $editorPrecompiledReferences }
+    )
+  }
+
+  Write-TestResult `
+    -TestName 'editor asmdef keeps Odin editor assemblies visible' `
+    -Passed (-not $editorOverrideReferences -or $missingEditorOdinReferences.Count -eq 0) `
+    -Message "Editor overrideReferences=true missing precompiledReferences: $($missingEditorOdinReferences -join ', ')"
 }
 
 function Run-HookInstallContractTests {
@@ -845,6 +1303,128 @@ function Run-PrePushLastResortGuidanceContractTests {
     -TestName 'LLM guidance does not claim pre-push runs slow routine validators' `
     -Passed ($staleGuidanceHits.Count -eq 0) `
     -Message "Stale guidance: $($staleGuidanceHits -join '; ')"
+}
+
+function Get-WorkflowEventPathFilterBlock {
+  param(
+    [Parameter(Mandatory = $true)][string]$WorkflowContent,
+    [Parameter(Mandatory = $true)][string]$EventName
+  )
+
+  $eventPattern = "(?ms)^  $([regex]::Escape($EventName)):\s*\r?\n(?<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*$|^\S|\z)"
+  $eventMatch = [regex]::Match($WorkflowContent, $eventPattern)
+  if (-not $eventMatch.Success) {
+    return ''
+  }
+
+  $pathsPattern = '(?ms)^    paths:\s*\r?\n(?<body>.*?)(?=^    [A-Za-z0-9_-]+:\s*$|^  [A-Za-z0-9_-]+:\s*$|^\S|\z)'
+  $pathsMatch = [regex]::Match($eventMatch.Value, $pathsPattern)
+  if (-not $pathsMatch.Success) {
+    return ''
+  }
+
+  return $pathsMatch.Groups['body'].Value
+}
+
+function Run-DocumentationWorkflowContractTests {
+  Write-Host ""
+  Write-Host "Documentation workflow contracts:" -ForegroundColor Magenta
+  Write-Host ""
+
+  $repoRoot = Get-RepoRoot
+  $workflowPath = Join-Path $repoRoot '.github/workflows/validate-docs.yml'
+
+  if (-not (Test-Path $workflowPath)) {
+    Write-TestResult `
+      -TestName 'validate-docs workflow exists' `
+      -Passed $false `
+      -Message "Missing file: $workflowPath"
+    return
+  }
+
+  $workflowContent = Get-Content -Path $workflowPath -Raw
+  $validateLinksBlock = [regex]::Match($workflowContent, '(?ms)^\s*validate-links:\s*.*?(?=^\s*validate-link-format:)')
+  $validateLinkFormatBlock = [regex]::Match($workflowContent, '(?ms)^\s*validate-link-format:\s*.*?(?=^\s*build-mkdocs-test:)')
+
+  $usesCanonicalDocLinkLinter = (
+    $validateLinksBlock.Success -and
+    $validateLinkFormatBlock.Success -and
+    $validateLinksBlock.Value.Contains('./scripts/lint-doc-links.ps1 -Mode Targets -VerboseOutput') -and
+    $validateLinkFormatBlock.Value.Contains('./scripts/lint-doc-links.ps1 -Mode Format -VerboseOutput')
+  )
+
+  $preservesRequiredCheckNames = (
+    $validateLinksBlock.Success -and
+    $validateLinkFormatBlock.Success -and
+    $validateLinksBlock.Value.Contains('name: Validate Internal Links') -and
+    $validateLinkFormatBlock.Value.Contains('name: Validate Link Format')
+  )
+
+  $hasBoundedLinkJobTimeouts = (
+    $validateLinksBlock.Success -and
+    $validateLinkFormatBlock.Success -and
+    $validateLinksBlock.Value.Contains('timeout-minutes: 5') -and
+    $validateLinkFormatBlock.Value.Contains('timeout-minutes: 5')
+  )
+
+  [string[]]$requiredValidateDocsPathFilters = @(
+    'scripts/comment-stripping.ps1',
+    'scripts/lint-doc-links.ps1',
+    'scripts/run-doc-link-lint.js',
+    'scripts/tests/test-lint-doc-links.ps1'
+  )
+  [string[]]$missingValidateDocsPathFilters = @()
+  $validateDocsPathFilterBlocks = @{
+    push = Get-WorkflowEventPathFilterBlock -WorkflowContent $workflowContent -EventName 'push'
+    pull_request = Get-WorkflowEventPathFilterBlock -WorkflowContent $workflowContent -EventName 'pull_request'
+  }
+  foreach ($eventName in @('push', 'pull_request')) {
+    $pathFilterBlock = $validateDocsPathFilterBlocks[$eventName]
+    foreach ($requiredPathFilter in $requiredValidateDocsPathFilters) {
+      $pathFilterPattern = '- "' + $requiredPathFilter + '"'
+      if (-not $pathFilterBlock.Contains($pathFilterPattern)) {
+        $missingValidateDocsPathFilters += "${eventName}:$requiredPathFilter"
+      }
+    }
+  }
+
+  $slowInlineScannerPatterns = @(
+    'find . -name "*.md"',
+    'strip_inline_code()',
+    "grep -qE '\]\([a-zA-Z]'",
+    "grep -oE '\]\([^)]+\)'"
+  )
+  $slowInlineScannerHits = @()
+  foreach ($pattern in $slowInlineScannerPatterns) {
+    if ($workflowContent.Contains($pattern)) {
+      $slowInlineScannerHits += $pattern
+    }
+  }
+
+  Write-TestResult `
+    -TestName 'validate-docs preserves required link-check job names' `
+    -Passed $preservesRequiredCheckNames `
+    -Message 'Expected Validate Documentation to keep Validate Internal Links and Validate Link Format jobs for branch-protection continuity.'
+
+  Write-TestResult `
+    -TestName 'validate-docs delegates link checks to canonical linter' `
+    -Passed $usesCanonicalDocLinkLinter `
+    -Message 'Expected validate-docs.yml link jobs to invoke scripts/lint-doc-links.ps1 with distinct Targets and Format modes.'
+
+  Write-TestResult `
+    -TestName 'validate-docs bounds link-check job runtime' `
+    -Passed $hasBoundedLinkJobTimeouts `
+    -Message 'Expected validate-docs.yml link jobs to have timeout-minutes: 5.'
+
+  Write-TestResult `
+    -TestName 'validate-docs path filters include doc link linter sources' `
+    -Passed ($missingValidateDocsPathFilters.Count -eq 0) `
+    -Message "Expected push and pull_request path filters to include doc link linter sources. Missing: $($missingValidateDocsPathFilters -join ', ')"
+
+  Write-TestResult `
+    -TestName 'validate-docs avoids duplicated slow inline markdown scanner' `
+    -Passed ($slowInlineScannerHits.Count -eq 0) `
+    -Message "Slow inline scanner patterns found: $($slowInlineScannerHits -join ', ')"
 }
 
 function Run-ReleaseDrafterChangelogVersionContractTests {
@@ -1717,6 +2297,14 @@ function Run-ReleasePackageContentContractTests {
     $validatorContent.Contains('[System.IO.Path]::GetRelativePath($rootPath, $childPath)') -and
     -not $validatorContent.Contains('.FullName.Replace(')
   )
+  $validatorRejectsPrDescriptionArtifacts = (
+    $validatorContent.Contains('$forbiddenRootMarkdownArtifactPrefixes') -and
+    $validatorContent.Contains("'pr-description.md'") -and
+    $validatorContent.Contains('function Test-ForbiddenRootMarkdownArtifact') -and
+    $validatorContent.Contains('.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)') -and
+    $validatorContent.Contains('[System.StringComparison]::OrdinalIgnoreCase') -and
+    $validatorContent.Contains('Forbidden release artifact included in npm package')
+  )
   $productionPowerShellScriptsWithStringPathExtraction = @(
     Get-ChildItem -LiteralPath (Join-Path $repoRoot 'scripts') -Recurse -File -Filter '*.ps1' |
       Where-Object { $_.FullName -notmatch '[\\/](scripts[\\/])?tests[\\/]' } |
@@ -1780,6 +2368,11 @@ function Run-ReleasePackageContentContractTests {
     -Message "Scripts still using string-based FullName relative path extraction: $($productionPowerShellScriptsWithStringPathExtraction -join ', ')"
 
   Write-TestResult `
+    -TestName 'npm package validator rejects PR description artifacts explicitly' `
+    -Passed $validatorRejectsPrDescriptionArtifacts `
+    -Message 'Expected validate-npm-package.ps1 to reject pr-description.md case variants before package publication.'
+
+  Write-TestResult `
     -TestName 'npm package validator uses case-sensitive package membership checks' `
     -Passed $validatorUsesCaseSensitiveMembership `
     -Message 'Expected validate-npm-package.ps1 to reject differently-cased package paths with -cnotin.'
@@ -1834,9 +2427,12 @@ Run-CspellContractTests
 Run-AgentValidationContractTests
 Run-PowerShellPathBindingContractTests
 Run-UnityCiScriptContractTests
+Run-TestFixtureTempFolderContractTests
+Run-OptionalOdinIntegrationContractTests
 Run-HookInstallContractTests
 Run-RepoLocalPrettierContractTests
 Run-PrePushLastResortGuidanceContractTests
+Run-DocumentationWorkflowContractTests
 Run-ReleaseDrafterChangelogVersionContractTests
 Run-ReleaseWorkflowChangelogContractTests
 Run-ReleaseWorkflowGitHubCliContractTests

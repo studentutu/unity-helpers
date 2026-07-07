@@ -80,13 +80,17 @@ function Register-UnityCliCommandAttempt {
 function Add-ProvisioningTimeoutEvent {
     param(
         [string[]]$Arguments,
-        [int]$TimeoutSeconds
+        [int]$TimeoutSeconds,
+        [string]$Reason = 'wall-clock',
+        [int]$StallSeconds = 0
     )
 
     $script:ProvisioningTimeoutEvents.Add([pscustomobject]@{
             utc            = [DateTime]::UtcNow.ToString('o')
             command        = (@($Arguments) -join ' ')
+            reason         = $Reason
             timeoutSeconds = $TimeoutSeconds
+            stallSeconds   = $StallSeconds
         }) | Out-Null
 }
 
@@ -328,13 +332,16 @@ function Get-EnsureEditorInstallTimeoutSeconds {
     # it returns 0 and the runner waits indefinitely, matching the prior
     # behavior, for the rare case an operator must allow an unbounded install.
     #
-    # Default rationale (2700s = 45 minutes): a healthy full CI module install
-    # (Windows IL2CPP + WebGL + Android SDK/NDK/OpenJDK + Linux Mono/IL2CPP) on a
-    # warm self-hosted runner completes in well under this; 45 minutes comfortably
-    # exceeds a slow-but-progressing install yet stays well under the Unity job's
-    # wall-clock budget, so a genuine HANG is killed (and retried) long before the
-    # GitHub job would be cancelled. StrictMode-safe: no collection reads.
-    param([int]$Default = 2700)
+    # Default rationale (PROFILE-AWARE): EditorOnly keeps the historical 2700s
+    # (45 min) bound because it installs only the base editor. Heavy module
+    # profiles get 7200s (2h): Unity 6000.5.2f1 Windows IL2CPP alternate-root
+    # repair has emitted steady live progress for the full old 2700s window before
+    # completion, and killing that slow-but-live install cascades into a doomed
+    # quarantine of the locked canonical editor. 7200s still stays under the
+    # 9000s whole-provisioning budget and the 180-minute workflow provisioning
+    # step, but gives cold 6000.5 module installs enough room to complete.
+    # StrictMode-safe: no collection reads.
+    param([int]$Default = -1)
 
     if ($env:UH_ENSURE_EDITOR_INSTALL_TIMEOUT_SECONDS) {
         $parsed = 0
@@ -344,23 +351,34 @@ function Get-EnsureEditorInstallTimeoutSeconds {
         ) {
             return $parsed
         }
-        Write-Host "::warning::Ignoring invalid UH_ENSURE_EDITOR_INSTALL_TIMEOUT_SECONDS='$env:UH_ENSURE_EDITOR_INSTALL_TIMEOUT_SECONDS'; using $Default second(s)."
+        $defaultDescription = if ($Default -ge 0) { "$Default second(s)" } else { 'the profile-aware default' }
+        Write-Host "::warning::Ignoring invalid UH_ENSURE_EDITOR_INSTALL_TIMEOUT_SECONDS='$env:UH_ENSURE_EDITOR_INSTALL_TIMEOUT_SECONDS'; using $defaultDescription."
     }
-    return $Default
+    if ($Default -ge 0) {
+        return $Default
+    }
+
+    $profile = 'Full'
+    if (Get-Command Get-UnityProvisioningProfile -ErrorAction SilentlyContinue) {
+        $profile = Get-UnityProvisioningProfile
+    }
+    if ($profile -eq 'EditorOnly') {
+        return 2700
+    }
+    return 7200
 }
 
 function Get-EnsureEditorProgressStallSeconds {
     # Single source of truth for the HEARTBEAT-STALL threshold applied to a captured
     # CLI invocation (see Invoke-UnityCliCaptureWithTimeout's poll loop). This is
     # COMPLEMENTARY to Get-EnsureEditorInstallTimeoutSeconds (the total wall-clock
-    # fallback): the heartbeat detector fires when the LAST observed progress
-    # triple (pct, phase, msg) has been unchanged for >= this many seconds, which
-    # is the actual failure mode of the Unity 6.3 install hang -- thousands of
-    # byte-identical `{"type":"progress","pct":50,"msg":"Installing Unity (6000.3.16f1)...","phase":"install"}`
-    # lines stream for 20 minutes with NO triple advance, then the job times out.
-    # Killing on stall classifies as retryable (sentinel exit 125, distinct from
-    # the wall-clock 124 so callers and tests can tell the two apart) and lets
-    # the existing retry + classification flow run on a hang.
+    # fallback): the heartbeat detector fires when no stdout/stderr line has arrived
+    # for >= this many seconds. Unity module installs can legitimately emit repeated
+    # byte-identical progress triples for a long on-disk install phase, so triple
+    # advance is diagnostic only; output-line silence is the stall signal. Killing
+    # on stall classifies as retryable (sentinel exit 125, distinct from the
+    # wall-clock 124 so callers and tests can tell the two apart) and lets the
+    # existing retry + classification flow run on a quiet hang.
     #
     # Honors UH_ENSURE_EDITOR_PROGRESS_STALL_SECONDS following the EXACT
     # convention of Get-EnsureEditorInstallTimeoutSeconds: tests set it small
@@ -369,24 +387,26 @@ function Get-EnsureEditorProgressStallSeconds {
     # and the default is used. A value of 0 is the explicit OPT-OUT (no heartbeat
     # detection): the wall-clock fallback alone gates the run.
     #
-    # Default rationale (PROFILE-AWARE; raised from a flat 600s after CI evidence):
-    # the Unity 6000.3.16f1 install emits a SINGLE monolithic
+    # Default rationale (PROFILE-AWARE; inherited from the triple-stall detector):
+    # Unity installs have emitted a SINGLE monolithic
     # `{"...,"pct":50,"phase":"install","msg":"Installing Unity (6000.3.16f1)..."}`
-    # triple that does NOT advance for the WHOLE on-disk unpack. On run 26701943540
-    # the EditorOnly playmode job sat at that exact triple for 600s on a REAL,
-    # HEALTHY install and was killed at precisely 600s (exit 125) -- a FALSE
-    # POSITIVE; it only recovered because Unity.exe happened to be resolvable and
-    # EditorOnly skips module verification. The il2cpp/standalone (and Android/Full)
-    # profiles unpack MORE payload during that same frozen phase, so they freeze
-    # even LONGER, and they CANNOT lean on the EditorOnly skip. So:
+    # triple that does NOT advance for the WHOLE on-disk unpack, including healthy
+    # installs that keep emitting live output. The heartbeat clock therefore tracks
+    # output silence, not triple changes, while the wall-clock timeout bounds a
+    # chatty no-advance install. The profile-aware values remain deliberately
+    # conservative while this detector changes semantics; lowering them should be
+    # driven by measured max quiet gaps on the self-hosted runners. The
+    # il2cpp/standalone (and Android/Full) profiles unpack MORE payload than
+    # EditorOnly and can spend longer in sparse-output phases, so:
     #   * EditorOnly                       -> 900s  (15 min; base-editor unpack only)
     #   * StandaloneWindowsIl2Cpp/Android/Full -> 1800s (30 min; heavier payload, and
     #                                          a false kill here cascades into the
     #                                          module step, the real-world failure)
-    # Both stay well under the 2700s (45 min) wall-clock fallback, so a GENUINE hang
-    # is still surfaced before the job is cancelled, while a slow-but-real unpack is
-    # no longer killed mid-flight. The env override remains authoritative and is
-    # honored verbatim (tests set it to 2 to force the stall path; 0 opts out).
+    # Both stay well under the install wall-clock fallback for their profile, so
+    # a GENUINE quiet hang is still surfaced before the job is cancelled, while a
+    # slow-but-real unpack with live output is no longer killed mid-flight. The
+    # env override remains authoritative and is honored verbatim (tests set it
+    # small to force the stall path; 0 opts out).
     # StrictMode-safe: no collection reads.
     param([int]$Default = -1)
 
@@ -477,6 +497,31 @@ function Get-EnsureEditorInstallRetryAttempts {
             return $parsed
         }
         Write-Host "::warning::Ignoring invalid UH_ENSURE_EDITOR_INSTALL_RETRY_ATTEMPTS='$env:UH_ENSURE_EDITOR_INSTALL_RETRY_ATTEMPTS'; using $Default attempt(s)."
+    }
+    return $Default
+}
+
+function Get-EnsureEditorQuarantineMoveRetryAttempts {
+    # Single source of truth for Move-Item attempts when quarantining a partial
+    # Unity editor tree before reinstall. Unity's Windows uninstaller can return
+    # before the install directory is fully released/removed, and the runner has
+    # observed the editor directory remain locked beyond the old 3-attempt window.
+    # Keep this separate from install retry attempts: a quarantine retry is cheap
+    # compared with a fresh multi-GB editor install and it protects the recovery path
+    # from transient uninstaller/indexer/antivirus handles. Honors
+    # UH_ENSURE_EDITOR_QUARANTINE_MOVE_RETRY_ATTEMPTS for tests/operators; invalid
+    # values are ignored with a warning. A value below 1 is invalid.
+    param([int]$Default = 8)
+
+    if ($env:UH_ENSURE_EDITOR_QUARANTINE_MOVE_RETRY_ATTEMPTS) {
+        $parsed = 0
+        if (
+            [int]::TryParse($env:UH_ENSURE_EDITOR_QUARANTINE_MOVE_RETRY_ATTEMPTS, [ref]$parsed) -and
+            $parsed -ge 1
+        ) {
+            return $parsed
+        }
+        Write-Host "::warning::Ignoring invalid UH_ENSURE_EDITOR_QUARANTINE_MOVE_RETRY_ATTEMPTS='$env:UH_ENSURE_EDITOR_QUARANTINE_MOVE_RETRY_ATTEMPTS'; using $Default attempt(s)."
     }
     return $Default
 }
@@ -601,11 +646,10 @@ function Get-CliProgressTriple {
     # PURE, StrictMode-safe extractor for the (pct, phase, msg) progress TRIPLE
     # from a single captured CLI line. Returns a hashtable with three string
     # fields (any missing field is the empty string), or $null if the line is
-    # NOT a JSON progress line. Used by the heartbeat-stall detector in
-    # Invoke-UnityCliCaptureWithTimeout to recognize an UNCHANGED triple over
-    # the configured stall window (the actual failure mode of the Unity 6.3
-    # install hang -- thousands of byte-identical progress lines streaming for
-    # 20 minutes with NO triple advance).
+    # NOT a JSON progress line. Used by Invoke-UnityCliCaptureWithTimeout to keep
+    # human-readable notices and failure diagnostics anchored to the latest Unity
+    # progress state without treating repeated identical progress as a liveness
+    # failure by itself.
     #
     # Deliberately regex-based (no ConvertFrom-Json): the lines are interleaved
     # progress spam, not a single JSON document, and a malformed/non-JSON beta
@@ -772,8 +816,14 @@ function Get-UnityEditorCandidates {
     )
 
     $candidates = New-Object System.Collections.Generic.List[string]
-    $candidates.Add((Join-Path $Root "$Version\Editor\Unity.exe"))
-    $candidates.Add((Join-Path $Root "$Version\Unity.exe"))
+    $versionRoot = Join-Path $Root $Version
+    $candidates.Add((Join-Path (Join-Path $versionRoot 'Editor') 'Unity.exe'))
+    $candidates.Add((Join-Path $versionRoot 'Unity.exe'))
+
+    $alternateRoot = Get-UnityCiAlternateInstallRoot -InstallRoot $Root
+    $alternateVersionRoot = Join-Path $alternateRoot $Version
+    $candidates.Add((Join-Path (Join-Path $alternateVersionRoot 'Editor') 'Unity.exe'))
+    $candidates.Add((Join-Path $alternateVersionRoot 'Unity.exe'))
 
     if ($IncludeHostInstalls -and ${env:ProgramFiles} -and ${env:ProgramFiles}.Trim().Length -gt 0) {
         $candidates.Add((Join-Path ${env:ProgramFiles} "Unity\Hub\Editor\$Version\Editor\Unity.exe"))
@@ -786,6 +836,17 @@ function Get-UnityEditorCandidates {
     }
 
     return @($candidates.ToArray() | Where-Object { $_ -and $_.Trim().Length -gt 0 })
+}
+
+function Get-UnityCiAlternateInstallRoot {
+    param([Parameter(Mandatory = $true)][string]$InstallRoot)
+
+    $fullRoot = [System.IO.Path]::GetFullPath($InstallRoot).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    if ((Split-Path -Leaf $fullRoot) -eq '_ci-managed-editors') {
+        return $fullRoot
+    }
+
+    return (Join-Path $fullRoot '_ci-managed-editors')
 }
 
 function Find-UnityEditor {
@@ -801,6 +862,29 @@ function Find-UnityEditor {
         }
     }
 
+    return $null
+}
+
+function Find-UnityCiAlternateEditorWithCiModules {
+    param(
+        [Parameter(Mandatory = $true)][string]$Version,
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$Profile
+    )
+
+    $alternateRoot = Get-UnityCiAlternateInstallRoot -InstallRoot $InstallRoot
+    $alternateEditor = Find-UnityEditor -Version $Version -Root $alternateRoot
+    if (-not $alternateEditor) {
+        return $null
+    }
+
+    $missing = @(Get-MissingUnityCiModuleGroups -EditorPath $alternateEditor -Profile $Profile)
+    if ($missing.Count -eq 0) {
+        Write-CiNotice "Using reusable alternate-root CI editor for Unity $Version with provisioning profile '$Profile': $alternateEditor"
+        return $alternateEditor
+    }
+
+    Write-CiNotice "Alternate-root CI editor for Unity $Version exists at '$alternateEditor' but is missing required module groups for provisioning profile '$Profile': $($missing -join ', ')."
     return $null
 }
 
@@ -945,8 +1029,8 @@ function Invoke-UnityCliCapture {
     #                                  124 for wall-clock timeout, 125 for heartbeat-stall kill)
     #   Output            [string[]] - @()-wrapped stdout+stderr lines (never $null)
     #   StallKilled       [bool]     - $true when killed by the heartbeat-stall detector
-    #                                  (no (pct,phase,msg) triple change for the stall window);
-    #                                  see Invoke-UnityCliCaptureWithTimeout
+    #                                  (no stdout/stderr line for the stall window); see
+    #                                  Invoke-UnityCliCaptureWithTimeout
     #   TimedOutWallClock [bool]     - $true when killed by the absolute wall-clock timeout;
     #                                  mutually exclusive with StallKilled
     # Every field is always populated, so callers can read .Output.Count and
@@ -1018,16 +1102,13 @@ function Invoke-UnityCliCaptureWithTimeout {
     # independent (tail de-dup, last-progress parse, substring matches), so
     # arrival-order is acceptable and, for live echo, strictly more faithful.
     #
-    # HEARTBEAT-STALL DETECTOR (Unity 6.3 install hang): a captured progress
-    # TRIPLE (pct, phase, msg) that has not advanced for >= $StallSeconds is
-    # classified as hung and tree-killed with sentinel exit 125 (distinct from
-    # the wall-clock 124 so callers and tests can tell hang-detected from
-    # wall-timeout-elapsed). This is the surgical fix for the Unity 6.3 install
-    # that streams ~4,672 byte-identical
-    # `{"type":"progress","pct":50,"msg":"Installing Unity (6000.3.16f1)...","phase":"install"}`
-    # lines for 20 minutes before the GitHub job is cancelled by the outer wall.
-    # Detecting the stall and surfacing it as a RETRYABLE failure (handled by
-    # the same Invoke-WithRetry flow as 124) lets the next attempt run.
+    # HEARTBEAT-STALL DETECTOR: when no stdout/stderr line has arrived for >=
+    # $StallSeconds, the command is classified as hung and tree-killed with sentinel
+    # exit 125 (distinct from the wall-clock 124 so callers and tests can tell
+    # hang-detected from wall-timeout-elapsed). Repeated identical progress lines
+    # are still live output: Unity module installs can legitimately report the same
+    # pct/phase/msg throughout a long on-disk install phase. The total wall-clock
+    # timeout remains the bound for a chatty no-advance install.
     #
     # The periodic ::notice:: emitted every PROGRESS_NOTICE_INTERVAL_SECONDS
     # makes the live CI log human-readable mid-flight (the alternative is a
@@ -1159,13 +1240,15 @@ function Invoke-UnityCliCaptureWithTimeout {
         }
 
         # Heartbeat-stall + periodic-notice state. The "last triple" is the most
-        # recently observed (pct, phase, msg); we restart the stall clock every
-        # time it CHANGES. The notice clock is independent (time-gated, not
-        # output-gated) so a long advancing install still gets a human-readable
+        # recently observed (pct, phase, msg); it feeds diagnostics only. The stall
+        # clock restarts on ANY output line because repeated identical progress can
+        # be a healthy Unity install. The notice clock is independent (time-gated,
+        # not output-gated) so a long advancing install still gets a human-readable
         # cadence in the live log instead of the raw dupe wall. Opt-out semantics:
         # $StallSeconds == 0 disables heartbeat-kill entirely; $startedAt is the
-        # wall-clock anchor for the elapsed/stallElapsed fields in the notice.
+        # wall-clock anchor for the elapsed fields in the notice.
         $startedAt = [DateTime]::UtcNow
+        $lastOutputAt = $startedAt
         $lastTripleAdvanceAt = $startedAt
         $lastNoticeAt = $startedAt
         $lastTripleKey = $null
@@ -1185,16 +1268,19 @@ function Invoke-UnityCliCaptureWithTimeout {
                 } else {
                     Write-Host $line
                     $buffer.Add([string]$line)
+                    $lineReceivedAt = [DateTime]::UtcNow
+                    $lastOutputAt = $lineReceivedAt
                     # Triple advance: if this line is a JSON progress line whose
                     # (pct, phase, msg) differs from the last observed triple, the
-                    # install is making forward progress; reset the stall clock.
+                    # install reached a new diagnostic state; keep that timestamp
+                    # for notices without using it as the liveness clock.
                     $triple = Get-CliProgressTriple -Line $line
                     if ($null -ne $triple) {
                         $key = "$($triple.Pct)|$($triple.Phase)|$($triple.Msg)"
                         if ($key -ne $lastTripleKey) {
                             $lastTripleKey = $key
                             $lastTriple = $triple
-                            $lastTripleAdvanceAt = [DateTime]::UtcNow
+                            $lastTripleAdvanceAt = $lineReceivedAt
                         }
                     }
                     $oTask = $outReader.ReadLineAsync()
@@ -1209,13 +1295,15 @@ function Invoke-UnityCliCaptureWithTimeout {
                 } else {
                     Write-Host $line
                     $buffer.Add([string]$line)
+                    $lineReceivedAt = [DateTime]::UtcNow
+                    $lastOutputAt = $lineReceivedAt
                     $triple = Get-CliProgressTriple -Line $line
                     if ($null -ne $triple) {
                         $key = "$($triple.Pct)|$($triple.Phase)|$($triple.Msg)"
                         if ($key -ne $lastTripleKey) {
                             $lastTripleKey = $key
                             $lastTriple = $triple
-                            $lastTripleAdvanceAt = [DateTime]::UtcNow
+                            $lastTripleAdvanceAt = $lineReceivedAt
                         }
                     }
                     $eTask = $errReader.ReadLineAsync()
@@ -1227,28 +1315,29 @@ function Invoke-UnityCliCaptureWithTimeout {
 
             # Periodic human-readable progress notice (time-gated, NOT per-line).
             # Reports the last triple + elapsed totals so an observer can see at a
-            # glance how far the install has come AND how long the stall clock has
-            # been ticking on the current triple.
+            # glance how far the install has come, how long the output heartbeat has
+            # been quiet, and how long the current triple has stayed the same.
             $sinceNotice = ($nowUtc - $lastNoticeAt).TotalSeconds
             if ($progressNoticeEnabled -and $sinceNotice -ge $progressNoticeIntervalSeconds) {
                 $lastNoticeAt = $nowUtc
                 $elapsedSec = [int][Math]::Floor(($nowUtc - $startedAt).TotalSeconds)
-                $stallElapsedSec = [int][Math]::Floor(($nowUtc - $lastTripleAdvanceAt).TotalSeconds)
+                $quietElapsedSec = [int][Math]::Floor(($nowUtc - $lastOutputAt).TotalSeconds)
+                $sameTripleElapsedSec = [int][Math]::Floor(($nowUtc - $lastTripleAdvanceAt).TotalSeconds)
                 if ($null -ne $lastTriple) {
                     $pctText = if ($lastTriple.Pct) { $lastTriple.Pct } else { '?' }
                     $phaseText = if ($lastTriple.Phase) { $lastTriple.Phase } else { '?' }
                     $msgText = if ($lastTriple.Msg) { $lastTriple.Msg } else { '?' }
-                    Write-Host "::notice::Unity CLI install heartbeat: pct=$pctText phase=$phaseText msg=`"$msgText`" elapsed=${elapsedSec}s stallElapsed=${stallElapsedSec}s"
+                    Write-Host "::notice::Unity CLI install heartbeat: pct=$pctText phase=$phaseText msg=`"$msgText`" elapsed=${elapsedSec}s quietElapsed=${quietElapsedSec}s sameTripleElapsed=${sameTripleElapsedSec}s"
                 } else {
-                    Write-Host "::notice::Unity CLI install heartbeat: no progress line observed yet elapsed=${elapsedSec}s stallElapsed=${stallElapsedSec}s"
+                    Write-Host "::notice::Unity CLI install heartbeat: no progress line observed yet elapsed=${elapsedSec}s quietElapsed=${quietElapsedSec}s"
                 }
             }
 
             # HEARTBEAT-STALL DETECTOR. Fires only when the operator has not opted
-            # out AND the last observed triple has been unchanged for >= the
-            # configured window. Tree-kills with the distinct stall sentinel so
-            # the failure-diagnostic path can name "heartbeat stall" specifically.
-            if ($stallEnabled -and ($nowUtc - $lastTripleAdvanceAt).TotalSeconds -ge $StallSeconds) {
+            # out AND no output line has arrived for >= the configured window.
+            # Tree-kills with the distinct stall sentinel so the failure-diagnostic
+            # path can name "heartbeat stall" specifically.
+            if ($stallEnabled -and ($nowUtc - $lastOutputAt).TotalSeconds -ge $StallSeconds) {
                 $stalled = $true
                 $timedOut = $true
                 try {
@@ -1344,7 +1433,9 @@ function Invoke-UnityCliCaptureWithTimeout {
 
     if ($timedOut) {
         if (Get-Command Add-ProvisioningTimeoutEvent -ErrorAction SilentlyContinue) {
-            Add-ProvisioningTimeoutEvent -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds
+            $timeoutReason = if ($stalled) { 'no-output-stall' } else { 'wall-clock' }
+            $eventStallSeconds = if ($stalled) { $StallSeconds } else { 0 }
+            Add-ProvisioningTimeoutEvent -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds -Reason $timeoutReason -StallSeconds $eventStallSeconds
         }
         # Wrap-immune timeout annotation (Write-Host "::error::" is NOT subject to
         # ConciseView word-wrap): name the timeout, the configured limit, the env
@@ -1358,10 +1449,10 @@ function Invoke-UnityCliCaptureWithTimeout {
         if ($stalled) {
             # HEARTBEAT-STALL kill: distinct sentinel (125) AND distinct annotation
             # wording so an observer can tell at a glance whether the install was
-            # killed for "no triple advance in N seconds" (this branch) versus
+            # killed for "no stdout/stderr line in N seconds" (this branch) versus
             # "exceeded the total wall-clock budget" (the else branch below).
             $stallKnobName = if ($StallKnob) { $StallKnob } else { 'UH_ENSURE_EDITOR_PROGRESS_STALL_SECONDS' }
-            Write-Host "::error::Unity CLI command '$($Arguments -join ' ')' HEARTBEAT STALLED after $StallSeconds second(s) with no progress (pct, phase, msg) advance; the process tree was killed (sentinel exit $stallExitCode). Raise the threshold via $stallKnobName (0 disables the heartbeat detector). Last progress message: $lastProgress. Collapsed tail:`n$collapsedTail"
+            Write-Host "::error::Unity CLI command '$($Arguments -join ' ')' HEARTBEAT STALLED after $StallSeconds second(s) with no Unity CLI stdout/stderr line; the process tree was killed (sentinel exit $stallExitCode). Raise the threshold via $stallKnobName (0 disables the heartbeat detector). Last progress message: $lastProgress. Collapsed tail:`n$collapsedTail"
         } else {
             $knob = if ($TimeoutKnob) { $TimeoutKnob } else { 'UH_ENSURE_EDITOR_INSTALL_TIMEOUT_SECONDS' }
             Write-Host "::error::Unity CLI command '$($Arguments -join ' ')' TIMED OUT after $TimeoutSeconds second(s) and the process tree was killed (sentinel exit $timeoutExitCode). Raise the limit via $knob (0 disables the timeout). Last progress message: $lastProgress. Collapsed tail:`n$collapsedTail"
@@ -1748,7 +1839,7 @@ function Write-ModuleInstallFailureDiagnostics {
     # assertion target. Additive only -- the caller still throws its full message.
     #
     # The summary names: the version, the failing verb/args, the outcome (exit code
-    # OR "wall-clock timed out after Ns" OR "heartbeat stalled after Ns" -- chosen
+    # OR "wall-clock timed out after Ns" OR "output heartbeat stalled after Ns" -- chosen
     # by the kill-state booleans, NOT the raw exit code, so a NATIVE 125 from the
     # Unity CLI is never misattributed as a heartbeat-stall kill), the LAST
     # meaningful progress message parsed from the captured output (the JSON
@@ -1778,7 +1869,7 @@ function Write-ModuleInstallFailureDiagnostics {
     # wrapper-driven timeout" signal for backward compatibility with any caller
     # that has not migrated; the new switches WIN when supplied.
     $outcome = if ($StallKilled) {
-        "heartbeat stalled after $StallSeconds second(s)"
+        "output heartbeat stalled after $StallSeconds second(s)"
     } elseif ($TimedOutWallClock) {
         "wall-clock timed out after $TimeoutSeconds second(s)"
     } elseif ($TimedOut) {
@@ -2756,8 +2847,9 @@ function Move-UnityInstallDirectoryToQuarantine {
     # Step 1b), which avoids reaching this quarantine for a not-module-manageable
     # editor in the first place.
     $moveAttempt = [ref] 0
+    $quarantineMoveAttempts = Get-EnsureEditorQuarantineMoveRetryAttempts
     try {
-        Invoke-WithRetry -MaxAttempts 3 -DelaySeconds (Get-EnsureEditorRetryDelaySeconds) -Action {
+        Invoke-WithRetry -MaxAttempts $quarantineMoveAttempts -DelaySeconds (Get-EnsureEditorRetryDelaySeconds) -Action {
             $moveAttempt.Value++
             if ($moveAttempt.Value -gt 1) {
                 Stop-StaleUnityProvisioningProcesses -InstallRoot $InstallRoot -Version $Version -Reason "retry $($moveAttempt.Value) before quarantining $InstallDirectory (a process is still holding the editor tree)"
@@ -2770,7 +2862,7 @@ function Move-UnityInstallDirectoryToQuarantine {
         # console width; a Write-Host "::error::..." line is not) so the operator
         # sees the exact locked path and the remediation instead of a wrapped
         # Move-Item stack trace. Then rethrow so the run still fails loudly.
-        Write-Host ("::error::Could not quarantine Unity $Version install '$InstallDirectory' for repair: a process is holding a handle on the editor tree and the stale-process sweep could not release it ($($_.Exception.Message)). " +
+        Write-Host ("::error::Could not quarantine Unity $Version install '$InstallDirectory' for repair after $quarantineMoveAttempts move attempt(s): a process is holding a handle on the editor tree and the stale-process sweep could not release it ($($_.Exception.Message)). " +
             "This blocks the automatic quarantine+reinstall that recovers a base editor whose modules cannot be added (Unity CLI 'install-modules' exit 6 / 'Try reinstalling this editor with Unity Hub'). " +
             "Remediation on the runner: ensure no Unity.exe/Unity Hub/indexer/antivirus process is holding C:\\...\\$Version\\Editor (Sysinternals handle64.exe `"$InstallDirectory`" finds the locker), then re-run; or manually delete '$InstallDirectory' and let ensure-editor.ps1 reinstall the editor with its modules.")
         throw
@@ -3983,6 +4075,40 @@ function Test-TextIndicatesEditorNotModuleManageable {
         ($value -match '(?i)No modules found for this editor')
 }
 
+function Test-UnityAtomicInstallFailureMayBePinnedToExistingEditor {
+    param(
+        [string]$Message,
+        [string]$InstallRoot = '',
+        [string]$Version = ''
+    )
+
+    $value = [string]$Message
+    if ($value.Trim().Length -eq 0) {
+        return $false
+    }
+
+    if (($value -match '(?i)already[-\s]?installed') -or
+        ($value -match '(?i)editor already installed') -or
+        ($value -match '(?i)is already installed') -or
+        ($value -match '(?i)still missing on disk after the atomic install') -or
+        ($value -match '(?i)required CI module groups .* still missing .* after the atomic install')) {
+        return $true
+    }
+
+    if ($value -notmatch '(?i)being used by another process|cannot access the file|file lock|locked') {
+        return $false
+    }
+
+    if (-not $InstallRoot -or -not $Version) {
+        return $false
+    }
+
+    $normalizedMessage = $value.Replace('/', '\')
+    $normalizedRoot = ([System.IO.Path]::GetFullPath($InstallRoot)).Replace('/', '\').TrimEnd('\')
+    $canonicalVersionRoot = "$normalizedRoot\$Version"
+    return ($normalizedMessage.IndexOf($canonicalVersionRoot, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+}
+
 function Test-UnityEditorModuleManageable {
     # Best-effort, NON-THROWING probe: is the editor at $Version in a state where the
     # Unity CLI's `install-modules` can ADD modules to it? Returns a StrictMode-safe
@@ -4024,6 +4150,70 @@ function Test-UnityEditorModuleManageable {
     }
 
     return @{ Manageable = $true; Reason = ''; Output = $lines }
+}
+
+function Install-UnityEditorWithCiModulesInAlternateRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Version,
+        [Parameter(Mandatory = $true)][string]$InstallRoot,
+        [Parameter(Mandatory = $true)][string]$Reason,
+        [string]$Profile = $(Get-UnityProvisioningProfile),
+        [switch]$ManagedOnly
+    )
+
+    $alternateRoot = Get-UnityCiAlternateInstallRoot -InstallRoot $InstallRoot
+    if (-not (Test-IsPathInsideDirectory -Path $alternateRoot -Directory $InstallRoot)) {
+        throw "Refusing alternate-root Unity $Version repair because the alternate install root '$alternateRoot' is outside the managed install root '$InstallRoot'."
+    }
+
+    return Invoke-WithUnityInstallLock -Version $Version -InstallRoot $InstallRoot -Action {
+        Assert-UnityProvisioningBudgetCanFit -Operation "alternate-root Unity $Version managed install" -MinimumSeconds 60
+        $previousRoot = $null
+        try {
+            $previousRoot = Get-UnityCliInstallRoot
+        } catch {
+            Write-CiNotice "Could not query the current Unity CLI install root before alternate-root repair: $($_.Exception.Message)"
+        }
+
+        try {
+            New-Item -ItemType Directory -Force -Path $alternateRoot | Out-Null
+            $existingAlternate = Find-UnityEditor -Version $Version -Root $alternateRoot
+            if ($existingAlternate) {
+                $existingAlternateMissing = @(Get-MissingUnityCiModuleGroups -EditorPath $existingAlternate -Profile $Profile)
+                if ($existingAlternateMissing.Count -eq 0) {
+                    Write-CiNotice "Using already repaired alternate-root CI editor for Unity $Version with provisioning profile '$Profile': $existingAlternate"
+                    return $existingAlternate
+                }
+
+                Write-Host "::warning::Quarantining partial alternate-root Unity $Version editor before retrying alternate-root repair: $existingAlternate (missing: $($existingAlternateMissing -join ', '))."
+                Move-UnityVersionInstallToQuarantine -Version $Version -InstallRoot $alternateRoot
+            }
+
+            Write-Host "::warning::Installing Unity $Version into alternate CI-managed root '$alternateRoot' because the existing editor tree could not be repaired in place. Reason: $Reason"
+            Set-UnityCliInstallPath -Root $alternateRoot
+            Confirm-UnityCliManagedInstallRoot -Root $alternateRoot | Out-Null
+
+            $resolved = Install-UnityEditorWithCiModules -Version $Version -InstallRoot $alternateRoot -Reason "alternate-root repair after existing editor repair was blocked: $Reason" -Profile $Profile -ManagedOnly:$true
+            $missing = @(Get-MissingUnityCiModuleGroups -EditorPath $resolved -Profile $Profile)
+            if ($missing.Count -gt 0) {
+                throw "Alternate-root Unity $Version install completed at '$resolved', but required CI module groups for provisioning profile '$Profile' are still missing on disk: $($missing -join ', ')."
+            }
+            if ($ManagedOnly -and -not (Test-IsPathInsideDirectory -Path $resolved -Directory $InstallRoot)) {
+                throw "Alternate-root Unity $Version install resolved outside the managed install root '$InstallRoot': $resolved"
+            }
+
+            $script:ProvisioningEditorPath = $resolved
+            Write-CiNotice "Unity $Version alternate-root repair succeeded: $resolved"
+            return $resolved
+        } finally {
+            $restoreRoot = if ($previousRoot) { $previousRoot } else { $InstallRoot }
+            try {
+                Set-UnityCliInstallPath -Root $restoreRoot
+            } catch {
+                Write-Host "::warning::Could not restore Unity CLI install path to '$restoreRoot' after alternate-root repair: $($_.Exception.Message)"
+            }
+        }
+    }
 }
 
 function Install-UnityEditorModulesViaAtomicReinstall {
@@ -4068,14 +4258,30 @@ function Install-UnityEditorModulesViaAtomicReinstall {
             if ($env:UH_UNITY_DISABLE_EDITOR_REPAIR -eq '1') {
                 throw
             }
-            # The atomic in-place install could not deliver the modules (e.g. the CLI
-            # could not overlay the existing tree). Fall back to the heavier
-            # quarantine+reinstall, which moves the version dir aside first. HONEST
-            # CAVEAT: if a cross-identity process holds a hard lock on the tree, that
-            # quarantine can still fail -- Move-UnityInstallDirectoryToQuarantine emits
-            # a wrap-immune ::error:: naming the residual as runner-side.
-            Write-Host "::warning::Atomic in-place reinstall for Unity $Version did not deliver the required modules ($inPlaceMessage); falling back to quarantine + reinstall."
-            return Repair-UnityEditorWithCiModules -Version $Version -EditorPath $EditorPath -InstallRoot $InstallRoot -Reason "atomic in-place reinstall did not deliver required modules ($inPlaceMessage)" -Profile $Profile -ManagedOnly:$ManagedOnly
+            $alternateFailureMessage = ''
+            if (Test-UnityAtomicInstallFailureMayBePinnedToExistingEditor -Message $inPlaceMessage -InstallRoot $InstallRoot -Version $Version) {
+                try {
+                    Write-Host "::warning::Atomic in-place reinstall for Unity $Version did not deliver the required modules ($inPlaceMessage); trying an alternate CI-managed install root before touching the locked editor tree."
+                    return Install-UnityEditorWithCiModulesInAlternateRoot -Version $Version -InstallRoot $InstallRoot -Reason "atomic in-place reinstall was pinned to the existing editor tree ($inPlaceMessage)" -Profile $Profile -ManagedOnly:$ManagedOnly
+                } catch {
+                    $alternateFailureMessage = $_.Exception.Message
+                    Write-Host "::warning::Alternate-root repair for Unity $Version also failed ($alternateFailureMessage); falling back to quarantine + reinstall."
+                }
+            } else {
+                Write-Host "::warning::Atomic in-place reinstall for Unity $Version failed for a reason that does not look pinned to the existing editor tree ($inPlaceMessage); falling back to quarantine + reinstall."
+            }
+
+            # The atomic in-place install and alternate-root install could not deliver
+            # the modules. Fall back to the heavier quarantine+reinstall, which moves
+            # the version dir aside first. HONEST CAVEAT: if a cross-identity process
+            # holds a hard lock on the tree, that quarantine can still fail --
+            # Move-UnityInstallDirectoryToQuarantine emits a wrap-immune ::error::
+            # naming the residual as runner-side.
+            $fallbackReason = "atomic in-place reinstall did not deliver required modules ($inPlaceMessage)"
+            if ($alternateFailureMessage) {
+                $fallbackReason += "; alternate-root repair also failed ($alternateFailureMessage)"
+            }
+            return Repair-UnityEditorWithCiModules -Version $Version -EditorPath $EditorPath -InstallRoot $InstallRoot -Reason $fallbackReason -Profile $Profile -ManagedOnly:$ManagedOnly
         }
     }
 }
@@ -4131,6 +4337,13 @@ function Ensure-UnityCiModules {
     if ($missing.Count -eq 0) {
         Write-CiNotice "All required Unity CI module groups for provisioning profile '$Profile' already present on disk for Unity $Version; nothing to install."
         return $EditorPath
+    }
+
+    if ($InstallRoot) {
+        $alternateEditor = Find-UnityCiAlternateEditorWithCiModules -Version $Version -InstallRoot $InstallRoot -Profile $Profile
+        if ($alternateEditor) {
+            return $alternateEditor
+        }
     }
 
     # Step 1b (ROOT-CAUSE SIDESTEP): modules ARE missing. Before driving the
@@ -4431,6 +4644,15 @@ if ($RequireHealthyExisting) {
 
     $script:ProvisioningEditorPath = $editor
     $missingModules = @(Get-MissingUnityCiModuleGroups -EditorPath $editor -Profile $ProvisioningProfile)
+    if ($missingModules.Count -gt 0) {
+        $alternateEditor = Find-UnityCiAlternateEditorWithCiModules -Version $UnityVersion -InstallRoot $InstallRoot -Profile $ProvisioningProfile
+        if ($alternateEditor) {
+            $editor = $alternateEditor
+            $script:ProvisioningEditorPath = $editor
+            $missingModules = @(Get-MissingUnityCiModuleGroups -EditorPath $editor -Profile $ProvisioningProfile)
+        }
+    }
+
     if ($missingModules.Count -gt 0) {
         Write-InstalledEditorDiagnostics -Version $UnityVersion -Root $InstallRoot -Reason "RequireHealthyExisting was set and required module groups are missing: $($missingModules -join ', ')."
         throw "Unity $UnityVersion is missing required CI module groups for provisioning profile '$ProvisioningProfile': $($missingModules -join ', '). CI test jobs fail fast instead of installing modules in-job; run scripts/unity/maintain-windows-runner.ps1 or dispatch .github/workflows/runner-bootstrap.yml to repair this editor."

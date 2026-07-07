@@ -108,7 +108,8 @@ function Invoke-LintInFixture {
     param(
         [string]$FixtureRoot,
         [string]$WorkingDirectory = $FixtureRoot,
-        [string[]]$Paths = @()
+        [string[]]$Paths = @(),
+        [string]$Mode = ''
     )
 
     $lintCopy = Join-Path $FixtureRoot 'scripts/lint-doc-links.ps1'
@@ -119,6 +120,10 @@ function Invoke-LintInFixture {
         if ($Paths -and $Paths.Count -gt 0) {
             $arguments += '-Paths'
             $arguments += $Paths
+        }
+        if (-not [string]::IsNullOrWhiteSpace($Mode)) {
+            $arguments += '-Mode'
+            $arguments += $Mode
         }
 
         $output = & pwsh @arguments *>&1
@@ -156,8 +161,12 @@ function Invoke-TestCase {
         if ($Case.PSObject.Properties['Paths']) {
             $paths = @($Case.Paths)
         }
+        $mode = ''
+        if ($Case.PSObject.Properties['Mode']) {
+            $mode = [string]$Case.Mode
+        }
 
-        $result = Invoke-LintInFixture -FixtureRoot $root -WorkingDirectory $workingDirectory -Paths $paths
+        $result = Invoke-LintInFixture -FixtureRoot $root -WorkingDirectory $workingDirectory -Paths $paths -Mode $mode
 
         $reasons = @()
 
@@ -522,6 +531,101 @@ class Foo {
             ExpectedOutputContains = @('Markdown link lint passed')
         }
         [pscustomobject]@{
+            Name = 'Pass_ValidNonMarkdownLocalFileLink'
+            Files = @(
+                [pscustomobject]@{ Path = 'LICENSE'; Content = "MIT`n" }
+                [pscustomobject]@{ Path = 'README.md'; Content = "See the [license](./LICENSE).`n" }
+            )
+            ExpectedExit = 0
+            ExpectedOutputContains = @('Markdown link lint passed')
+        }
+        [pscustomobject]@{
+            Name = 'Pass_ValidLocalDirectoryLink'
+            Files = @(
+                [pscustomobject]@{ Path = 'docs/readme.md'; Content = "# Readme`n" }
+                [pscustomobject]@{ Path = 'README.md'; Content = "See the [docs directory](./docs).`n" }
+            )
+            ExpectedExit = 0
+            ExpectedOutputContains = @('Markdown link lint passed')
+        }
+        [pscustomobject]@{
+            Name = 'Pass_ValidLocalDirectoryLinkWithTrailingSlash'
+            Files = @(
+                [pscustomobject]@{ Path = 'docs/readme.md'; Content = "# Readme`n" }
+                [pscustomobject]@{ Path = 'README.md'; Content = "See the [docs directory](./docs/).`n" }
+            )
+            ExpectedExit = 0
+            ExpectedOutputContains = @('Markdown link lint passed')
+        }
+        [pscustomobject]@{
+            Name = 'Pass_SourceDirectorySelfLink'
+            Files = @(
+                [pscustomobject]@{ Path = 'docs/readme.md'; Content = "See this [directory](./).`n" }
+            )
+            ExpectedExit = 0
+            ExpectedOutputContains = @('Markdown link lint passed')
+        }
+        [pscustomobject]@{
+            Name = 'Pass_RepoRootDirectorySelfLink'
+            Files = @(
+                [pscustomobject]@{ Path = 'README.md'; Content = "See this [repository root](./).`n" }
+            )
+            ExpectedExit = 0
+            ExpectedOutputContains = @('Markdown link lint passed')
+        }
+        [pscustomobject]@{
+            Name = 'Pass_ParentDirectoryRepoRootLink'
+            Files = @(
+                [pscustomobject]@{ Path = 'docs/readme.md'; Content = "See the [repository root](../).`n" }
+            )
+            ExpectedExit = 0
+            ExpectedOutputContains = @('Markdown link lint passed')
+        }
+        [pscustomobject]@{
+            Name = 'Pass_ValidSamplesReadmeLink'
+            Files = @(
+                [pscustomobject]@{ Path = 'Samples~/DI - VContainer/README.md'; Content = "# VContainer Sample`n" }
+                [pscustomobject]@{ Path = 'README.md'; Content = "See [sample](./Samples~/DI%20-%20VContainer/README.md).`n" }
+            )
+            ExpectedExit = 0
+            ExpectedOutputContains = @('Markdown link lint passed')
+        }
+        [pscustomobject]@{
+            Name = 'Pass_InlineCodePseudoLinkIgnoredByLocalTargetValidation'
+            Files = @(
+                [pscustomobject]@{ Path = 'README.md'; Content = "Use format ``[Display Text](Page)`` in examples.`n" }
+            )
+            ExpectedExit = 0
+            ExpectedOutputContains = @('Markdown link lint passed')
+        }
+        [pscustomobject]@{
+            Name = 'Fail_BrokenNonMarkdownLocalFileLink'
+            Files = @(
+                [pscustomobject]@{ Path = 'README.md'; Content = "See the [license](./LICENSE).`n" }
+            )
+            ExpectedExit = 'nonzero'
+            ExpectedOutputContains = @('LICENSE', 'local file or directory')
+            ExpectedOutputNotContains = @('Bare .md mention', 'jekyll-relative-links', 'Absolute GitHub Pages path')
+        }
+        [pscustomobject]@{
+            Name = 'Fail_BrokenReferenceDefinitionNonMarkdownLink'
+            Files = @(
+                [pscustomobject]@{ Path = 'README.md'; Content = "See the [license][license].`n`n[license]: ./LICENSE`n" }
+            )
+            ExpectedExit = 'nonzero'
+            ExpectedOutputContains = @('Reference link target', 'LICENSE', 'local file or directory')
+            ExpectedOutputNotContains = @('Bare .md mention', 'jekyll-relative-links', 'Absolute GitHub Pages path')
+        }
+        [pscustomobject]@{
+            Name = 'Fail_BrokenSamplesReadmeLink'
+            Files = @(
+                [pscustomobject]@{ Path = 'README.md'; Content = "See [sample](./Samples~/Missing/README.md).`n" }
+            )
+            ExpectedExit = 'nonzero'
+            ExpectedOutputContains = @('Samples~/Missing/README.md', 'does not resolve to an existing markdown file')
+            ExpectedOutputNotContains = @('Bare .md mention', 'jekyll-relative-links', 'Absolute GitHub Pages path')
+        }
+        [pscustomobject]@{
             Name = 'Pass_SubdirectoryInvocationUsesRepoRootAnchoring'
             Files = @(
                 [pscustomobject]@{ Path = 'docs/readme.md'; Content = "# Readme`n" }
@@ -560,6 +664,37 @@ class Foo {
             Paths = @('docs/readme.md', 'README.md')
             ExpectedExit = 'nonzero'
             ExpectedOutputContains = @('Bare .md mention')
+        }
+        [pscustomobject]@{
+            Name = 'Pass_FormatModeSkipsBrokenLocalTarget'
+            Mode = 'Format'
+            Files = @(
+                [pscustomobject]@{ Path = 'README.md'; Content = "See [missing](./docs/missing.md).`n" }
+            )
+            ExpectedExit = 0
+            ExpectedOutputContains = @('Markdown link lint passed')
+            ExpectedOutputNotContains = @('does not resolve to an existing markdown file')
+        }
+        [pscustomobject]@{
+            Name = 'Pass_TargetModeSkipsMissingRelativePrefix'
+            Mode = 'Targets'
+            Files = @(
+                [pscustomobject]@{ Path = 'docs/readme.md'; Content = "# Readme`n" }
+                [pscustomobject]@{ Path = 'README.md'; Content = "See [readme](docs/readme.md).`n" }
+            )
+            ExpectedExit = 0
+            ExpectedOutputContains = @('Markdown link lint passed')
+            ExpectedOutputNotContains = @('jekyll-relative-links')
+        }
+        [pscustomobject]@{
+            Name = 'Fail_TargetModeCatchesBrokenLocalTarget'
+            Mode = 'Targets'
+            Files = @(
+                [pscustomobject]@{ Path = 'README.md'; Content = "See [missing](./docs/missing.md).`n" }
+            )
+            ExpectedExit = 'nonzero'
+            ExpectedOutputContains = @('docs/missing.md', 'does not resolve to an existing markdown file')
+            ExpectedOutputNotContains = @('jekyll-relative-links')
         }
     )
 

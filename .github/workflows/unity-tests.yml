@@ -256,7 +256,7 @@ jobs:
           matched="$(jq --argjson labels "$(printf '%s\n' "${required[@]}" | jq -R . | jq -s .)" '
             [ .[]
               | select(.status == "online")
-              | select(($labels | all(. as $l | (.labels // []) | map(.name) | index($l) | type == "number")))
+              | select((($labels - ((.labels // []) | map(.name))) | length) == 0)
             ] | length
           ' < "${runners_json}")"
           echo "Runners satisfying ${REQUIRED_LABELS}: ${matched}"
@@ -289,14 +289,14 @@ jobs:
         needs.matrix-config.outputs.has-required-secrets == 'true'
       }}
     runs-on: [self-hosted, Windows, RAM-64GB]
-    timeout-minutes: 660
+    timeout-minutes: 1200
     strategy:
       # Default false keeps the full matrix running so cross-version
       # compatibility stays visible on a red run. workflow_dispatch can flip
       # abort-on-first-failure to stop at the first failing leg for fast
-      # iteration (with max-parallel:1 that means "stop launching further legs").
+      # iteration (with max-parallel:2 that means "stop launching further legs").
       fail-fast: ${{ github.event_name == 'workflow_dispatch' && inputs.abort-on-first-failure == 'true' }}
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         # Ordered fast-tier include from matrix-config: editmode then playmode,
         # version-minor. matrix.unity-version / matrix.test-mode come from each
@@ -304,7 +304,7 @@ jobs:
         include: ${{ fromJSON(needs.matrix-config.outputs.matrix-include) }}
     steps:
       - name: Enable Git long paths
-        shell: pwsh
+        shell: powershell
         env:
           GIT_CONFIG_GLOBAL: ${{ runner.temp }}/uh-gitconfig
         run: git config --global core.longpaths true
@@ -317,7 +317,76 @@ jobs:
           lfs: true
           persist-credentials: false
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22.18.0"
+
+      # Single source of truth for the assembly include list: the same
+      # asmdef-discovery.js module the local discovery uses. Extracted into a
+      # composite action so all Unity workflows share one implementation.
+      # Uses Windows PowerShell inside the composite so empty legs can be skipped
+      # before runner maintenance installs or repairs PowerShell 7 / Unity.
+      - name: Compute test assembly list
+        id: compute
+        uses: ./.github/actions/compute-unity-assemblies
+        with:
+          target: "${{ matrix.test-mode }}"
+          runtime-only: "${{ matrix.test-mode == 'standalone' && 'true' || 'false' }}"
+          # Run the DI-container integration suites (Reflex / VContainer / Zenject)
+          # alongside core on EVERY version x mode leg. The matching run step passes
+          # -IncludeIntegrations so the 3 packages are installed into the ephemeral
+          # manifest; without that the integration assemblies would not compile.
+          include-integrations: "true"
+
+      - name: Maintain Unity editor on selected runner
+        if: ${{ steps.compute.outputs.is-empty != 'true' }}
+        timeout-minutes: 360
+        shell: powershell
+        run: |
+          $artifactsPath = '.artifacts/unity/${{ matrix.unity-version }}-${{ matrix.test-mode }}'
+          $maintenanceDiagnosticsRoot = Join-Path $artifactsPath 'provisioning/runner-maintenance'
+          New-Item -ItemType Directory -Force -Path $maintenanceDiagnosticsRoot | Out-Null
+          $provisioningProfile = if ('${{ matrix.test-mode }}' -eq 'standalone') {
+            'StandaloneWindowsIl2Cpp'
+          } else {
+            'EditorOnly'
+          }
+          $maintenanceScript = Join-Path $env:GITHUB_WORKSPACE 'scripts\unity\maintain-windows-runner.ps1'
+          if (-not (Test-Path -LiteralPath $maintenanceScript -PathType Leaf)) {
+            throw "Runner maintenance script not found: $maintenanceScript"
+          }
+          . $maintenanceScript
+          $maintenanceExitCode = Invoke-WindowsRunnerMaintenance `
+            -UnityVersions '${{ matrix.unity-version }}' `
+            -ProvisioningProfile $provisioningProfile `
+            -DiagnosticsRoot $maintenanceDiagnosticsRoot
+          if ($maintenanceExitCode -ne 0) {
+            throw "Runner maintenance failed with exit code $maintenanceExitCode."
+          }
+          $pwshCandidates = @(
+            (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'),
+            $(if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} 'PowerShell\7\pwsh.exe' })
+          )
+          $pathPwsh = Get-Command pwsh -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1
+          if ($pathPwsh -and $pathPwsh -notlike '*\Microsoft\WindowsApps\pwsh.exe') {
+            $pwshCandidates += $pathPwsh
+          }
+          $pwshCandidates = @(
+            $pwshCandidates |
+              Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+              Select-Object -Unique
+          )
+          $pwshPath = @($pwshCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })[0]
+          if (-not $pwshPath) {
+            throw 'PowerShell 7 maintenance completed, but pwsh.exe was not found for later GitHub Actions steps.'
+          }
+          $pwshDirectory = Split-Path -Parent $pwshPath
+          $pwshDirectory | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          Write-Host "Added PowerShell 7 to GITHUB_PATH: $pwshDirectory"
+
       - name: Print runner diagnostics
+        if: ${{ steps.compute.outputs.is-empty != 'true' }}
         # Composite action runs PowerShell internally; `shell: bash` on a
         # self-hosted Windows runner can resolve to the WSL stub at
         # C:\Windows\System32\bash.exe and fail with "Windows Subsystem
@@ -328,6 +397,7 @@ jobs:
           matrix-note: "default (organization lock wraps the Unity section)"
 
       - name: Cache Unity Library and package caches
+        if: ${{ steps.compute.outputs.is-empty != 'true' }}
         uses: actions/cache@v6
         env:
           PACKAGE_HASH: >-
@@ -355,28 +425,8 @@ jobs:
           restore-keys: |
             Library-${{ runner.os }}-${{ runner.arch }}-${{ matrix.unity-version }}-${{ matrix.test-mode }}-default-
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: "22.18.0"
-
-      # Single source of truth for the assembly include list: the same
-      # asmdef-discovery.js module the local discovery uses. Extracted into a
-      # composite action so all Unity workflows share one implementation.
-      # shell: pwsh is enforced inside the composite.
-      - name: Compute test assembly list
-        id: compute
-        uses: ./.github/actions/compute-unity-assemblies
-        with:
-          target: "${{ matrix.test-mode }}"
-          runtime-only: "${{ matrix.test-mode == 'standalone' && 'true' || 'false' }}"
-          # Run the DI-container integration suites (Reflex / VContainer / Zenject)
-          # alongside core on EVERY version x mode leg. The matching run step passes
-          # -IncludeIntegrations so the 3 packages are installed into the ephemeral
-          # manifest; without that the integration assemblies would not compile.
-          include-integrations: "true"
-
       - name: Validate Unity license secrets
+        if: ${{ steps.compute.outputs.is-empty != 'true' }}
         uses: ./.github/actions/validate-unity-license
         env:
           UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
@@ -423,8 +473,9 @@ jobs:
           retention-days: 14
 
       - name: Acquire organization Unity lock
+        id: unity_lock
         if: ${{ steps.compute.outputs.is-empty != 'true' }}
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@v1
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@v1.2.0
         with:
           lock-name: wallstop-organization-builds
           holder-id-suffix: ${{ matrix.unity-version }}-${{ matrix.test-mode }}
@@ -442,7 +493,7 @@ jobs:
         # is the ~40-min SINGLE_THREADED EditMode baseline, so 90 gives >2x headroom
         # yet fails a hang ~60 min sooner than the old blanket 150 (a dead Unity
         # Accelerator once stalled EditMode for the full 150 and produced no
-        # results.xml). All values stay under the job timeout (660) so the step
+        # results.xml). All values stay under the job timeout (1200) so the step
         # clock fires first and releases the shared Unity seat.
         timeout-minutes: ${{ (matrix.test-mode == 'standalone' && 150) || 90 }}
         shell: pwsh
@@ -483,15 +534,15 @@ jobs:
           }
 
       - name: Return Unity license
-        if: always()
+        if: ${{ always() && steps.unity_lock.outcome == 'success' }}
         uses: ./.github/actions/return-unity-license
         env:
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
 
       - name: Release organization Unity lock
-        if: always()
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@v1
+        if: ${{ always() && steps.unity_lock.outcome == 'success' }}
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@v1.2.0
         with:
           lock-name: wallstop-organization-builds
           holder-id-suffix: ${{ matrix.unity-version }}-${{ matrix.test-mode }}
@@ -572,17 +623,17 @@ jobs:
         needs.matrix-config.outputs.matrix-include-standalone != '[]'
       }}
     runs-on: [self-hosted, Windows, RAM-64GB]
-    timeout-minutes: 660
+    timeout-minutes: 1200
     strategy:
       fail-fast: ${{ github.event_name == 'workflow_dispatch' && inputs.abort-on-first-failure == 'true' }}
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         # Standalone-tier include from matrix-config (empty -> this job is skipped
         # by the if-guard above -- single-mode dispatch pins run in the fast tier).
         include: ${{ fromJSON(needs.matrix-config.outputs.matrix-include-standalone) }}
     steps:
       - name: Enable Git long paths
-        shell: pwsh
+        shell: powershell
         env:
           GIT_CONFIG_GLOBAL: ${{ runner.temp }}/uh-gitconfig
         run: git config --global core.longpaths true
@@ -595,7 +646,76 @@ jobs:
           lfs: true
           persist-credentials: false
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22.18.0"
+
+      # Single source of truth for the assembly include list: the same
+      # asmdef-discovery.js module the local discovery uses. Extracted into a
+      # composite action so all Unity workflows share one implementation.
+      # Uses Windows PowerShell inside the composite so empty legs can be skipped
+      # before runner maintenance installs or repairs PowerShell 7 / Unity.
+      - name: Compute test assembly list
+        id: compute
+        uses: ./.github/actions/compute-unity-assemblies
+        with:
+          target: "${{ matrix.test-mode }}"
+          runtime-only: "${{ matrix.test-mode == 'standalone' && 'true' || 'false' }}"
+          # Run the DI-container integration suites (Reflex / VContainer / Zenject)
+          # alongside core on EVERY version x mode leg. The matching run step passes
+          # -IncludeIntegrations so the 3 packages are installed into the ephemeral
+          # manifest; without that the integration assemblies would not compile.
+          include-integrations: "true"
+
+      - name: Maintain Unity editor on selected runner
+        if: ${{ steps.compute.outputs.is-empty != 'true' }}
+        timeout-minutes: 360
+        shell: powershell
+        run: |
+          $artifactsPath = '.artifacts/unity/${{ matrix.unity-version }}-${{ matrix.test-mode }}'
+          $maintenanceDiagnosticsRoot = Join-Path $artifactsPath 'provisioning/runner-maintenance'
+          New-Item -ItemType Directory -Force -Path $maintenanceDiagnosticsRoot | Out-Null
+          $provisioningProfile = if ('${{ matrix.test-mode }}' -eq 'standalone') {
+            'StandaloneWindowsIl2Cpp'
+          } else {
+            'EditorOnly'
+          }
+          $maintenanceScript = Join-Path $env:GITHUB_WORKSPACE 'scripts\unity\maintain-windows-runner.ps1'
+          if (-not (Test-Path -LiteralPath $maintenanceScript -PathType Leaf)) {
+            throw "Runner maintenance script not found: $maintenanceScript"
+          }
+          . $maintenanceScript
+          $maintenanceExitCode = Invoke-WindowsRunnerMaintenance `
+            -UnityVersions '${{ matrix.unity-version }}' `
+            -ProvisioningProfile $provisioningProfile `
+            -DiagnosticsRoot $maintenanceDiagnosticsRoot
+          if ($maintenanceExitCode -ne 0) {
+            throw "Runner maintenance failed with exit code $maintenanceExitCode."
+          }
+          $pwshCandidates = @(
+            (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'),
+            $(if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} 'PowerShell\7\pwsh.exe' })
+          )
+          $pathPwsh = Get-Command pwsh -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1
+          if ($pathPwsh -and $pathPwsh -notlike '*\Microsoft\WindowsApps\pwsh.exe') {
+            $pwshCandidates += $pathPwsh
+          }
+          $pwshCandidates = @(
+            $pwshCandidates |
+              Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+              Select-Object -Unique
+          )
+          $pwshPath = @($pwshCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })[0]
+          if (-not $pwshPath) {
+            throw 'PowerShell 7 maintenance completed, but pwsh.exe was not found for later GitHub Actions steps.'
+          }
+          $pwshDirectory = Split-Path -Parent $pwshPath
+          $pwshDirectory | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          Write-Host "Added PowerShell 7 to GITHUB_PATH: $pwshDirectory"
+
       - name: Print runner diagnostics
+        if: ${{ steps.compute.outputs.is-empty != 'true' }}
         # Composite action runs PowerShell internally; `shell: bash` on a
         # self-hosted Windows runner can resolve to the WSL stub at
         # C:\Windows\System32\bash.exe and fail with "Windows Subsystem
@@ -606,6 +726,7 @@ jobs:
           matrix-note: "gated standalone (organization lock wraps the Unity section)"
 
       - name: Cache Unity Library and package caches
+        if: ${{ steps.compute.outputs.is-empty != 'true' }}
         uses: actions/cache@v6
         env:
           PACKAGE_HASH: >-
@@ -633,28 +754,8 @@ jobs:
           restore-keys: |
             Library-${{ runner.os }}-${{ runner.arch }}-${{ matrix.unity-version }}-${{ matrix.test-mode }}-default-
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: "22.18.0"
-
-      # Single source of truth for the assembly include list: the same
-      # asmdef-discovery.js module the local discovery uses. Extracted into a
-      # composite action so all Unity workflows share one implementation.
-      # shell: pwsh is enforced inside the composite.
-      - name: Compute test assembly list
-        id: compute
-        uses: ./.github/actions/compute-unity-assemblies
-        with:
-          target: "${{ matrix.test-mode }}"
-          runtime-only: "${{ matrix.test-mode == 'standalone' && 'true' || 'false' }}"
-          # Run the DI-container integration suites (Reflex / VContainer / Zenject)
-          # alongside core on EVERY version x mode leg. The matching run step passes
-          # -IncludeIntegrations so the 3 packages are installed into the ephemeral
-          # manifest; without that the integration assemblies would not compile.
-          include-integrations: "true"
-
       - name: Validate Unity license secrets
+        if: ${{ steps.compute.outputs.is-empty != 'true' }}
         uses: ./.github/actions/validate-unity-license
         env:
           UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
@@ -701,8 +802,9 @@ jobs:
           retention-days: 14
 
       - name: Acquire organization Unity lock
+        id: unity_lock
         if: ${{ steps.compute.outputs.is-empty != 'true' }}
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@v1
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@v1.2.0
         with:
           lock-name: wallstop-organization-builds
           holder-id-suffix: ${{ matrix.unity-version }}-${{ matrix.test-mode }}
@@ -720,7 +822,7 @@ jobs:
         # is the ~40-min SINGLE_THREADED EditMode baseline, so 90 gives >2x headroom
         # yet fails a hang ~60 min sooner than the old blanket 150 (a dead Unity
         # Accelerator once stalled EditMode for the full 150 and produced no
-        # results.xml). All values stay under the job timeout (660) so the step
+        # results.xml). All values stay under the job timeout (1200) so the step
         # clock fires first and releases the shared Unity seat.
         timeout-minutes: ${{ (matrix.test-mode == 'standalone' && 150) || 90 }}
         shell: pwsh
@@ -761,15 +863,15 @@ jobs:
           }
 
       - name: Return Unity license
-        if: always()
+        if: ${{ always() && steps.unity_lock.outcome == 'success' }}
         uses: ./.github/actions/return-unity-license
         env:
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
 
       - name: Release organization Unity lock
-        if: always()
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@v1
+        if: ${{ always() && steps.unity_lock.outcome == 'success' }}
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@v1.2.0
         with:
           lock-name: wallstop-organization-builds
           holder-id-suffix: ${{ matrix.unity-version }}-${{ matrix.test-mode }}
@@ -861,12 +963,12 @@ jobs:
         needs.matrix-config.outputs.has-required-secrets == 'true'
       }}
     runs-on: [self-hosted, Windows, RAM-64GB]
-    timeout-minutes: 660
+    timeout-minutes: 1200
     strategy:
       # See the unity-tests job: default false for full visibility;
       # workflow_dispatch can opt into abort-on-first-failure.
       fail-fast: ${{ github.event_name == 'workflow_dispatch' && inputs.abort-on-first-failure == 'true' }}
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         # Unity 6 ONLY (6000.3.16f1) to keep the extra leg cheap. editmode + playmode
         # only -- both are fast in-editor runs; the SINGLE_THREADED path does not need
@@ -875,7 +977,7 @@ jobs:
         test-mode: ["editmode", "playmode"]
     steps:
       - name: Enable Git long paths
-        shell: pwsh
+        shell: powershell
         env:
           GIT_CONFIG_GLOBAL: ${{ runner.temp }}/uh-gitconfig
         run: git config --global core.longpaths true
@@ -888,7 +990,62 @@ jobs:
           lfs: true
           persist-credentials: false
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22.18.0"
+
+      - name: Compute test assembly list
+        id: compute
+        uses: ./.github/actions/compute-unity-assemblies
+        with:
+          target: "${{ matrix.test-mode }}"
+          runtime-only: "false"
+
+      - name: Maintain Unity editor on selected runner
+        if: ${{ steps.compute.outputs.is-empty != 'true' }}
+        timeout-minutes: 360
+        shell: powershell
+        run: |
+          $artifactsPath = '.artifacts/unity/${{ matrix.unity-version }}-${{ matrix.test-mode }}-single-threaded'
+          $maintenanceDiagnosticsRoot = Join-Path $artifactsPath 'provisioning/runner-maintenance'
+          New-Item -ItemType Directory -Force -Path $maintenanceDiagnosticsRoot | Out-Null
+          $provisioningProfile = 'EditorOnly'
+          $maintenanceScript = Join-Path $env:GITHUB_WORKSPACE 'scripts\unity\maintain-windows-runner.ps1'
+          if (-not (Test-Path -LiteralPath $maintenanceScript -PathType Leaf)) {
+            throw "Runner maintenance script not found: $maintenanceScript"
+          }
+          . $maintenanceScript
+          $maintenanceExitCode = Invoke-WindowsRunnerMaintenance `
+            -UnityVersions '${{ matrix.unity-version }}' `
+            -ProvisioningProfile $provisioningProfile `
+            -DiagnosticsRoot $maintenanceDiagnosticsRoot
+          if ($maintenanceExitCode -ne 0) {
+            throw "Runner maintenance failed with exit code $maintenanceExitCode."
+          }
+          $pwshCandidates = @(
+            (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'),
+            $(if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} 'PowerShell\7\pwsh.exe' })
+          )
+          $pathPwsh = Get-Command pwsh -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1
+          if ($pathPwsh -and $pathPwsh -notlike '*\Microsoft\WindowsApps\pwsh.exe') {
+            $pwshCandidates += $pathPwsh
+          }
+          $pwshCandidates = @(
+            $pwshCandidates |
+              Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+              Select-Object -Unique
+          )
+          $pwshPath = @($pwshCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })[0]
+          if (-not $pwshPath) {
+            throw 'PowerShell 7 maintenance completed, but pwsh.exe was not found for later GitHub Actions steps.'
+          }
+          $pwshDirectory = Split-Path -Parent $pwshPath
+          $pwshDirectory | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          Write-Host "Added PowerShell 7 to GITHUB_PATH: $pwshDirectory"
+
       - name: Print runner diagnostics
+        if: ${{ steps.compute.outputs.is-empty != 'true' }}
         # Composite action runs PowerShell internally; `shell: bash` on a
         # self-hosted Windows runner can resolve to the WSL stub and fail. Never
         # use plain `shell: bash` on self-hosted Windows runners.
@@ -897,6 +1054,7 @@ jobs:
           matrix-note: "single-threaded (organization lock wraps the Unity section)"
 
       - name: Cache Unity Library and package caches
+        if: ${{ steps.compute.outputs.is-empty != 'true' }}
         uses: actions/cache@v6
         env:
           PACKAGE_HASH: >-
@@ -923,19 +1081,8 @@ jobs:
           restore-keys: |
             Library-${{ runner.os }}-${{ runner.arch }}-${{ matrix.unity-version }}-${{ matrix.test-mode }}-single-threaded-
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: "22.18.0"
-
-      - name: Compute test assembly list
-        id: compute
-        uses: ./.github/actions/compute-unity-assemblies
-        with:
-          target: "${{ matrix.test-mode }}"
-          runtime-only: "false"
-
       - name: Validate Unity license secrets
+        if: ${{ steps.compute.outputs.is-empty != 'true' }}
         uses: ./.github/actions/validate-unity-license
         env:
           UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
@@ -969,8 +1116,9 @@ jobs:
           retention-days: 14
 
       - name: Acquire organization Unity lock
+        id: unity_lock
         if: ${{ steps.compute.outputs.is-empty != 'true' }}
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@v1
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@v1.2.0
         with:
           lock-name: wallstop-organization-builds
           holder-id-suffix: ${{ matrix.unity-version }}-${{ matrix.test-mode }}-single-threaded
@@ -985,7 +1133,7 @@ jobs:
         # min -- >2x the ~40-min healthy SINGLE_THREADED EditMode baseline -- is the
         # fail-fast cap. The old 150 let a dead-Accelerator EditMode stall burn the
         # full window and emit no results.xml; 90 surfaces that ~60 min sooner and
-        # releases the shared Unity seat. Stays under the job timeout (660).
+        # releases the shared Unity seat. Stays under the job timeout (1200).
         timeout-minutes: 90
         shell: pwsh
         env:
@@ -1024,15 +1172,15 @@ jobs:
           }
 
       - name: Return Unity license
-        if: always()
+        if: ${{ always() && steps.unity_lock.outcome == 'success' }}
         uses: ./.github/actions/return-unity-license
         env:
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
 
       - name: Release organization Unity lock
-        if: always()
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@v1
+        if: ${{ always() && steps.unity_lock.outcome == 'success' }}
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@v1.2.0
         with:
           lock-name: wallstop-organization-builds
           holder-id-suffix: ${{ matrix.unity-version }}-${{ matrix.test-mode }}-single-threaded
@@ -1112,7 +1260,8 @@ jobs:
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
 
       - name: Acquire organization Unity lock
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@v1
+        id: unity_lock
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@v1.2.0
         with:
           lock-name: wallstop-organization-builds
           holder-id-suffix: unitypackage-smoke-${{ github.run_id }}
@@ -1138,15 +1287,15 @@ jobs:
             --output "${output}"
 
       - name: Return Unity license
-        if: always()
+        if: ${{ always() && steps.unity_lock.outcome == 'success' }}
         uses: ./.github/actions/return-unity-license
         env:
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
 
       - name: Release organization Unity lock
-        if: always()
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@v1
+        if: ${{ always() && steps.unity_lock.outcome == 'success' }}
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@v1.2.0
         with:
           lock-name: wallstop-organization-builds
           holder-id-suffix: unitypackage-smoke-${{ github.run_id }}

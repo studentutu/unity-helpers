@@ -13,8 +13,10 @@ namespace WallstopStudios.UnityHelpers.Tags
     using UnityEngine;
     using WallstopStudios.UnityHelpers.Core.Attributes;
     using WallstopStudios.UnityHelpers.Utils;
-#if ODIN_INSPECTOR
-    using Sirenix.OdinInspector;
+#if WALLSTOP_UNITY_HELPERS_ODIN_INSPECTOR
+    using AttributeEffectBase = Sirenix.OdinInspector.SerializedScriptableObject;
+#else
+    using AttributeEffectBase = UnityEngine.ScriptableObject;
 #endif
 
     /// <summary>
@@ -106,13 +108,7 @@ namespace WallstopStudios.UnityHelpers.Tags
     /// </remarks>
     [Serializable]
     [CreateAssetMenu(menuName = "Wallstop Studios/Unity Helpers/Attribute Effect")]
-    public sealed class AttributeEffect :
-#if ODIN_INSPECTOR
-        SerializedScriptableObject
-#else
-        ScriptableObject
-#endif
-            , IEquatable<AttributeEffect>
+    public sealed class AttributeEffect : AttributeEffectBase, IEquatable<AttributeEffect>
     {
         /// <summary>
         /// Gets a human-readable description of this effect based on its modifications.
@@ -141,14 +137,10 @@ namespace WallstopStudios.UnityHelpers.Tags
         /// <summary>
         /// The duration in seconds for this effect. Only used when <see cref="durationType"/> is <see cref="ModifierDurationType.Duration"/>.
         /// </summary>
-#if ODIN_INSPECTOR
-        [ShowIf("@durationType == ModifierDurationType.Duration")]
-#else
         [WShowIf(
             nameof(durationType),
             expectedValues: new object[] { ModifierDurationType.Duration }
         )]
-#endif
         public float duration;
 
         /// <summary>
@@ -159,14 +151,10 @@ namespace WallstopStudios.UnityHelpers.Tags
         /// A poison effect with resetDurationOnReapplication=true will restart its 5-second timer
         /// each time the poison is reapplied, preventing stacking but extending the effect.
         /// </example>
-#if ODIN_INSPECTOR
-        [ShowIf("@durationType == ModifierDurationType.Duration")]
-#else
         [WShowIf(
             nameof(durationType),
             expectedValues: new object[] { ModifierDurationType.Duration }
         )]
-#endif
         public bool resetDurationOnReapplication;
 
         /// <summary>

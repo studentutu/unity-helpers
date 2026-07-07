@@ -92,6 +92,25 @@ function Test-ExpectedPackageExclusion {
   return $false
 }
 
+function Test-ForbiddenRootMarkdownArtifact {
+  param(
+    [string]$Entry,
+    [string[]]$Prefixes
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Entry)) {
+    return $false
+  }
+
+  foreach ($prefix in $Prefixes) {
+    if ($Entry.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+      return $true
+    }
+  }
+
+  return $false
+}
+
 $repoRoot = (Get-Location).Path
 $packageJsonPath = Join-Path $repoRoot 'package.json'
 
@@ -217,6 +236,10 @@ try {
     'scripts.meta'
   )
 
+  $forbiddenRootMarkdownArtifactPrefixes = @(
+    'pr-description.md'
+  )
+
   foreach ($entry in $forbiddenPackageEntries) {
     $entryPath = Join-Path $packageDir $entry
     if (Test-Path $entryPath) {
@@ -226,6 +249,13 @@ try {
 
   $topLevelEntries = Get-ChildItem -LiteralPath $packageDir -Force | ForEach-Object { $_.Name }
   foreach ($entry in $topLevelEntries) {
+    $isForbiddenRootMarkdownArtifact = Test-ForbiddenRootMarkdownArtifact `
+      -Entry $entry `
+      -Prefixes $forbiddenRootMarkdownArtifactPrefixes
+    if ($isForbiddenRootMarkdownArtifact) {
+      $errors += "Forbidden release artifact included in npm package: $entry"
+      continue
+    }
     if ($entry -cnotin $allowedTopLevelEntries) {
       $errors += "Unexpected top-level entry included in npm package: $entry"
     }
@@ -387,6 +417,9 @@ try {
   }
 
   foreach ($npmFile in $npmPackageFiles) {
+    if (Test-ForbiddenRootMarkdownArtifact -Entry $npmFile -Prefixes $forbiddenRootMarkdownArtifactPrefixes) {
+      continue
+    }
     if ($npmFile -cnotin $gitPackageFiles) {
       $errors += "File in npm package but not tracked in git repo: $npmFile"
     }

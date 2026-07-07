@@ -12,9 +12,6 @@ namespace WallstopStudios.UnityHelpers.Visuals.UIToolkit
     using UnityEngine.UIElements;
     using WallstopStudios.UnityHelpers.Core.Helper;
     using WallstopStudios.UnityHelpers.Utils;
-#if UNITY_EDITOR
-    using UnityEditor;
-#endif
 
     public sealed class LayeredImage : VisualElement
     {
@@ -31,6 +28,19 @@ namespace WallstopStudios.UnityHelpers.Visuals.UIToolkit
             return alpha <= cutoff + fudge;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool CanPlayTimed(float fps)
+        {
+            if (fps <= 0 || float.IsNaN(fps) || float.IsInfinity(fps))
+            {
+                return false;
+            }
+
+            double frameMilliseconds = 1000d / fps;
+            return frameMilliseconds > 0
+                && frameMilliseconds <= TimeSpan.MaxValue.TotalMilliseconds;
+        }
+
         public float Fps
         {
             get => _fps;
@@ -38,34 +48,81 @@ namespace WallstopStudios.UnityHelpers.Visuals.UIToolkit
             {
                 if (_fps == value)
                 {
+                    if (CanSelfUpdate())
+                    {
+                        StartSelfUpdate();
+                    }
+                    else
+                    {
+                        StopSelfUpdate();
+                    }
+
                     return;
                 }
 
+                StopSelfUpdate();
                 _fps = value;
-                if (_updatesSelf && _computed.Length > 1 && _fps > 0)
+                if (!CanSelfUpdate())
                 {
-#if UNITY_EDITOR
-                    if (Application.isEditor && !Application.isPlaying && !_tickAttached)
-                    {
-                        EditorApplication.update += () => Update(force: false);
-                        _tickAttached = true;
-                        return;
-                    }
-#endif
-                    if (Application.isPlaying)
-                    {
-                        if (_coroutine != null)
-                        {
-                            CoroutineHandler.Instance.StopCoroutine(_coroutine);
-                        }
-
-                        _coroutine = CoroutineHandler.Instance.StartFunctionAsCoroutine(
-                            () => Update(force: true),
-                            1f / _fps
-                        );
-                    }
+                    return;
                 }
+
+                StartSelfUpdate();
             }
+        }
+
+        private static long GetFrameIntervalMilliseconds(float fps)
+        {
+            return Math.Max(1L, (long)Math.Round(1000d / fps));
+        }
+
+        private static TimeSpan GetFrameInterval(float fps)
+        {
+            return TimeSpan.FromMilliseconds(GetFrameIntervalMilliseconds(fps));
+        }
+
+        private bool CanSelfUpdate()
+        {
+            return _updatesSelf && _computed.Length > 1 && CanPlayTimed(_fps);
+        }
+
+        private void StartSelfUpdate()
+        {
+            if (!CanSelfUpdate() || panel == null || _selfUpdateItem != null)
+            {
+                return;
+            }
+
+            _selfUpdateItem = schedule
+                .Execute(HandleSelfUpdate)
+                .Every(GetFrameIntervalMilliseconds(_fps));
+        }
+
+        private void StopSelfUpdate()
+        {
+            _selfUpdateItem?.Pause();
+            _selfUpdateItem = null;
+        }
+
+        private void HandleSelfUpdate(TimerState _)
+        {
+            if (panel == null || !CanSelfUpdate())
+            {
+                StopSelfUpdate();
+                return;
+            }
+
+            Update(force: true);
+        }
+
+        private void HandleAttachToPanel(AttachToPanelEvent _)
+        {
+            StartSelfUpdate();
+        }
+
+        private void HandleDetachFromPanel(DetachFromPanelEvent _)
+        {
+            StopSelfUpdate();
         }
 
         private const int ParallelBlendThreshold = 2048;
@@ -73,6 +130,14 @@ namespace WallstopStudios.UnityHelpers.Visuals.UIToolkit
         private readonly AnimatedSpriteLayer[] _layers;
         private readonly Texture2D[] _computed;
         internal Texture2D[] ComputedTexturesForTests => _computed;
+        internal bool SelfUpdateActiveForTests => _selfUpdateItem != null;
+
+        internal void SetElapsedSinceLastFrameForTests(TimeSpan elapsedSinceLastFrame)
+        {
+            _timer.Stop();
+            _lastTick = _timer.Elapsed - elapsedSinceLastFrame;
+        }
+
         private readonly Color _backgroundColor;
         private readonly Rect? _largestArea;
         private readonly Stopwatch _timer;
@@ -80,8 +145,7 @@ namespace WallstopStudios.UnityHelpers.Visuals.UIToolkit
         private readonly float _pixelCutoff;
 
         private TimeSpan _lastTick;
-        private Coroutine _coroutine;
-        private bool _tickAttached;
+        private IVisualElementScheduledItem _selfUpdateItem;
         private float _fps;
         private int _index;
 
@@ -131,8 +195,10 @@ namespace WallstopStudios.UnityHelpers.Visuals.UIToolkit
             }
 
             _timer = Stopwatch.StartNew();
+            RegisterCallback<AttachToPanelEvent>(HandleAttachToPanel);
+            RegisterCallback<DetachFromPanelEvent>(HandleDetachFromPanel);
+            Render(0);
             Fps = fps;
-            Update();
         }
 
         public void Update(bool force = false)
@@ -147,8 +213,13 @@ namespace WallstopStudios.UnityHelpers.Visuals.UIToolkit
                 return;
             }
 
+            if (!CanPlayTimed(_fps))
+            {
+                return;
+            }
+
             TimeSpan elapsed = _timer.Elapsed;
-            TimeSpan deltaTime = TimeSpan.FromMilliseconds(1000 / _fps);
+            TimeSpan deltaTime = GetFrameInterval(_fps);
 
             // Prevent time accumulation drift: if _lastTick has fallen significantly behind
             // (e.g., editor was paused/unfocused, or this is the first update after construction),

@@ -9,13 +9,19 @@ inputs:
   unity-editor-path:
     description: "Path to the resolved Unity editor exe (exported to GITHUB_ENV by run-ci-tests.ps1). When empty there is nothing to return."
     required: false
+outputs:
+  resource-safe:
+    description: "Whether Unity confirmed that this runner no longer holds the license activation."
+    value: ${{ steps.return_license.outputs.resource-safe }}
 runs:
   using: composite
   steps:
     - name: Return Unity license
+      id: return_license
       shell: pwsh
       run: |
         Set-StrictMode -Version Latest
+        . (Join-Path '${{ github.action_path }}' 'Classify-UnityLicenseReturn.ps1')
         # Pin $PSNativeCommandUseErrorActionPreference = $false (mirrors the
         # rationale in scripts/unity/run-ci-tests.ps1). PowerShell 7.4+
         # can ENABLE the native-error behavior so that `& <native>` THROWS on a
@@ -32,6 +38,7 @@ runs:
         # also reclaimed by the NEXT run's return-at-start even if every branch
         # below is skipped.
         try {
+          "resource-safe=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           $editorPath = '${{ inputs.unity-editor-path }}'
           if ([string]::IsNullOrWhiteSpace($editorPath)) {
             $editorPath = $env:UNITY_EDITOR_PATH
@@ -88,32 +95,14 @@ runs:
           Write-Host "::endgroup::"
 
           if ($exitCode -ne 0) {
-            $returnedEntitlement = $false
-            $legacyFileUnavailable = $false
-            try {
-              if (Test-Path -LiteralPath $returnLog -PathType Leaf) {
-                $returnedEntitlement = Select-String `
-                  -LiteralPath $returnLog `
-                  -Pattern 'Successfully returned the entitlement license' `
-                  -SimpleMatch `
-                  -Quiet
-                $legacyFileUnavailable = Select-String `
-                  -LiteralPath $returnLog `
-                  -Pattern 'Serial number unavailable for ULF return' `
-                  -SimpleMatch `
-                  -Quiet
-              }
-            } catch {
-              $returnedEntitlement = $false
-              $legacyFileUnavailable = $false
-            }
-
-            if ($returnedEntitlement -and $legacyFileUnavailable) {
+            if (Test-UnityLicenseReturnResourceSafe -ExitCode $exitCode -LogPath $returnLog) {
+              "resource-safe=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
               Write-Host "::notice::Unity returned the entitlement license, then exited with code $exitCode while skipping legacy ULF return; treating the seat return as successful."
             } else {
               Write-Host "::warning::Unity license return exited with code $exitCode; the next run's return-at-start is the backstop for the leaked seat."
             }
           } else {
+            "resource-safe=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
             Write-Host "::notice::Returned the Unity license seat."
           }
         } catch {

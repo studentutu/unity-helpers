@@ -45,6 +45,8 @@ $runnerBootstrapPath = Join-Path $repoRoot '.github/workflows/runner-bootstrap.y
 $actionlintPath = Join-Path $repoRoot '.github/actionlint.yaml'
 $runnerRunbookPath = Join-Path $repoRoot 'docs/runbooks/unity-runners-after-transfer.md'
 $runnerDiagnosticsActionPath = Join-Path $repoRoot '.github/actions/print-self-hosted-runner-diagnostics/action.yml'
+$returnUnityLicenseActionPath = Join-Path $repoRoot '.github/actions/return-unity-license/action.yml'
+$returnUnityLicenseClassifierPath = Join-Path $repoRoot '.github/actions/return-unity-license/Classify-UnityLicenseReturn.ps1'
 $unityVersionsPath = Join-Path $repoRoot '.github/unity-versions.json'
 $integrationPackagesPath = Join-Path $repoRoot '.github/integration-packages.json'
 $windowsRunnerBootstrapPath = Join-Path $repoRoot 'scripts/unity/bootstrap-windows-runner.ps1'
@@ -78,6 +80,10 @@ if (-not (Test-Path -LiteralPath $runnerRunbookPath)) {
 }
 if (-not (Test-Path -LiteralPath $runnerDiagnosticsActionPath)) {
     Write-Host "::error::Self-hosted runner diagnostics action not found: $runnerDiagnosticsActionPath"
+    exit 1
+}
+if (-not (Test-Path -LiteralPath $returnUnityLicenseActionPath)) {
+    Write-Host "::error::Return Unity license action not found: $returnUnityLicenseActionPath"
     exit 1
 }
 if (-not (Test-Path -LiteralPath $unityVersionsPath)) {
@@ -247,17 +253,19 @@ function Get-WorkflowJobTexts {
 function Test-UnityLockCleanupIsGated {
     param(
         [Parameter(Mandatory = $true)][hashtable]$Jobs,
-        [Parameter(Mandatory = $true)][string]$WorkflowFile
+        [Parameter(Mandatory = $true)][string]$WorkflowFile,
+        [Parameter(Mandatory = $true)][hashtable]$LicensedWorkStepNames
     )
 
     $acquireUses = 'Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@v1'
     $releaseUses = 'Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@v1'
     $returnUses = './.github/actions/return-unity-license'
-    $requiredGate = 'if: ${{ always() && steps.unity_lock.outcome == ''success'' }}'
+    $requiredCleanupGate = 'if: ${{ always() && steps.unity_lock.outcome == ''success'' }}'
+    $requiredReleaseGate = 'if: ${{ always() && (steps.unity_lock.outcome == ''success'' || steps.unity_lock.outcome == ''failure'' || steps.unity_lock.outcome == ''cancelled'') }}'
 
     $acquirePattern = '(?ms)- name: Acquire organization Unity lock\s*\r?\n\s+id:\s+unity_lock\s*\r?\n(?:.*?\r?\n)*?\s+uses:\s+' + [regex]::Escape($acquireUses) + '[ \t]*\r?$'
-    $returnPattern = '(?ms)- name: Return Unity license\s*\r?\n\s+' + [regex]::Escape($requiredGate) + '\s*\r?\n\s+uses:\s+' + [regex]::Escape($returnUses)
-    $releasePattern = '(?ms)- name: Release organization Unity lock\s*\r?\n\s+' + [regex]::Escape($requiredGate) + '\s*\r?\n\s+uses:\s+' + [regex]::Escape($releaseUses) + '[ \t]*\r?$'
+    $returnPattern = '(?ms)- name: Return Unity license\s*\r?\n\s+id:\s+return_unity_license\s*\r?\n\s+' + [regex]::Escape($requiredCleanupGate) + '\s*\r?\n\s+timeout-minutes:\s+5\s*\r?\n\s+continue-on-error:\s+true\s*\r?\n\s+uses:\s+' + [regex]::Escape($returnUses)
+    $releasePattern = '(?ms)- name: Release organization Unity lock\s*\r?\n\s+' + [regex]::Escape($requiredReleaseGate) + '\s*\r?\n\s+uses:\s+' + [regex]::Escape($releaseUses) + '[ \t]*\r?$'
     $failures = @()
 
     foreach ($job in $Jobs.GetEnumerator()) {
@@ -274,18 +282,44 @@ function Test-UnityLockCleanupIsGated {
         $acquireIndex = $jobText.IndexOf('- name: Acquire organization Unity lock', [StringComparison]::Ordinal)
         $returnIndex = $jobText.IndexOf('- name: Return Unity license', [StringComparison]::Ordinal)
         $releaseIndex = $jobText.IndexOf('- name: Release organization Unity lock', [StringComparison]::Ordinal)
+        [string[]]$declaredLicensedWorkSteps = if ($LicensedWorkStepNames.ContainsKey($job.Key)) {
+            @($LicensedWorkStepNames[$job.Key] | ForEach-Object { [string]$_ })
+        } else {
+            @()
+        }
+        $acquireStep = [regex]::Match($jobText, '(?ms)^\s+- name: Acquire organization Unity lock\s*$.*?(?=^\s+- name:|\z)')
+        $releaseStep = [regex]::Match($jobText, '(?ms)^\s+- name: Release organization Unity lock\s*$.*?(?=^\s+- name:|\z)')
+        $acquireHolder = [regex]::Match($acquireStep.Value, '(?m)^\s+holder-id-suffix:\s*(?<value>[^\r\n]+)')
+        $releaseHolder = [regex]::Match($releaseStep.Value, '(?m)^\s+holder-id-suffix:\s*(?<value>[^\r\n]+)')
+        $acquireRunner = [regex]::Match($acquireStep.Value, '(?m)^\s+runner-id:\s*(?<value>[^\r\n]+)')
+        $releaseRunner = [regex]::Match($releaseStep.Value, '(?m)^\s+runner-id:\s*(?<value>[^\r\n]+)')
 
         if ($jobText -notmatch $acquirePattern) {
             $failures += "$($job.Key): acquire step must have id unity_lock before uses"
         }
         if ($jobText -notmatch $returnPattern) {
-            $failures += "$($job.Key): return-unity-license must be gated on successful unity_lock acquisition"
+            $failures += "$($job.Key): return-unity-license must be identified, success-gated, bounded to five minutes, and non-masking"
         }
         if ($jobText -notmatch $releasePattern) {
-            $failures += "$($job.Key): release-build-lock must be gated on successful unity_lock acquisition"
+            $failures += "$($job.Key): release-build-lock must run after every non-skipped acquire outcome"
         }
-        if (-not (0 -le $acquireIndex -and $acquireIndex -lt $returnIndex -and $returnIndex -lt $releaseIndex)) {
-            $failures += "$($job.Key): lock cleanup order must be acquire, return Unity license, then release lock"
+        if ($declaredLicensedWorkSteps.Count -eq 0) {
+            $failures += "$($job.Key): every lock-owning job must declare at least one licensed-work step"
+        }
+        foreach ($licensedWorkStepName in $declaredLicensedWorkSteps) {
+            $licensedWorkIndex = $jobText.IndexOf("- name: $licensedWorkStepName", [StringComparison]::Ordinal)
+            if (-not (0 -le $acquireIndex -and $acquireIndex -lt $licensedWorkIndex -and $licensedWorkIndex -lt $returnIndex -and $returnIndex -lt $releaseIndex)) {
+                $failures += "$($job.Key): lock lifecycle order must be acquire, licensed work '$licensedWorkStepName', identified cleanup, then release"
+            }
+        }
+        if (-not $acquireHolder.Success -or -not $releaseHolder.Success -or $acquireHolder.Groups['value'].Value.Trim() -ne $releaseHolder.Groups['value'].Value.Trim()) {
+            $failures += "$($job.Key): acquire and release must use the same holder-id-suffix"
+        }
+        if (-not $acquireRunner.Success -or -not $releaseRunner.Success -or $acquireRunner.Groups['value'].Value.Trim() -ne $releaseRunner.Groups['value'].Value.Trim()) {
+            $failures += "$($job.Key): acquire and release must use the same runner-id"
+        }
+        if ($releaseStep.Value -notmatch '(?m)^\s+resource-safe:\s+\$\{\{ steps\.return_unity_license\.outputs\.resource-safe \}\}\s*$') {
+            $failures += "$($job.Key): release must pass the identified cleanup resource-safe output"
         }
     }
 
@@ -362,6 +396,7 @@ function Test-UnityLockAppConfiguration {
 [string]$actionlintContent = Get-Content -LiteralPath $actionlintPath -Raw
 [string]$runnerRunbookContent = Get-Content -LiteralPath $runnerRunbookPath -Raw
 [string]$runnerDiagnosticsActionContent = Get-Content -LiteralPath $runnerDiagnosticsActionPath -Raw
+[string]$returnUnityLicenseActionContent = Get-Content -LiteralPath $returnUnityLicenseActionPath -Raw
 [string]$windowsRunnerBootstrapContent = Get-Content -LiteralPath $windowsRunnerBootstrapPath -Raw
 [string]$windowsRunnerMaintenanceContent = Get-Content -LiteralPath $windowsRunnerMaintenancePath -Raw
 [string]$ensureEditorContent = Get-Content -LiteralPath $ensureEditorPath -Raw
@@ -2024,14 +2059,94 @@ if (-not $unityMatrixParallelismUsesRunnerSlots) {
 }
 
 $unityLockCleanupIsGated = (
-    (Test-UnityLockCleanupIsGated -Jobs $jobTexts -WorkflowFile '.github/workflows/unity-tests.yml') -and
-    (Test-UnityLockCleanupIsGated -Jobs $benchmarksJobTexts -WorkflowFile '.github/workflows/unity-benchmarks.yml') -and
-    (Test-UnityLockCleanupIsGated -Jobs $releaseJobTexts -WorkflowFile '.github/workflows/release.yml')
+    (Test-UnityLockCleanupIsGated `
+            -Jobs $jobTexts `
+            -WorkflowFile '.github/workflows/unity-tests.yml' `
+            -LicensedWorkStepNames @{
+                'unity-tests' = 'Run Unity Test Runner'
+                'unity-tests-standalone' = 'Run Unity Test Runner'
+                'unity-tests-single-threaded' = 'Run Unity Test Runner'
+                'unitypackage-smoke' = 'Export Unity package smoke artifact'
+            }) -and
+    (Test-UnityLockCleanupIsGated `
+            -Jobs $benchmarksJobTexts `
+            -WorkflowFile '.github/workflows/unity-benchmarks.yml' `
+            -LicensedWorkStepNames @{
+                benchmarks = @(
+                    'Run Unity Test Runner'
+                    'Run Random suite at full sample count'
+                )
+            }) -and
+    (Test-UnityLockCleanupIsGated `
+            -Jobs $releaseJobTexts `
+            -WorkflowFile '.github/workflows/release.yml' `
+            -LicensedWorkStepNames @{ unitypackage = 'Export Unity package' })
 )
 if (-not $unityLockCleanupIsGated) {
     $failed = $true
 } elseif ($VerboseOutput) {
     Write-Info "Checked Unity lock cleanup runs only after acquisition and before release."
+}
+
+$resourceSafeFalseAssignments = [regex]::Matches(
+    $returnUnityLicenseActionContent,
+    '(?m)^\s+"resource-safe=false"\s+\|\s+Out-File\s+-FilePath\s+\$env:GITHUB_OUTPUT\s+-Append\s*$'
+)
+$resourceSafeTrueAssignments = [regex]::Matches(
+    $returnUnityLicenseActionContent,
+    '(?m)^\s+"resource-safe=true"\s+\|\s+Out-File\s+-FilePath\s+\$env:GITHUB_OUTPUT\s+-Append\s*$'
+)
+$returnActionResourceProofContract = (
+    $returnUnityLicenseActionContent -match '(?ms)^outputs:\s*$.*?^\s+resource-safe:\s*$.*?^\s+value:\s+\$\{\{ steps\.return_license\.outputs\.resource-safe \}\}\s*$' -and
+    $returnUnityLicenseActionContent -match '(?ms)- name: Return Unity license\s*\r?\n\s+id:\s+return_license\s*\r?\n' -and
+    $resourceSafeFalseAssignments.Count -eq 1 -and
+    $resourceSafeTrueAssignments.Count -eq 2 -and
+    $returnUnityLicenseActionContent -match [regex]::Escape('. (Join-Path ''${{ github.action_path }}'' ''Classify-UnityLicenseReturn.ps1'')') -and
+    $returnUnityLicenseActionContent -match '(?ms)try \{\s*"resource-safe=false"\s+\|\s+Out-File\s+-FilePath\s+\$env:GITHUB_OUTPUT\s+-Append' -and
+    $returnUnityLicenseActionContent -match '(?ms)if \(Test-UnityLicenseReturnResourceSafe -ExitCode \$exitCode -LogPath \$returnLog\) \{\s*"resource-safe=true"\s+\|\s+Out-File\s+-FilePath\s+\$env:GITHUB_OUTPUT\s+-Append' -and
+    $returnUnityLicenseActionContent -match '(?ms)\} else \{\s*"resource-safe=true"\s+\|\s+Out-File\s+-FilePath\s+\$env:GITHUB_OUTPUT\s+-Append\s+Write-Host "::notice::Returned the Unity license seat\."'
+)
+if (-not $returnActionResourceProofContract) {
+    Write-Host '::error file=.github/actions/return-unity-license/action.yml::Return action must default resource-safe to false and set it true only for exit code zero or the strict classifier allowlist.'
+    $failed = $true
+} elseif ($VerboseOutput) {
+    Write-Info 'Checked return action emits conservative, non-masking cleanup proof.'
+}
+
+$classificationCases = @(
+    @{ Name = 'zero exit'; ExitCode = 0; Lines = @(); Expected = $true }
+    @{ Name = 'dual exact normalized markers'; ExitCode = 1; Lines = @('  Successfully returned the entitlement license  ', "`tSerial number unavailable for ULF return"); Expected = $true }
+    @{ Name = 'generic success'; ExitCode = 1; Lines = @('License return succeeded'); Expected = $false }
+    @{ Name = 'one marker'; ExitCode = 1; Lines = @('Successfully returned the entitlement license'); Expected = $false }
+    @{ Name = 'negated marker substrings'; ExitCode = 1; Lines = @('Not Successfully returned the entitlement license', 'Not Serial number unavailable for ULF return'); Expected = $false }
+    @{ Name = 'terminated despite exact markers'; ExitCode = 137; Lines = @('Successfully returned the entitlement license', 'Serial number unavailable for ULF return'); Expected = $false }
+    @{ Name = 'missing log'; ExitCode = 1; Lines = $null; Expected = $false }
+)
+$classificationFailures = @()
+$classificationTempRoot = Join-Path ([System.IO.Path]::GetTempPath()) "unity-return-classifier-$([guid]::NewGuid().ToString('N'))"
+try {
+    . $returnUnityLicenseClassifierPath
+    [void](New-Item -ItemType Directory -Path $classificationTempRoot)
+    foreach ($case in $classificationCases) {
+        $caseLog = Join-Path $classificationTempRoot "$($case.Name -replace '[^A-Za-z0-9]+', '-').log"
+        if ($null -ne $case.Lines) {
+            Set-Content -LiteralPath $caseLog -Value @($case.Lines)
+        }
+        $actual = Test-UnityLicenseReturnResourceSafe -ExitCode $case.ExitCode -LogPath $caseLog
+        if ($actual -ne $case.Expected) {
+            $classificationFailures += "$($case.Name): expected $($case.Expected), got $actual"
+        }
+    }
+} catch {
+    $classificationFailures += "classifier threw unexpectedly: $($_.Exception.Message)"
+} finally {
+    Remove-Item -LiteralPath $classificationTempRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+if ($classificationFailures.Count -gt 0) {
+    Write-Host "::error file=.github/actions/return-unity-license/Classify-UnityLicenseReturn.ps1::Return classification failed: $($classificationFailures -join '; ')"
+    $failed = $true
+} elseif ($VerboseOutput) {
+    Write-Info "Checked $($classificationCases.Count) resource cleanup classifications."
 }
 
 $unityLockUsesAppCredentials = (

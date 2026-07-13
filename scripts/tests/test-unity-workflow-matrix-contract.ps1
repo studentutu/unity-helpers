@@ -8,6 +8,7 @@ param([switch]$VerboseOutput)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$buildLockActionCommit = 'cfdcf6e67d7720824d21c37aa6a8b9e70dbdd2af'
 
 function Write-Info($msg) {
     if ($VerboseOutput) { Write-Host "[test-unity-workflow-matrix-contract] $msg" -ForegroundColor Cyan }
@@ -257,8 +258,8 @@ function Test-UnityLockCleanupIsGated {
         [Parameter(Mandatory = $true)][hashtable]$LicensedWorkStepNames
     )
 
-    $acquireUses = 'Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@v1'
-    $releaseUses = 'Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@v1'
+    $acquireUses = "Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@$buildLockActionCommit"
+    $releaseUses = "Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@$buildLockActionCommit"
     $returnUses = './.github/actions/return-unity-license'
     $requiredCleanupGate = 'if: ${{ always() && steps.unity_lock.outcome == ''success'' }}'
     $requiredReleaseGate = 'if: ${{ always() && (steps.unity_lock.outcome == ''success'' || steps.unity_lock.outcome == ''failure'' || steps.unity_lock.outcome == ''cancelled'') }}'
@@ -289,6 +290,7 @@ function Test-UnityLockCleanupIsGated {
         }
         $acquireStep = [regex]::Match($jobText, '(?ms)^\s+- name: Acquire organization Unity lock\s*$.*?(?=^\s+- name:|\z)')
         $releaseStep = [regex]::Match($jobText, '(?ms)^\s+- name: Release organization Unity lock\s*$.*?(?=^\s+- name:|\z)')
+        $returnStep = [regex]::Match($jobText, '(?ms)^\s+- name: Return Unity license\s*$.*?(?=^\s+- name:|\z)')
         $acquireHolder = [regex]::Match($acquireStep.Value, '(?m)^\s+holder-id-suffix:\s*(?<value>[^\r\n]+)')
         $releaseHolder = [regex]::Match($releaseStep.Value, '(?m)^\s+holder-id-suffix:\s*(?<value>[^\r\n]+)')
         $acquireRunner = [regex]::Match($acquireStep.Value, '(?m)^\s+runner-id:\s*(?<value>[^\r\n]+)')
@@ -299,6 +301,12 @@ function Test-UnityLockCleanupIsGated {
         }
         if ($jobText -notmatch $returnPattern) {
             $failures += "$($job.Key): return-unity-license must be identified, success-gated, bounded to five minutes, and non-masking"
+        }
+        if ($returnStep.Success -and (
+                $returnStep.Value -notmatch '(?m)^\s+prior-return-log-path:\s+\S.*$' -or
+                $returnStep.Value -notmatch '(?ms)^\s+prior-command-succeeded:\s+(?:>-\s*\r?\n\s*)?\$\{\{\s+.+?\s+\}\}\s*(?=^\s+env:)'
+            )) {
+            $failures += "$($job.Key): return-unity-license must classify the licensed command's log and successful outcome"
         }
         if ($jobText -notmatch $releasePattern) {
             $failures += "$($job.Key): release-build-lock must run after every non-skipped acquire outcome"
@@ -318,8 +326,12 @@ function Test-UnityLockCleanupIsGated {
         if (-not $acquireRunner.Success -or -not $releaseRunner.Success -or $acquireRunner.Groups['value'].Value.Trim() -ne $releaseRunner.Groups['value'].Value.Trim()) {
             $failures += "$($job.Key): acquire and release must use the same runner-id"
         }
-        if ($releaseStep.Value -notmatch '(?m)^\s+resource-safe:\s+\$\{\{ steps\.return_unity_license\.outputs\.resource-safe \}\}\s*$') {
-            $failures += "$($job.Key): release must pass the identified cleanup resource-safe output"
+        if (
+            $releaseStep.Value -notmatch '(?m)^\s+resource-cleanup-status:\s+\$\{\{ steps\.return_unity_license\.outputs\.resource-cleanup-status \}\}\s*$' -or
+            $releaseStep.Value -notmatch '(?m)^\s+resource-health:\s+\$\{\{ steps\.return_unity_license\.outputs\.resource-health \}\}\s*$' -or
+            $releaseStep.Value -notmatch '(?m)^\s+resource-reason:\s+\$\{\{ steps\.return_unity_license\.outputs\.resource-reason \}\}\s*$'
+        ) {
+            $failures += "$($job.Key): release must pass the identified cleanup status, health, and reason outputs"
         }
     }
 
@@ -354,9 +366,9 @@ function Test-UnityLockAppConfiguration {
         $isAcquireStep = $stepText.Contains('Acquire organization Unity lock')
         $stepKind = if ($isAcquireStep) { 'Acquire' } else { 'Release' }
         $expectedAction = if ($isAcquireStep) {
-            'Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@v1'
+            "Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@$buildLockActionCommit"
         } else {
-            'Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@v1'
+            "Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@$buildLockActionCommit"
         }
 
         $exactActionPattern = '(?m)^\s+uses:\s+' + [regex]::Escape($expectedAction) + '[ \t]*\r?$'
@@ -2088,6 +2100,16 @@ if (-not $unityLockCleanupIsGated) {
     Write-Info "Checked Unity lock cleanup runs only after acquisition and before release."
 }
 
+$runnerTempReturnLogInput = [regex]::Escape('prior-return-log-path: ${{ runner.temp }}/unity-return-${{ matrix.unity-version }}-${{ matrix.test-mode }}.log')
+$testRunnerTempReturnLogs = [regex]::Matches($workflowContent, $runnerTempReturnLogInput).Count
+$benchmarkRunnerTempReturnLogs = [regex]::Matches(($benchmarksWorkflowLines -join "`n"), $runnerTempReturnLogInput).Count
+if ($testRunnerTempReturnLogs -ne 3 -or $benchmarkRunnerTempReturnLogs -ne 1) {
+    Write-Host "::error file=scripts/tests/test-unity-workflow-matrix-contract.ps1::run-ci-tests.ps1 cleanup proof must come from its non-uploaded runner-temp return log (tests=$testRunnerTempReturnLogs, benchmarks=$benchmarkRunnerTempReturnLogs)."
+    $failed = $true
+} elseif ($VerboseOutput) {
+    Write-Info 'Checked run-ci-tests workflows classify the runner-temp Unity return log.'
+}
+
 $resourceSafeFalseAssignments = [regex]::Matches(
     $returnUnityLicenseActionContent,
     '(?m)^\s+"resource-safe=false"\s+\|\s+Out-File\s+-FilePath\s+\$env:GITHUB_OUTPUT\s+-Append\s*$'
@@ -2096,26 +2118,49 @@ $resourceSafeTrueAssignments = [regex]::Matches(
     $returnUnityLicenseActionContent,
     '(?m)^\s+"resource-safe=true"\s+\|\s+Out-File\s+-FilePath\s+\$env:GITHUB_OUTPUT\s+-Append\s*$'
 )
+$priorReturnEvidenceGuards = [regex]::Matches(
+    $returnUnityLicenseActionContent,
+    '(?m)^\s+if \(Test-PriorReturnEvidence\) \{\s*$'
+)
 $returnActionResourceProofContract = (
     $returnUnityLicenseActionContent -match '(?ms)^outputs:\s*$.*?^\s+resource-safe:\s*$.*?^\s+value:\s+\$\{\{ steps\.return_license\.outputs\.resource-safe \}\}\s*$' -and
+    $returnUnityLicenseActionContent -match '(?ms)^outputs:\s*$.*?^\s+resource-cleanup-status:\s*$.*?^\s+value:\s+\$\{\{ steps\.return_license\.outputs\.resource-cleanup-status \}\}\s*$' -and
+    $returnUnityLicenseActionContent -match '(?ms)^outputs:\s*$.*?^\s+resource-health:\s*$.*?^\s+value:\s+\$\{\{ steps\.return_license\.outputs\.resource-health \}\}\s*$' -and
+    $returnUnityLicenseActionContent -match '(?ms)^outputs:\s*$.*?^\s+resource-reason:\s*$.*?^\s+value:\s+\$\{\{ steps\.return_license\.outputs\.resource-reason \}\}\s*$' -and
     $returnUnityLicenseActionContent -match '(?ms)- name: Return Unity license\s*\r?\n\s+id:\s+return_license\s*\r?\n' -and
     $resourceSafeFalseAssignments.Count -eq 1 -and
-    $resourceSafeTrueAssignments.Count -eq 2 -and
+    $resourceSafeTrueAssignments.Count -eq 1 -and
     $returnUnityLicenseActionContent -match [regex]::Escape('. (Join-Path ''${{ github.action_path }}'' ''Classify-UnityLicenseReturn.ps1'')') -and
     $returnUnityLicenseActionContent -match '(?ms)try \{\s*"resource-safe=false"\s+\|\s+Out-File\s+-FilePath\s+\$env:GITHUB_OUTPUT\s+-Append' -and
-    $returnUnityLicenseActionContent -match '(?ms)if \(Test-UnityLicenseReturnResourceSafe -ExitCode \$exitCode -LogPath \$returnLog\) \{\s*"resource-safe=true"\s+\|\s+Out-File\s+-FilePath\s+\$env:GITHUB_OUTPUT\s+-Append' -and
-    $returnUnityLicenseActionContent -match '(?ms)\} else \{\s*"resource-safe=true"\s+\|\s+Out-File\s+-FilePath\s+\$env:GITHUB_OUTPUT\s+-Append\s+Write-Host "::notice::Returned the Unity license seat\."'
+    $returnUnityLicenseActionContent -match '(?m)^\s+"resource-cleanup-status=unknown"\s+\|\s+Out-File\s+-FilePath\s+\$env:GITHUB_OUTPUT\s+-Append\s*$' -and
+    $returnUnityLicenseActionContent -match '(?m)^\s+"resource-health=healthy"\s+\|\s+Out-File\s+-FilePath\s+\$env:GITHUB_OUTPUT\s+-Append\s*$' -and
+    $returnUnityLicenseActionContent -match '(?m)^\s+"resource-reason=return-missing-positive-evidence"\s+\|\s+Out-File\s+-FilePath\s+\$env:GITHUB_OUTPUT\s+-Append\s*$' -and
+    $returnUnityLicenseActionContent -match '(?ms)function Set-ConfirmedCleanupOutput \{.*?"resource-cleanup-status=confirmed".*?"resource-reason=cleanup-confirmed".*?\}' -and
+    $returnUnityLicenseActionContent -match '(?ms)function Test-PriorReturnEvidence \{.*?PRIOR_COMMAND_SUCCEEDED.*?Test-UnityLicenseReturnResourceSafe -ExitCode 0 -LogPath \$env:PRIOR_RETURN_LOG_PATH.*?\}' -and
+    $priorReturnEvidenceGuards.Count -eq 3 -and
+    $returnUnityLicenseActionContent -match '(?ms)if \(\[string\]::IsNullOrWhiteSpace\(\$env:UNITY_EMAIL\).*?\) \{\s+if \(Test-PriorReturnEvidence\) \{\s+Set-ConfirmedCleanupOutput' -and
+    $returnUnityLicenseActionContent -match '(?ms)\$currentReturnConfirmed = Test-UnityLicenseReturnResourceSafe -ExitCode \$exitCode -LogPath \$returnLog\s+\$priorReturnConfirmed = -not \$currentReturnConfirmed -and \(Test-PriorReturnEvidence\)\s+if \(\$currentReturnConfirmed -or \$priorReturnConfirmed\) \{\s+Set-ConfirmedCleanupOutput'
 )
 if (-not $returnActionResourceProofContract) {
-    Write-Host '::error file=.github/actions/return-unity-license/action.yml::Return action must default resource-safe to false and set it true only for exit code zero or the strict classifier allowlist.'
+    Write-Host '::error file=.github/actions/return-unity-license/action.yml::Return action must default cleanup to unknown and confirm it only from exact current or prior return evidence.'
     $failed = $true
 } elseif ($VerboseOutput) {
     Write-Info 'Checked return action emits conservative, non-masking cleanup proof.'
 }
 
 $classificationCases = @(
-    @{ Name = 'zero exit'; ExitCode = 0; Lines = @(); Expected = $true }
+    @{ Name = 'zero exit without positive evidence'; ExitCode = 0; Lines = @(); Expected = $false }
+    @{
+        Name = 'production entitlement and ULF return markers'
+        ExitCode = 0
+        Lines = @(
+            '[Licensing::Module] Successfully returned the entitlement license'
+            '[Licensing::Client] Successfully returned ULF license with serial number : <redacted>'
+        )
+        Expected = $true
+    }
     @{ Name = 'dual exact normalized markers'; ExitCode = 1; Lines = @('  Successfully returned the entitlement license  ', "`tSerial number unavailable for ULF return"); Expected = $true }
+    @{ Name = 'case-altered markers'; ExitCode = 0; Lines = @('Successfully Returned the entitlement license', 'Serial Number unavailable for ULF return'); Expected = $false }
     @{ Name = 'generic success'; ExitCode = 1; Lines = @('License return succeeded'); Expected = $false }
     @{ Name = 'one marker'; ExitCode = 1; Lines = @('Successfully returned the entitlement license'); Expected = $false }
     @{ Name = 'negated marker substrings'; ExitCode = 1; Lines = @('Not Successfully returned the entitlement license', 'Not Serial number unavailable for ULF return'); Expected = $false }

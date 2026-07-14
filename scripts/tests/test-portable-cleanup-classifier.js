@@ -46,7 +46,10 @@ assert.doesNotMatch(action, /shell:\s*pwsh/u);
 assert.match(action, /resource-cleanup-status/u);
 
 const workflow = fs.readFileSync(path.join(root, ".github/workflows/unity-tests.yml"), "utf8");
+const trustedPullRequestGuard =
+  /github\.event_name\s*!=\s*'pull_request'\s*\|\|\s*github\.event\.pull_request\.head\.repo\.full_name\s*==\s*github\.repository/u;
 for (const job of [
+  "matrix-config",
   "runner-preflight",
   "unity-tests",
   "unity-tests-standalone",
@@ -57,15 +60,26 @@ for (const job of [
   assert.notEqual(start, -1, `missing job ${job}`);
   const next = workflow.slice(start + 2).search(/^  [a-z0-9-]+:/mu);
   const block = workflow.slice(start, next === -1 ? undefined : start + 2 + next);
+  const jobIf = block.match(/^    if:\s*>-\s*\r?\n(?<expression>(?:^      .*\r?\n?)+)/mu);
+  assert.ok(jobIf, `${job} must have a multiline job-level if expression`);
   assert.match(
-    block,
-    /github\.event_name != 'pull_request'/u,
-    `${job} must not run licensed PR code`
+    jobIf.groups.expression,
+    trustedPullRequestGuard,
+    `${job} must admit same-repository PRs and reject forks`
   );
+  assert.doesNotMatch(
+    jobIf.groups.expression,
+    /github\.event_name\s*!=\s*'pull_request'\s*&&/u,
+    `${job} must not reject every pull request`
+  );
+  assert.match(block, /^    environment:\s*unity-license\s*$/mu, `${job} must use unity-license`);
 }
 assert.match(
   workflow,
-  /- name: Check for required licensed workflow secrets[\s\S]*?if: \$\{\{ github\.event_name != 'pull_request' \}\}/u
+  new RegExp(
+    String.raw`- name: Check for required licensed workflow secrets[\s\S]*?if:\s*(?:>-\s*)?\$\{\{\s*${trustedPullRequestGuard.source}\s*\}\}`,
+    "u"
+  )
 );
 
 process.stdout.write("Portable Unity cleanup classifier tests passed.\n");

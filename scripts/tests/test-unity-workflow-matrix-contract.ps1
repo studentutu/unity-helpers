@@ -8,7 +8,7 @@ param([switch]$VerboseOutput)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$buildLockActionCommit = 'cfdcf6e67d7720824d21c37aa6a8b9e70dbdd2af'
+$buildLockActionCommit = 'f39ee38533b20592aa0fdf72b3e18d07c46325f3'
 
 function Write-Info($msg) {
     if ($VerboseOutput) { Write-Host "[test-unity-workflow-matrix-contract] $msg" -ForegroundColor Cyan }
@@ -2404,7 +2404,17 @@ $classificationCases = @(
         )
         Expected = $true
     }
+    @{
+        Name = 'current Unity entitlement and ULF-unavailable markers'
+        ExitCode = 0
+        Lines = @(
+            '[Licensing::Module] Successfully returned the entitlement license'
+            '[Licensing::Module] Error: Serial number unavailable for ULF return; skipping operation'
+        )
+        Expected = $true
+    }
     @{ Name = 'dual exact normalized markers'; ExitCode = 1; Lines = @('  Successfully returned the entitlement license  ', "`tSerial number unavailable for ULF return"); Expected = $true }
+    @{ Name = 'ULF-unavailable marker only'; ExitCode = 0; Lines = @('[Licensing::Module] Error: Serial number unavailable for ULF return; skipping operation'); Expected = $false }
     @{ Name = 'case-altered markers'; ExitCode = 0; Lines = @('Successfully Returned the entitlement license', 'Serial Number unavailable for ULF return'); Expected = $false }
     @{ Name = 'generic success'; ExitCode = 1; Lines = @('License return succeeded'); Expected = $false }
     @{ Name = 'one marker'; ExitCode = 1; Lines = @('Successfully returned the entitlement license'); Expected = $false }

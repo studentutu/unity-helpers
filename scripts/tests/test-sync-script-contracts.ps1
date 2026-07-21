@@ -2004,35 +2004,75 @@ function Run-ReleasePublishWorkflowBudgetContractTests {
   $repoRoot = Get-RepoRoot
   $workflowPath = Join-Path $repoRoot '.github/workflows/release.yml'
   $workflowContent = Get-Content -Path $workflowPath -Raw
+  $unityTestsWorkflowPath = Join-Path $repoRoot '.github/workflows/unity-tests.yml'
+  $unityTestsWorkflowContent = Get-Content -Path $unityTestsWorkflowPath -Raw
   $exporterPath = Join-Path $repoRoot 'scripts/unity/export-unitypackage.sh'
   $exporterContent = Get-Content -Path $exporterPath -Raw
   $dockerRunnerPath = Join-Path $repoRoot 'scripts/unity/run-unity-docker.sh'
   $dockerRunnerContent = Get-Content -Path $dockerRunnerPath -Raw
 
-  $jobTimeoutMatch = [regex]::Match(
-    $workflowContent,
-    '(?ms)^\s*unitypackage:\s*.*?^\s*timeout-minutes:\s*(?<minutes>\d+)\s*$'
-  )
-  $lockTimeoutMatch = [regex]::Match(
-    $workflowContent,
-    '(?ms)^\s*- name: Acquire organization Unity lock\s*\r?\n(?:(?!^\s*- name:).)*?^\s+with:\s*\r?\n(?:(?!^\s*- name:).)*?^\s+timeout-minutes:\s*["'']?(?<minutes>\d+)["'']?\s*$'
-  )
+  $releaseJob = [regex]::Match($workflowContent, '(?ms)^  unitypackage:\s*$.*?(?=^  [A-Za-z0-9_-]+:\s*$|\z)').Value
+  $smokeJob = [regex]::Match($unityTestsWorkflowContent, '(?ms)^  unitypackage-smoke:\s*$.*?(?=^  [A-Za-z0-9_-]+:\s*$|\z)').Value
   $unityTimeoutMatch = [regex]::Match(
     $exporterContent,
     'UNITY_TIMEOUT="\$\{UNITY_TIMEOUT:-(?<seconds>\d+)\}"'
   )
+  $activationTimeoutMatch = [regex]::Match($dockerRunnerContent, 'UNITY_LICENSE_ACTIVATION_TIMEOUT="\$\{UNITY_LICENSE_ACTIVATION_TIMEOUT:-(?<seconds>\d+)\}"')
+  $returnTimeoutMatch = [regex]::Match($dockerRunnerContent, 'UNITY_LICENSE_RETURN_TIMEOUT="\$\{UNITY_LICENSE_RETURN_TIMEOUT:-(?<seconds>\d+)\}"')
+  $terminationGraceMatch = [regex]::Match($dockerRunnerContent, 'UNITY_TERMINATION_GRACE_SECONDS="\$\{UNITY_TERMINATION_GRACE_SECONDS:-(?<seconds>\d+)\}"')
+  $containerWrapperMatch = [regex]::Match($dockerRunnerContent, 'UNITY_CONTAINER_WRAPPER_SECONDS="\$\{UNITY_CONTAINER_WRAPPER_SECONDS:-(?<seconds>\d+)\}"')
+  $dockerClientTimeoutMatch = [regex]::Match($dockerRunnerContent, 'UNITY_DOCKER_CLIENT_TIMEOUT="\$\{UNITY_DOCKER_CLIENT_TIMEOUT:-(?<seconds>\d+)\}"')
+  $dockerClientGraceMatch = [regex]::Match($dockerRunnerContent, 'UNITY_DOCKER_CLIENT_KILL_GRACE="\$\{UNITY_DOCKER_CLIENT_KILL_GRACE:-(?<seconds>\d+)\}"')
 
-  $jobTimeoutMinutes = if ($jobTimeoutMatch.Success) { [int]$jobTimeoutMatch.Groups['minutes'].Value } else { 0 }
-  $lockTimeoutMinutes = if ($lockTimeoutMatch.Success) { [int]$lockTimeoutMatch.Groups['minutes'].Value } else { 0 }
   $unityTimeoutMinutes = if ($unityTimeoutMatch.Success) { [int][Math]::Ceiling(([int]$unityTimeoutMatch.Groups['seconds'].Value) / 60.0) } else { 0 }
-  $minimumOverheadMinutes = 30
-  $requiredJobTimeoutMinutes = $lockTimeoutMinutes + $unityTimeoutMinutes + $minimumOverheadMinutes
-  $timeoutBudgetIsCoherent = (
-    $jobTimeoutMatch.Success -and
-    $lockTimeoutMatch.Success -and
-    $unityTimeoutMatch.Success -and
-    $jobTimeoutMinutes -ge $requiredJobTimeoutMinutes
-  )
+  $activationTimeoutSeconds = if ($activationTimeoutMatch.Success) { [int]$activationTimeoutMatch.Groups['seconds'].Value } else { 0 }
+  $returnTimeoutSeconds = if ($returnTimeoutMatch.Success) { [int]$returnTimeoutMatch.Groups['seconds'].Value } else { 0 }
+  $terminationGraceSeconds = if ($terminationGraceMatch.Success) { [int]$terminationGraceMatch.Groups['seconds'].Value } else { 0 }
+  $containerWrapperSeconds = if ($containerWrapperMatch.Success) { [int]$containerWrapperMatch.Groups['seconds'].Value } else { 0 }
+  $dockerClientTimeoutSeconds = if ($dockerClientTimeoutMatch.Success) { [int]$dockerClientTimeoutMatch.Groups['seconds'].Value } else { 0 }
+  $dockerClientGraceSeconds = if ($dockerClientGraceMatch.Success) { [int]$dockerClientGraceMatch.Groups['seconds'].Value } else { 0 }
+  $minimumContainerSeconds = (2 * $activationTimeoutSeconds) + (60 * $unityTimeoutMinutes) + $returnTimeoutSeconds + (4 * $terminationGraceSeconds) + $containerWrapperSeconds
+  $containerStopSeconds = (2 * $terminationGraceSeconds) + $returnTimeoutSeconds + $containerWrapperSeconds
+  $dockerCleanupSeconds = $containerStopSeconds + (3 * $dockerClientTimeoutSeconds) + (3 * $dockerClientGraceSeconds)
+  $minimumExportWrapperMinutes = 5
+  $requiredExportStepTimeoutMinutes = [int][Math]::Ceiling(($minimumContainerSeconds + $terminationGraceSeconds + $dockerCleanupSeconds) / 60.0) + $minimumExportWrapperMinutes
+  $minimumSetupMinutes = 10
+  $minimumImplicitPostMinutes = 5
+  $minimumUnallocatedSlackMinutes = 10
+
+  $timeoutBudgetFailures = @()
+  foreach ($caller in @(
+      @{ Name = 'release'; Job = $releaseJob; ExportStep = 'Export Unity package'; HasArtifactUpload = $true },
+      @{ Name = 'unitypackage-smoke'; Job = $smokeJob; ExportStep = 'Export Unity package smoke artifact'; HasArtifactUpload = $false }
+    )) {
+    $jobTimeoutMatch = [regex]::Match($caller.Job, '(?m)^    timeout-minutes:\s*(?<minutes>\d+)\s*$')
+    $lockTimeoutMatch = [regex]::Match($caller.Job, '(?ms)^\s+- name: Acquire organization Unity lock\s*\r?\n(?:(?!^\s*- name:).)*?^\s+timeout-minutes:\s*["'']?(?<minutes>\d+)["'']?\s*$')
+    $exportStepTimeoutMatch = [regex]::Match($caller.Job, '(?ms)^\s*- name: ' + [regex]::Escape($caller.ExportStep) + '\s*\r?\n(?:(?!^\s*- name:).)*?^\s+timeout-minutes:\s*(?<minutes>\d+)\s*$')
+    $returnStepTimeoutMatch = [regex]::Match($caller.Job, '(?ms)^\s*- name: Return Unity license\s*\r?\n(?:(?!^\s*- name:).)*?^\s+timeout-minutes:\s*(?<minutes>\d+)\s*$')
+    $releaseStepTimeoutMatch = [regex]::Match($caller.Job, '(?ms)^\s*- name: Release organization Unity lock\s*\r?\n(?:(?!^\s*- name:).)*?^\s+timeout-minutes:\s*(?<minutes>\d+)\s*$')
+    $dumpTimeoutMatch = [regex]::Match($caller.Job, '(?ms)^\s*- name: Dump Unity export log tail on failure or cancellation\s*\r?\n(?:(?!^\s*- name:).)*?^\s+timeout-minutes:\s*(?<minutes>\d+)\s*$')
+    $diagnosticUploadTimeoutMatch = [regex]::Match($caller.Job, '(?ms)^\s*- name: Upload .*?diagnostics\s*\r?\n(?:(?!^\s*- name:).)*?^\s+timeout-minutes:\s*(?<minutes>\d+)\s*$')
+    $artifactUploadTimeoutMatch = if ($caller.HasArtifactUpload) {
+      [regex]::Match($caller.Job, '(?ms)^\s*- name: Upload \.unitypackage artifact\s*\r?\n(?:(?!^\s*- name:).)*?^\s+timeout-minutes:\s*(?<minutes>\d+)\s*$')
+    } else { $null }
+
+    $jobMinutes = if ($jobTimeoutMatch.Success) { [int]$jobTimeoutMatch.Groups['minutes'].Value } else { 0 }
+    $lockMinutes = if ($lockTimeoutMatch.Success) { [int]$lockTimeoutMatch.Groups['minutes'].Value } else { 0 }
+    $exportMinutes = if ($exportStepTimeoutMatch.Success) { [int]$exportStepTimeoutMatch.Groups['minutes'].Value } else { 0 }
+    $returnMinutes = if ($returnStepTimeoutMatch.Success) { [int]$returnStepTimeoutMatch.Groups['minutes'].Value } else { 0 }
+    $releaseMinutes = if ($releaseStepTimeoutMatch.Success) { [int]$releaseStepTimeoutMatch.Groups['minutes'].Value } else { 0 }
+    $dumpMinutes = if ($dumpTimeoutMatch.Success) { [int]$dumpTimeoutMatch.Groups['minutes'].Value } else { 0 }
+    $diagnosticUploadMinutes = if ($diagnosticUploadTimeoutMatch.Success) { [int]$diagnosticUploadTimeoutMatch.Groups['minutes'].Value } else { 0 }
+    $artifactUploadMinutes = if ($artifactUploadTimeoutMatch -and $artifactUploadTimeoutMatch.Success) { [int]$artifactUploadTimeoutMatch.Groups['minutes'].Value } else { 0 }
+    $failureCleanupMinutes = $returnMinutes + $releaseMinutes + $dumpMinutes + $diagnosticUploadMinutes
+    $successCleanupMinutes = $returnMinutes + $releaseMinutes + $artifactUploadMinutes
+    $requiredJobMinutes = $minimumSetupMinutes + $lockMinutes + $exportMinutes + [Math]::Max($failureCleanupMinutes, $successCleanupMinutes) + $minimumImplicitPostMinutes + $minimumUnallocatedSlackMinutes
+
+    if ($lockMinutes -le 0 -or $lockMinutes -gt 180 -or $exportMinutes -lt $requiredExportStepTimeoutMinutes -or $returnMinutes -le 0 -or $releaseMinutes -le 0 -or $dumpMinutes -le 0 -or $diagnosticUploadMinutes -le 0 -or ($caller.HasArtifactUpload -and $artifactUploadMinutes -le 0) -or $jobMinutes -lt $requiredJobMinutes) {
+      $timeoutBudgetFailures += "$($caller.Name): job=${jobMinutes}m/${requiredJobMinutes}m required; lock=${lockMinutes}m (max 180m); export=${exportMinutes}m/${requiredExportStepTimeoutMinutes}m required; cleanup failure/success=${failureCleanupMinutes}m/${successCleanupMinutes}m"
+    }
+  }
+  $timeoutBudgetIsCoherent = $unityTimeoutMatch.Success -and $activationTimeoutMatch.Success -and $returnTimeoutMatch.Success -and $terminationGraceMatch.Success -and $containerWrapperMatch.Success -and $dockerClientTimeoutMatch.Success -and $dockerClientGraceMatch.Success -and $timeoutBudgetFailures.Count -eq 0
   $teeFailureMessageIndex = $exporterContent.IndexOf('Failed to persist Unity package export log with tee exit code')
   $unityFailureMessageIndex = $exporterContent.IndexOf('Unity package export failed with exit code')
   $exporterPersistsUnityLog = (
@@ -2054,8 +2094,39 @@ function Run-ReleasePublishWorkflowBudgetContractTests {
     $workflowContent.Contains('unitypackage-export-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}') -and
     $workflowContent.Contains('.artifacts/unity/unitypackage-project/unitypackage-output/*.log')
   )
+  $containerCleanupIndex = $dockerRunnerContent.IndexOf('cleanup_unity_container()')
+  $clientSettlementIndex = if ($containerCleanupIndex -ge 0) { $dockerRunnerContent.IndexOf('terminate_docker_run_client', $containerCleanupIndex) } else { -1 }
+  $cleanupInspectIndex = if ($containerCleanupIndex -ge 0) { $dockerRunnerContent.IndexOf('local inspect_output=""', $containerCleanupIndex) } else { -1 }
+  $cleanupSettlesInitiatingClient = (
+    $containerCleanupIndex -ge 0 -and
+    $clientSettlementIndex -gt $containerCleanupIndex -and
+    $cleanupInspectIndex -gt $clientSettlementIndex
+  )
   $dockerRunnerRedactsAndReturnsSerialLicense = (
+    $cleanupSettlesInitiatingClient -and
     $dockerRunnerContent.Contains('redact_unity_license_output()') -and
+    $dockerRunnerContent.Contains('run_with_watchdog()') -and
+    $dockerRunnerContent.Contains('handle_container_signal()') -and
+    $dockerRunnerContent.Contains('start_supervised_process()') -and
+    $dockerRunnerContent.Contains('trap "defer_container_signal 143" TERM') -and
+    $dockerRunnerContent.Contains('WATCHDOG_CAPTURE_FILE="$(mktemp /tmp/unity-watchdog.XXXXXX)"') -and
+    $dockerRunnerContent.Contains('set -m') -and
+    $dockerRunnerContent.Contains('start_supervised_process bash -c \"\${MAIN_COMMAND_SCRIPT}\"') -and
+    $dockerRunnerContent.Contains('kill -TERM -- "-${MAIN_PROCESS_GROUP_PID}"') -and
+    $dockerRunnerContent.Contains('kill -KILL -- "-${MAIN_PROCESS_GROUP_PID}"') -and
+    $dockerRunnerContent.Contains('return_serial_license || true') -and
+    $dockerRunnerContent.Contains('run_docker_client_with_watchdog()') -and
+    $dockerRunnerContent.Contains('start_docker_run_client()') -and
+    $dockerRunnerContent.Contains('trap "defer_interrupt 143" TERM') -and
+    $dockerRunnerContent.Contains('local registration_deadline=$((SECONDS + UNITY_DOCKER_CLIENT_TIMEOUT))') -and
+    $dockerRunnerContent.Contains('local registration_remaining=$((registration_deadline - SECONDS))') -and
+    $dockerRunnerContent.Contains('--signal=TERM') -and
+    $dockerRunnerContent.Contains('--kill-after="${UNITY_TERMINATION_GRACE_SECONDS}"') -and
+    $dockerRunnerContent.Contains('UNITY_CONTAINER_NAME="unity-helpers-$$-$(date +%s%N)"') -and
+    $dockerRunnerContent.Contains("trap cleanup_unity_container EXIT") -and
+    $dockerRunnerContent.Contains('docker stop --timeout "${UNITY_CONTAINER_STOP_SECONDS}" "${UNITY_CONTAINER_NAME}"') -and
+    $dockerRunnerContent.Contains("'docker rm -f'") -and
+    $dockerRunnerContent.Contains('docker rm -f "${UNITY_CONTAINER_NAME}"') -and
     $dockerRunnerContent.Contains('[REDACTED-UNITY-SERIAL]') -and
     $dockerRunnerContent.Contains('[REDACTED-UNITY-EMAIL]') -and
     $dockerRunnerContent.Contains('printf "%s\n" "${SERIAL_OUTPUT}" | redact_unity_license_output') -and
@@ -2065,13 +2136,13 @@ function Run-ReleasePublishWorkflowBudgetContractTests {
     $dockerRunnerContent.Contains('-password "${UNITY_PASSWORD}"') -and
     $dockerRunnerContent.Contains('Successfully returned the entitlement license') -and
     $dockerRunnerContent.Contains('Serial number unavailable for ULF return') -and
-    $dockerRunnerContent.Contains('exit "${RETURN_EXIT_CODE}"')
+    $dockerRunnerContent.Contains('return "${RETURN_EXIT_CODE}"')
   )
 
   Write-TestResult `
-    -TestName 'release unitypackage job timeout covers lock wait and export budget' `
+    -TestName 'release Unity export step and job timeouts preserve cleanup budget' `
     -Passed $timeoutBudgetIsCoherent `
-    -Message "Expected unitypackage job timeout to be at least lock timeout + Unity export timeout + ${minimumOverheadMinutes}m overhead. Job=${jobTimeoutMinutes}m, lock=${lockTimeoutMinutes}m, Unity=${unityTimeoutMinutes}m, required=${requiredJobTimeoutMinutes}m."
+    -Message "Expected both exporter callers to cover bounded activation, Unity, TERM/KILL, return, and container teardown plus ${minimumExportWrapperMinutes}m step overhead; each job must preserve setup, cleanup, implicit-post, and ${minimumUnallocatedSlackMinutes}m unallocated slack. $($timeoutBudgetFailures -join '; ')"
 
   Write-TestResult `
     -TestName 'unitypackage exporter persists Unity log and preserves exit code' `

@@ -8,11 +8,58 @@ param([switch]$VerboseOutput)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$buildLockActionCommit = '59a2fa98224569e5a697f271a3ac4b866c53ac2c'
-$buildLockActionVersion = 'v1.8.3'
+$buildLockActionCommit = 'a00614ace745152a659c5c2654f7cefb68a5a628'
+$buildLockActionVersion = 'v1.9.1'
+$acquireBuildLockActionCommit = 'a00614ace745152a659c5c2654f7cefb68a5a628'
+$acquireBuildLockActionComment = 'v1.9.1'
+$currentPrHeadGuardCommit = 'a00614ace745152a659c5c2654f7cefb68a5a628'
 
 function Write-Info($msg) {
     if ($VerboseOutput) { Write-Host "[test-unity-workflow-matrix-contract] $msg" -ForegroundColor Cyan }
+}
+
+function Test-PrCapableAcquireIdentityInputs {
+    param(
+        [Parameter(Mandatory = $true)][string]$WorkflowContent,
+        [Parameter(Mandatory = $true)][hashtable]$Jobs
+    )
+
+    if ($WorkflowContent -notmatch '(?m)^  pull_request:\s*$') {
+        return $true
+    }
+
+    foreach ($job in $Jobs.GetEnumerator()) {
+        [string]$jobText = $job.Value
+        $acquireActionCount = [regex]::Matches(
+            $jobText,
+            'Ambiguous-Interactive/ambiguous-organization-build-lock/\.github/actions/acquire-build-lock@'
+        ).Count
+        if ($acquireActionCount -eq 0) {
+            continue
+        }
+
+        $acquireSteps = @([regex]::Matches(
+                $jobText,
+                '(?ms)^      - name: Acquire organization Unity lock\s*$.*?(?=^      - name:|\z)'
+            ))
+        if ($acquireSteps.Count -ne $acquireActionCount) {
+            return $false
+        }
+
+        foreach ($acquireStep in $acquireSteps) {
+            foreach ($expectedInput in @(
+                    'github-token: ${{ github.token }}',
+                    'pull-request-number: ${{ github.event.pull_request.number }}',
+                    'expected-head-sha: ${{ github.event.pull_request.head.sha }}'
+                )) {
+                if ([regex]::Matches($acquireStep.Value, "(?m)^          $([regex]::Escape($expectedInput))\s*$").Count -ne 1) {
+                    return $false
+                }
+            }
+        }
+    }
+
+    return $true
 }
 
 function Test-RunnerBootstrapPassesMaintenanceForce {
@@ -267,16 +314,17 @@ function Test-UnityLockCleanupIsGated {
         [Parameter(Mandatory = $true)][hashtable]$LicensedWorkStepNames
     )
 
-    $acquireUses = "Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@$buildLockActionCommit"
+    $acquireUses = "Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@$acquireBuildLockActionCommit"
     $releaseUses = "Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@$buildLockActionCommit"
     $returnUses = './.github/actions/return-unity-license'
     $requiredCleanupGate = 'if: ${{ always() && steps.unity_lock.outcome == ''success'' }}'
     $requiredReleaseGate = 'if: ${{ always() && (steps.unity_lock.outcome == ''success'' || steps.unity_lock.outcome == ''failure'' || steps.unity_lock.outcome == ''cancelled'') }}'
+    $acquireUsesLineSuffix = '[ \t]+# ' + [regex]::Escape($acquireBuildLockActionComment) + '[ \t]*\r?$'
     $buildLockUsesLineSuffix = '[ \t]+# ' + [regex]::Escape($buildLockActionVersion) + '[ \t]*\r?$'
 
-    $acquirePattern = '(?m)- name: Acquire organization Unity lock\s*\r?\n\s+id:\s+unity_lock\s*\r?\n(?:[^\r\n]*\r?\n)*?\s+uses:\s+' + [regex]::Escape($acquireUses) + $buildLockUsesLineSuffix
+    $acquirePattern = '(?m)- name: Acquire organization Unity lock\s*\r?\n\s+id:\s+unity_lock\s*\r?\n(?:[^\r\n]*\r?\n)*?\s+uses:\s+' + [regex]::Escape($acquireUses) + $acquireUsesLineSuffix
     $returnPattern = '(?ms)- name: Return Unity license\s*\r?\n\s+id:\s+return_unity_license\s*\r?\n\s+' + [regex]::Escape($requiredCleanupGate) + '\s*\r?\n\s+timeout-minutes:\s+5\s*\r?\n\s+continue-on-error:\s+true\s*\r?\n\s+uses:\s+' + [regex]::Escape($returnUses)
-    $releasePattern = '(?m)- name: Release organization Unity lock\s*\r?\n\s+' + [regex]::Escape($requiredReleaseGate) + '\s*\r?\n\s+uses:\s+' + [regex]::Escape($releaseUses) + $buildLockUsesLineSuffix
+    $releasePattern = '(?m)- name: Release organization Unity lock\s*\r?\n\s+' + [regex]::Escape($requiredReleaseGate) + '\s*\r?\n\s+timeout-minutes:\s+5\s*\r?\n\s+uses:\s+' + [regex]::Escape($releaseUses) + $buildLockUsesLineSuffix
     $failures = @()
 
     foreach ($job in $Jobs.GetEnumerator()) {
@@ -319,15 +367,35 @@ function Test-UnityLockCleanupIsGated {
             $failures += "$($job.Key): return-unity-license must classify the licensed command's log and successful outcome"
         }
         if ($jobText -notmatch $releasePattern) {
-            $failures += "$($job.Key): release-build-lock must run after every non-skipped acquire outcome"
+            $failures += "$($job.Key): release-build-lock must be five-minute bounded and run after every non-skipped acquire outcome"
         }
         if ($declaredLicensedWorkSteps.Count -eq 0) {
             $failures += "$($job.Key): every lock-owning job must declare at least one licensed-work step"
         }
         foreach ($licensedWorkStepName in $declaredLicensedWorkSteps) {
             $licensedWorkIndex = $jobText.IndexOf("- name: $licensedWorkStepName", [StringComparison]::Ordinal)
+            $licensedWorkStep = [regex]::Match(
+                $jobText,
+                '(?ms)^\s+- name: ' + [regex]::Escape($licensedWorkStepName) + '\s*$.*?(?=^\s+- name:|\z)'
+            )
             if (-not (0 -le $acquireIndex -and $acquireIndex -lt $licensedWorkIndex -and $licensedWorkIndex -lt $returnIndex -and $returnIndex -lt $releaseIndex)) {
                 $failures += "$($job.Key): lock lifecycle order must be acquire, licensed work '$licensedWorkStepName', identified cleanup, then release"
+            }
+            $timeoutMatch = [regex]::Match($licensedWorkStep.Value, '(?m)^\s+timeout-minutes:\s+(?<value>\S.*)$')
+            $timeoutValue = if ($timeoutMatch.Success) { $timeoutMatch.Groups['value'].Value.Trim() } else { '' }
+            $literalTimeout = 0
+            $conditionalTimeoutMatch = [regex]::Match(
+                $timeoutValue,
+                '^\$\{\{\s*\(matrix\.test-mode == ''standalone'' && (?<standalone>\d+)\) \|\| (?<default>\d+)\s*\}\}$'
+            )
+            $hasPositiveTimeout = (
+                ([int]::TryParse($timeoutValue, [ref]$literalTimeout) -and $literalTimeout -gt 0) -or
+                ($conditionalTimeoutMatch.Success -and
+                    [int]$conditionalTimeoutMatch.Groups['standalone'].Value -gt 0 -and
+                    [int]$conditionalTimeoutMatch.Groups['default'].Value -gt 0)
+            )
+            if (-not $licensedWorkStep.Success -or -not $hasPositiveTimeout) {
+                $failures += "$($job.Key): licensed work '$licensedWorkStepName' must have a positive literal or contract-evaluable step timeout so a hung Unity process cannot retain the shared seat until the job timeout"
             }
         }
         if (-not $acquireHolder.Success -or -not $releaseHolder.Success -or $acquireHolder.Groups['value'].Value.Trim() -ne $releaseHolder.Groups['value'].Value.Trim()) {
@@ -376,12 +444,13 @@ function Test-UnityLockAppConfiguration {
         $isAcquireStep = $stepText.Contains('Acquire organization Unity lock')
         $stepKind = if ($isAcquireStep) { 'Acquire' } else { 'Release' }
         $expectedAction = if ($isAcquireStep) {
-            "Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@$buildLockActionCommit"
+            "Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@$acquireBuildLockActionCommit"
         } else {
             "Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@$buildLockActionCommit"
         }
 
-        $exactActionPattern = '(?m)^\s+uses:\s+' + [regex]::Escape($expectedAction) + '[ \t]+# ' + [regex]::Escape($buildLockActionVersion) + '[ \t]*\r?$'
+        $expectedComment = if ($isAcquireStep) { $acquireBuildLockActionComment } else { $buildLockActionVersion }
+        $exactActionPattern = '(?m)^\s+uses:\s+' + [regex]::Escape($expectedAction) + '[ \t]+# ' + [regex]::Escape($expectedComment) + '[ \t]*\r?$'
         if ($stepText -notmatch $exactActionPattern) {
             $failures += "$stepKind lock step must use $expectedAction"
         }
@@ -2320,15 +2389,138 @@ if ($sparseRegistryExitCode -ne 0) {
     Write-Info "Checked Windows runner bootstrap sparse uninstall registry entries."
 }
 
-$hasPrCancelConcurrency = (
+$preservesLicensedPrRuns = (
     $workflowContent.Contains('group: unity-tests-${{ github.event.pull_request.number || github.ref }}') -and
-    $workflowContent.Contains('cancel-in-progress: ${{ github.event_name == ''pull_request'' }}')
+    $workflowContent.Contains('cancel-in-progress: false')
 )
-if (-not $hasPrCancelConcurrency) {
-    Write-Host "::error file=.github/workflows/unity-tests.yml::Unity Tests must cancel superseded pull_request runs so old iterations do not keep the organization Unity runner occupied."
+if (-not $preservesLicensedPrRuns) {
+    Write-Host "::error file=.github/workflows/unity-tests.yml::Unity Tests must not cancel an in-progress licensed run because cancellation can skip license return and lock release cleanup."
     $failed = $true
 } elseif ($VerboseOutput) {
-    Write-Info "Checked Unity Tests pull_request concurrency cancellation contract."
+    Write-Info "Checked Unity Tests preserves in-progress licensed runs."
+}
+
+$currentPrHeadGuardUses = "Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/require-current-pr-head@$currentPrHeadGuardCommit"
+$licensedJobIds = @(
+    'unity-tests',
+    'unity-tests-standalone',
+    'unity-tests-single-threaded',
+    'unitypackage-smoke'
+)
+foreach ($licensedJobId in $licensedJobIds) {
+    if (-not $jobTexts.ContainsKey($licensedJobId)) {
+        Write-Host "::error file=.github/workflows/unity-tests.yml::Missing licensed job '$licensedJobId' while validating current-PR-head guards."
+        $failed = $true
+        continue
+    }
+
+    $licensedJob = [string]$jobTexts[$licensedJobId]
+    $guardSteps = @([regex]::Matches(
+            $licensedJob,
+            '(?ms)^\s+- name: Require current PR head before (?:setup|lock acquisition)\s*$.*?(?=^\s+- name:|\z)'
+        ))
+    $setupGuardIndex = $licensedJob.IndexOf('- name: Require current PR head before setup', [StringComparison]::Ordinal)
+    $lockGuardIndex = $licensedJob.IndexOf('- name: Require current PR head before lock acquisition', [StringComparison]::Ordinal)
+    $acquireIndex = $licensedJob.IndexOf('- name: Acquire organization Unity lock', [StringComparison]::Ordinal)
+    $nextStepAfterLockGuard = if ($lockGuardIndex -ge 0) {
+        $licensedJob.IndexOf('- name:', $lockGuardIndex + 1, [StringComparison]::Ordinal)
+    } else {
+        -1
+    }
+    $firstStepIndex = $licensedJob.IndexOf('- name:', [StringComparison]::Ordinal)
+    $guardInputsAreExact = (
+        $guardSteps.Count -eq 2 -and
+        @($guardSteps | Where-Object {
+                $_.Value.Contains("uses: $currentPrHeadGuardUses") -and
+                $_.Value.Contains('github-token: ${{ github.token }}') -and
+                $_.Value.Contains('pull-request-number: ${{ github.event.pull_request.number }}') -and
+                $_.Value.Contains('expected-head-sha: ${{ github.event.pull_request.head.sha }}')
+            }).Count -eq 2
+    )
+
+    if (
+        $setupGuardIndex -lt 0 -or
+        $setupGuardIndex -ne $firstStepIndex -or
+        $lockGuardIndex -lt 0 -or
+        $acquireIndex -lt 0 -or
+        $nextStepAfterLockGuard -ne $acquireIndex -or
+        -not $guardInputsAreExact
+    ) {
+        Write-Host "::error file=.github/workflows/unity-tests.yml::Licensed job '$licensedJobId' must use the exact pinned current-PR-head guard as its first step and again immediately before lock acquisition."
+        $failed = $true
+    } elseif ($VerboseOutput) {
+        Write-Info "Checked current-PR-head guards for licensed job '$licensedJobId'."
+    }
+}
+
+$prAcquireIdentityInputsAreExact = Test-PrCapableAcquireIdentityInputs `
+    -WorkflowContent $workflowContent `
+    -Jobs $jobTexts
+$prAcquireMutationProofsRejectDrift = $true
+foreach ($expectedInput in @(
+        'github-token: ${{ github.token }}',
+        'pull-request-number: ${{ github.event.pull_request.number }}',
+        'expected-head-sha: ${{ github.event.pull_request.head.sha }}'
+    )) {
+    $mutatedJobs = @{}
+    foreach ($job in $jobTexts.GetEnumerator()) {
+        $mutatedJobs[$job.Key] = [string]$job.Value
+    }
+
+    $mutationTarget = [string]$mutatedJobs['unity-tests']
+    $acquireStep = [regex]::Match(
+        $mutationTarget,
+        '(?ms)^      - name: Acquire organization Unity lock\s*$.*?(?=^      - name:|\z)'
+    )
+    $inputLine = "          $expectedInput"
+    $inputIndex = $acquireStep.Value.IndexOf($inputLine, [StringComparison]::Ordinal)
+    if (-not $acquireStep.Success -or $inputIndex -lt 0) {
+        $prAcquireMutationProofsRejectDrift = $false
+        continue
+    }
+
+    $mutatedAcquireStep = $acquireStep.Value.Remove($inputIndex, $inputLine.Length)
+    $mutatedJobs['unity-tests'] = $mutationTarget.Remove($acquireStep.Index, $acquireStep.Length).Insert(
+        $acquireStep.Index,
+        $mutatedAcquireStep
+    )
+    if (Test-PrCapableAcquireIdentityInputs -WorkflowContent $workflowContent -Jobs $mutatedJobs) {
+        $prAcquireMutationProofsRejectDrift = $false
+    }
+}
+
+if (-not $prAcquireIdentityInputsAreExact -or -not $prAcquireMutationProofsRejectDrift) {
+    Write-Host '::error file=.github/workflows/unity-tests.yml::Every acquire step in a pull-request-capable workflow must pass the exact PR number, expected head SHA, and GitHub token; mutation proofs must reject each missing binding.'
+    $failed = $true
+} elseif ($VerboseOutput) {
+    Write-Info 'Checked every PR-capable acquire step binds exact PR identity and each missing-input mutation is rejected.'
+}
+
+$licensedWorkflowJobSets = @(
+    @{ File = '.github/workflows/unity-tests.yml'; Jobs = $jobTexts },
+    @{ File = '.github/workflows/unity-benchmarks.yml'; Jobs = $benchmarksJobTexts },
+    @{ File = '.github/workflows/release.yml'; Jobs = $releaseJobTexts }
+)
+foreach ($workflowJobSet in $licensedWorkflowJobSets) {
+    foreach ($job in $workflowJobSet.Jobs.GetEnumerator()) {
+        $jobText = [string]$job.Value
+        $isLicensedMatrix = (
+            $jobText.Contains('Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@') -and
+            $jobText -match '(?m)^    strategy:\s*$' -and
+            $jobText -match '(?m)^      matrix:\s*$'
+        )
+        if (-not $isLicensedMatrix) {
+            continue
+        }
+
+        $failFastFalseCount = [regex]::Matches($jobText, '(?m)^      fail-fast: false\s*$').Count
+        if ($failFastFalseCount -ne 1) {
+            Write-Host "::error file=$($workflowJobSet.File)::Licensed matrix job '$($job.Key)' must set exactly one literal strategy.fail-fast: false so a failing leg cannot cancel a sibling Unity license holder."
+            $failed = $true
+        } elseif ($VerboseOutput) {
+            Write-Info "Checked licensed matrix job '$($job.Key)' in $($workflowJobSet.File) disables fail-fast cancellation."
+        }
+    }
 }
 
 $unityMatrixParallelismUsesRunnerSlots = (

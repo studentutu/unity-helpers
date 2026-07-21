@@ -30,22 +30,15 @@ on:
           - editmode
           - playmode
           - standalone
-      abort-on-first-failure:
-        description: >-
-          Stop the matrix at the first failing leg (fast iteration). Default
-          false keeps the full matrix running for cross-version compatibility
-          visibility. Only honored on workflow_dispatch.
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
   checks: write
+  pull-requests: read
 
 concurrency:
   group: unity-tests-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 jobs:
   matrix-config:
@@ -189,7 +182,7 @@ jobs:
       cancel-in-progress: true
     steps:
       - name: Require an online Unity runner
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/check-unity-runner-availability@59a2fa98224569e5a697f271a3ac4b866c53ac2c # v1.8.3
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/check-unity-runner-availability@a00614ace745152a659c5c2654f7cefb68a5a628 # v1.9.1
         with:
           reader-app-id: ${{ secrets.BUILD_LOCK_READER_APP_ID }}
           reader-app-private-key: ${{ secrets.BUILD_LOCK_READER_APP_PRIVATE_KEY }}
@@ -214,11 +207,9 @@ jobs:
     runs-on: [self-hosted, Windows, RAM-64GB]
     timeout-minutes: 1200
     strategy:
-      # Default false keeps the full matrix running so cross-version
-      # compatibility stays visible on a red run. workflow_dispatch can flip
-      # abort-on-first-failure to stop at the first failing leg for fast
-      # iteration (with max-parallel:2 that means "stop launching further legs").
-      fail-fast: ${{ github.event_name == 'workflow_dispatch' && inputs.abort-on-first-failure == 'true' }}
+      # A sibling may hold a Unity license, so matrix failures must never cancel
+      # another leg before its license-return and lock-release cleanup completes.
+      fail-fast: false
       max-parallel: 2
       matrix:
         # Ordered fast-tier include from matrix-config: editmode then playmode,
@@ -226,6 +217,13 @@ jobs:
         # include object. (Standalone runs in the gated unity-tests-standalone job.)
         include: ${{ fromJSON(needs.matrix-config.outputs.matrix-include) }}
     steps:
+      - name: Require current PR head before setup
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/require-current-pr-head@a00614ace745152a659c5c2654f7cefb68a5a628
+        with:
+          github-token: ${{ github.token }}
+          pull-request-number: ${{ github.event.pull_request.number }}
+          expected-head-sha: ${{ github.event.pull_request.head.sha }}
+
       - name: Enable Git long paths
         shell: powershell
         env:
@@ -395,14 +393,25 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Require current PR head before lock acquisition
+        if: ${{ steps.compute.outputs.is-empty != 'true' }}
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/require-current-pr-head@a00614ace745152a659c5c2654f7cefb68a5a628
+        with:
+          github-token: ${{ github.token }}
+          pull-request-number: ${{ github.event.pull_request.number }}
+          expected-head-sha: ${{ github.event.pull_request.head.sha }}
+
       - name: Acquire organization Unity lock
         id: unity_lock
         if: ${{ steps.compute.outputs.is-empty != 'true' }}
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@59a2fa98224569e5a697f271a3ac4b866c53ac2c # v1.8.3
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@a00614ace745152a659c5c2654f7cefb68a5a628 # v1.9.1
         with:
           lock-name: wallstop-organization-builds
           holder-id-suffix: ${{ matrix.unity-version }}-${{ matrix.test-mode }}
           runner-id: ${{ runner.name }}
+          github-token: ${{ github.token }}
+          pull-request-number: ${{ github.event.pull_request.number }}
+          expected-head-sha: ${{ github.event.pull_request.head.sha }}
           timeout-minutes: "300"
         env:
           BUILD_LOCK_APP_ID: ${{ secrets.BUILD_LOCK_APP_ID }}
@@ -473,7 +482,8 @@ jobs:
 
       - name: Release organization Unity lock
         if: ${{ always() && (steps.unity_lock.outcome == 'success' || steps.unity_lock.outcome == 'failure' || steps.unity_lock.outcome == 'cancelled') }}
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@59a2fa98224569e5a697f271a3ac4b866c53ac2c # v1.8.3
+        timeout-minutes: 5
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@a00614ace745152a659c5c2654f7cefb68a5a628 # v1.9.1
         with:
           lock-name: wallstop-organization-builds
           holder-id-suffix: ${{ matrix.unity-version }}-${{ matrix.test-mode }}
@@ -561,13 +571,20 @@ jobs:
     runs-on: [self-hosted, Windows, RAM-64GB]
     timeout-minutes: 1200
     strategy:
-      fail-fast: ${{ github.event_name == 'workflow_dispatch' && inputs.abort-on-first-failure == 'true' }}
+      fail-fast: false
       max-parallel: 2
       matrix:
         # Standalone-tier include from matrix-config (empty -> this job is skipped
         # by the if-guard above -- single-mode dispatch pins run in the fast tier).
         include: ${{ fromJSON(needs.matrix-config.outputs.matrix-include-standalone) }}
     steps:
+      - name: Require current PR head before setup
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/require-current-pr-head@a00614ace745152a659c5c2654f7cefb68a5a628
+        with:
+          github-token: ${{ github.token }}
+          pull-request-number: ${{ github.event.pull_request.number }}
+          expected-head-sha: ${{ github.event.pull_request.head.sha }}
+
       - name: Enable Git long paths
         shell: powershell
         env:
@@ -737,14 +754,25 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Require current PR head before lock acquisition
+        if: ${{ steps.compute.outputs.is-empty != 'true' }}
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/require-current-pr-head@a00614ace745152a659c5c2654f7cefb68a5a628
+        with:
+          github-token: ${{ github.token }}
+          pull-request-number: ${{ github.event.pull_request.number }}
+          expected-head-sha: ${{ github.event.pull_request.head.sha }}
+
       - name: Acquire organization Unity lock
         id: unity_lock
         if: ${{ steps.compute.outputs.is-empty != 'true' }}
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@59a2fa98224569e5a697f271a3ac4b866c53ac2c # v1.8.3
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@a00614ace745152a659c5c2654f7cefb68a5a628 # v1.9.1
         with:
           lock-name: wallstop-organization-builds
           holder-id-suffix: ${{ matrix.unity-version }}-${{ matrix.test-mode }}
           runner-id: ${{ runner.name }}
+          github-token: ${{ github.token }}
+          pull-request-number: ${{ github.event.pull_request.number }}
+          expected-head-sha: ${{ github.event.pull_request.head.sha }}
           timeout-minutes: "300"
         env:
           BUILD_LOCK_APP_ID: ${{ secrets.BUILD_LOCK_APP_ID }}
@@ -815,7 +843,8 @@ jobs:
 
       - name: Release organization Unity lock
         if: ${{ always() && (steps.unity_lock.outcome == 'success' || steps.unity_lock.outcome == 'failure' || steps.unity_lock.outcome == 'cancelled') }}
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@59a2fa98224569e5a697f271a3ac4b866c53ac2c # v1.8.3
+        timeout-minutes: 5
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@a00614ace745152a659c5c2654f7cefb68a5a628 # v1.9.1
         with:
           lock-name: wallstop-organization-builds
           holder-id-suffix: ${{ matrix.unity-version }}-${{ matrix.test-mode }}
@@ -914,9 +943,7 @@ jobs:
     runs-on: [self-hosted, Windows, RAM-64GB]
     timeout-minutes: 1200
     strategy:
-      # See the unity-tests job: default false for full visibility;
-      # workflow_dispatch can opt into abort-on-first-failure.
-      fail-fast: ${{ github.event_name == 'workflow_dispatch' && inputs.abort-on-first-failure == 'true' }}
+      fail-fast: false
       max-parallel: 2
       matrix:
         # Unity 6 ONLY (6000.3.16f1) to keep the extra leg cheap. editmode + playmode
@@ -925,6 +952,13 @@ jobs:
         unity-version: ["6000.3.16f1"]
         test-mode: ["editmode", "playmode"]
     steps:
+      - name: Require current PR head before setup
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/require-current-pr-head@a00614ace745152a659c5c2654f7cefb68a5a628
+        with:
+          github-token: ${{ github.token }}
+          pull-request-number: ${{ github.event.pull_request.number }}
+          expected-head-sha: ${{ github.event.pull_request.head.sha }}
+
       - name: Enable Git long paths
         shell: powershell
         env:
@@ -1064,14 +1098,25 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Require current PR head before lock acquisition
+        if: ${{ steps.compute.outputs.is-empty != 'true' }}
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/require-current-pr-head@a00614ace745152a659c5c2654f7cefb68a5a628
+        with:
+          github-token: ${{ github.token }}
+          pull-request-number: ${{ github.event.pull_request.number }}
+          expected-head-sha: ${{ github.event.pull_request.head.sha }}
+
       - name: Acquire organization Unity lock
         id: unity_lock
         if: ${{ steps.compute.outputs.is-empty != 'true' }}
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@59a2fa98224569e5a697f271a3ac4b866c53ac2c # v1.8.3
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@a00614ace745152a659c5c2654f7cefb68a5a628 # v1.9.1
         with:
           lock-name: wallstop-organization-builds
           holder-id-suffix: ${{ matrix.unity-version }}-${{ matrix.test-mode }}-single-threaded
           runner-id: ${{ runner.name }}
+          github-token: ${{ github.token }}
+          pull-request-number: ${{ github.event.pull_request.number }}
+          expected-head-sha: ${{ github.event.pull_request.head.sha }}
           timeout-minutes: "300"
         env:
           BUILD_LOCK_APP_ID: ${{ secrets.BUILD_LOCK_APP_ID }}
@@ -1137,7 +1182,8 @@ jobs:
 
       - name: Release organization Unity lock
         if: ${{ always() && (steps.unity_lock.outcome == 'success' || steps.unity_lock.outcome == 'failure' || steps.unity_lock.outcome == 'cancelled') }}
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@59a2fa98224569e5a697f271a3ac4b866c53ac2c # v1.8.3
+        timeout-minutes: 5
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@a00614ace745152a659c5c2654f7cefb68a5a628 # v1.9.1
         with:
           lock-name: wallstop-organization-builds
           holder-id-suffix: ${{ matrix.unity-version }}-${{ matrix.test-mode }}-single-threaded
@@ -1203,6 +1249,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
+      - name: Require current PR head before setup
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/require-current-pr-head@a00614ace745152a659c5c2654f7cefb68a5a628
+        with:
+          github-token: ${{ github.token }}
+          pull-request-number: ${{ github.event.pull_request.number }}
+          expected-head-sha: ${{ github.event.pull_request.head.sha }}
+
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
@@ -1221,21 +1274,31 @@ jobs:
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
 
+      - name: Require current PR head before lock acquisition
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/require-current-pr-head@a00614ace745152a659c5c2654f7cefb68a5a628
+        with:
+          github-token: ${{ github.token }}
+          pull-request-number: ${{ github.event.pull_request.number }}
+          expected-head-sha: ${{ github.event.pull_request.head.sha }}
+
       - name: Acquire organization Unity lock
         id: unity_lock
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@59a2fa98224569e5a697f271a3ac4b866c53ac2c # v1.8.3
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/acquire-build-lock@a00614ace745152a659c5c2654f7cefb68a5a628 # v1.9.1
         with:
           lock-name: wallstop-organization-builds
           holder-id-suffix: unitypackage-smoke-${{ github.run_id }}
           runner-id: ${{ runner.name }}
-          timeout-minutes: "210"
+          github-token: ${{ github.token }}
+          pull-request-number: ${{ github.event.pull_request.number }}
+          expected-head-sha: ${{ github.event.pull_request.head.sha }}
+          timeout-minutes: "160"
         env:
           BUILD_LOCK_APP_ID: ${{ secrets.BUILD_LOCK_APP_ID }}
           BUILD_LOCK_APP_PRIVATE_KEY: ${{ secrets.BUILD_LOCK_APP_PRIVATE_KEY }}
 
       - name: Export Unity package smoke artifact
         id: export_unitypackage
-        timeout-minutes: 120
+        timeout-minutes: 155
         env:
           UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
@@ -1266,7 +1329,8 @@ jobs:
 
       - name: Release organization Unity lock
         if: ${{ always() && (steps.unity_lock.outcome == 'success' || steps.unity_lock.outcome == 'failure' || steps.unity_lock.outcome == 'cancelled') }}
-        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@59a2fa98224569e5a697f271a3ac4b866c53ac2c # v1.8.3
+        timeout-minutes: 5
+        uses: Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/release-build-lock@a00614ace745152a659c5c2654f7cefb68a5a628 # v1.9.1
         with:
           lock-name: wallstop-organization-builds
           holder-id-suffix: unitypackage-smoke-${{ github.run_id }}
@@ -1280,6 +1344,7 @@ jobs:
 
       - name: Dump Unity export log tail on failure or cancellation
         if: ${{ failure() || cancelled() }}
+        timeout-minutes: 2
         uses: ./.github/actions/dump-unity-log-tail
         with:
           results-dir: .artifacts/unity/unitypackage-smoke-project/unitypackage-output
@@ -1287,6 +1352,7 @@ jobs:
 
       - name: Upload Unity package export smoke diagnostics
         if: ${{ failure() || cancelled() }}
+        timeout-minutes: 5
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: unitypackage-smoke-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}

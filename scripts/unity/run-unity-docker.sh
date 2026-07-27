@@ -359,6 +359,7 @@ return_serial_license() {
     else
         echo "==> License returned."
     fi
+    echo "exit_return_rc=${RETURN_EXIT_CODE}"
     return "${RETURN_EXIT_CODE}"
 }
 
@@ -569,8 +570,8 @@ MAIN_PROCESS_GROUP_PID=''
 
 # ── Normal completion: return once, then preserve the main result ───────────
 INNER_SCRIPT+='
-return_serial_license || true
 echo "==> Unity command finished with exit code: ${EXIT_CODE}"
+return_serial_license || true
 if [[ "${EXIT_CODE}" -eq 0 && "${RETURN_EXIT_CODE}" -ne 0 ]]; then
     exit "${RETURN_EXIT_CODE}"
 fi
@@ -653,7 +654,7 @@ cleanup_unity_container() {
     run_docker_client_with_watchdog \
         'docker rm -f' \
         "${UNITY_DOCKER_CLIENT_TIMEOUT}" \
-        docker rm -f "${UNITY_CONTAINER_NAME}" || true
+        docker rm -f "${UNITY_CONTAINER_NAME}" >/dev/null || true
 }
 DOCKER_RUN_PID=""
 terminate_docker_run_client() {

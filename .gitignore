@@ -33,9 +33,13 @@ logs_*zip.meta
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
 
-# Progress tracking folder (root level only)
+# Agent session scaffolding (root level only)
 /progress/
 /progress.meta
+/design-system/
+/design-system.meta
+/GOAL.md
+/GOAL.md.meta
 
 logs_extracted*
 

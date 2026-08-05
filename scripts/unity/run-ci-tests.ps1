@@ -19,6 +19,27 @@ param(
 
     [string]$ProjectPath,
 
+    # Distinguishes generated projects that share a <version>-<mode> pair but are
+    # compiled DIFFERENTLY -- today the SINGLE_THREADED and benchmark legs. Two
+    # differently compiled Libraries must never share a directory, or each leg
+    # invalidates the other's compiled assemblies on every run. Constrained to a
+    # bare directory-name shape: this becomes a path segment, and a separator in it
+    # would place the project outside the root the disk guard prunes.
+    [ValidatePattern('^[A-Za-z0-9._-]*$')]
+    [string]$ProjectScope,
+
+    # Root for the generated project and the UPM caches, OUTSIDE the repository.
+    # CI sets this to a per-runner directory so `actions/checkout`'s
+    # `git clean -ffdx` (which deletes the gitignored .artifacts tree, Library and
+    # all) structurally cannot reach it. Unset locally: the project stays under
+    # .artifacts/ where a developer expects a `git clean` to remove it.
+    [string]$ProjectRoot = $env:UH_UNITY_PROJECT_ROOT,
+
+    # Free-space floor for -ProjectRoot's volume, in GB. Below it, least-recently-
+    # used sibling projects are deleted before this leg runs. Ignored when the
+    # project is not persistent.
+    [double]$ProjectRootMinimumFreeGb = 60,
+
     [string]$UnityEditorPath = $env:UNITY_EDITOR_PATH,
 
     [string]$UnityInstallRoot = $(if ($env:UNITY_EDITOR_INSTALL_ROOT) { $env:UNITY_EDITOR_INSTALL_ROOT } else { 'C:\Unity\Editors' }),
@@ -115,6 +136,11 @@ $RequiredUnityHelpersAnalyzerDllNames = @()
 # composite actions via Get-CatastrophicPatterns). Dot-sourced here; the array is
 # assigned to $script:CatastrophicPatterns below.
 . (Join-Path $PSScriptRoot 'lib/catastrophic-patterns.ps1')
+
+# Resolves WHERE the generated project and its Library live, and prunes the
+# persistent root when a self-hosted runner's disk gets tight. Dot-sourced for
+# the same reason as the two libraries above.
+. (Join-Path $PSScriptRoot 'lib/project-workspace.ps1')
 
 function Write-CiError {
     param([Parameter(Mandatory = $true)][string]$Message)
@@ -951,11 +977,10 @@ function ConvertTo-UnityFileUriPath {
 
 function Initialize-UnityCacheEnvironment {
     param(
-        [Parameter(Mandatory = $true)][string]$Root,
-        [Parameter(Mandatory = $true)][string]$Version
+        [Parameter(Mandatory = $true)][string]$CacheRoot
     )
 
-    $cacheRoot = Join-Path $Root ".artifacts\unity\cache\$Version"
+    $cacheRoot = $CacheRoot
     $upmRoot = Join-Path $cacheRoot 'upm'
     $npmRoot = Join-Path $cacheRoot 'npm'
     $gitLfsRoot = Join-Path $cacheRoot 'git-lfs'
@@ -1623,7 +1648,7 @@ function Initialize-EphemeralProject {
         [Parameter(Mandatory = $true)][string]$Root,
         [Parameter(Mandatory = $true)][string]$Version,
         [Parameter(Mandatory = $true)][string]$Mode,
-        [string]$Path,
+        [Parameter(Mandatory = $true)][string]$Path,
         [switch]$IncludeComparisons,
         [switch]$IncludeIntegrations,
         [string]$Backend = 'IL2CPP',
@@ -1640,11 +1665,10 @@ function Initialize-EphemeralProject {
         $RepoRoot = $Root
     }
 
-    $project = if ($Path) {
-        Resolve-FullPath -Path $Path
-    } else {
-        Join-Path $Root ".artifacts\unity\projects\$Version-$Mode"
-    }
+    # Resolve-UnityProjectWorkspace is the single authority on WHERE the project
+    # lives; this function only builds one. A second, divergent computation here is
+    # how the persistent root and the repo-local default would silently drift apart.
+    $project = Resolve-FullPath -Path $Path
 
     New-Item -ItemType Directory -Force -Path (Join-Path $project 'Packages') | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $project 'ProjectSettings') | Out-Null
@@ -3342,7 +3366,25 @@ Assert-RepoRoot -Path $RepoRoot
 $ArtifactsPath = Resolve-FullPath -Path $ArtifactsPath
 New-Item -ItemType Directory -Force -Path $ArtifactsPath | Out-Null
 
-Initialize-UnityCacheEnvironment -Root $RepoRoot -Version $UnityVersion
+$ProjectWorkspace = Resolve-UnityProjectWorkspace `
+    -RepoRoot $RepoRoot `
+    -Version $UnityVersion `
+    -Mode $TestMode `
+    -Scope $ProjectScope `
+    -ExplicitProjectPath $ProjectPath `
+    -PersistentRoot $ProjectRoot
+$ProjectPath = Resolve-FullPath -Path $ProjectWorkspace.ProjectPath
+
+Initialize-UnityCacheEnvironment -CacheRoot (Resolve-FullPath -Path $ProjectWorkspace.CacheRoot)
+
+# Reclaim disk BEFORE the project directory is (re)created, so this leg's own
+# project is never a prune candidate on the run that needs it.
+if ($ProjectWorkspace.Persistent) {
+    [void](Invoke-PersistentProjectPrune `
+            -ProjectsRoot $ProjectWorkspace.PruneRoot `
+            -KeepName $ProjectWorkspace.LeafName `
+            -MinimumFreeGb $ProjectRootMinimumFreeGb)
+}
 
 # Release is now the repo-wide Unity CI contract. The historical switches remain
 # accepted for workflow/back-compat, but the effective mode is always Release:
@@ -3363,6 +3405,12 @@ $AdditionalScriptingDefinesList = @(
 )
 $AdditionalScriptingDefinesJoined = ($AdditionalScriptingDefinesList -join ';')
 
+# Measured BEFORE the project is (re)generated: this single line is how a run
+# proves the Library survived since the previous leg instead of being imported
+# cold. A persistent leg that reports "cold" every run means the project root is
+# not actually surviving between jobs, which is the whole point of this path.
+$LibraryWarmth = if (Test-Path -LiteralPath (Join-Path $ProjectPath 'Library') -PathType Container) { 'warm (reused)' } else { 'cold (first run on this runner)' }
+
 $ProjectPath = Initialize-EphemeralProject -Root $RepoRoot -Version $UnityVersion -Mode $TestMode -Path $ProjectPath -IncludeComparisons:$IncludeComparisons -IncludeIntegrations:$IncludeIntegrations -Backend $StandaloneScriptingBackend -Il2CppCompilerConfiguration $Il2CppCompilerConfiguration -DevelopmentBuild:(-not $UseReleasePlayerBuild) -RepoRoot $RepoRoot
 $LibraryPath = Join-Path $ProjectPath 'Library'
 New-Item -ItemType Directory -Force -Path $LibraryPath | Out-Null
@@ -3371,7 +3419,9 @@ Clear-StaleUnityCompilationCache -Project $ProjectPath -RepoRoot $RepoRoot
 Write-Host "::group::Ephemeral Unity project"
 Write-Host "RepoRoot: $RepoRoot"
 Write-Host "ProjectPath: $ProjectPath"
+Write-Host "ProjectPersistent: $($ProjectWorkspace.Persistent)"
 Write-Host "LibraryPath: $LibraryPath"
+Write-Host "Library: $LibraryWarmth"
 Write-Host "ArtifactsPath: $ArtifactsPath"
 Write-Host "IncludeComparisons: $IncludeComparisons"
 Write-Host "IncludeIntegrations: $IncludeIntegrations"

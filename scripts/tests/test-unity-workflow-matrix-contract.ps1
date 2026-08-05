@@ -2455,6 +2455,132 @@ foreach ($licensedJobId in $licensedJobIds) {
     }
 }
 
+# The per-leg guards above fire only after a leg has been dispatched, which means
+# waiting in line for the single self-hosted Unity seat. Because this workflow's
+# concurrency group cannot cancel in progress, a superseded iteration that still
+# dispatches its legs holds the group -- and therefore the successor run -- for as
+# long as that queue takes. The hosted matrix-config job must resolve it once and
+# skip the licensed tiers outright.
+$matrixConfigJob = if ($jobTexts.ContainsKey('matrix-config')) { [string]$jobTexts['matrix-config'] } else { '' }
+$supersededStep = [regex]::Match(
+    $matrixConfigJob,
+    '(?ms)^      - name: Detect superseded pull request head\s*$.*?(?=^      - name:|\z)'
+)
+$supersededDecisions = @(
+    [regex]::Matches(
+        $(if ($supersededStep.Success) { $supersededStep.Value } else { '' }),
+        'superseded=(?<value>true|false)'
+    ) | ForEach-Object { $_.Groups['value'].Value }
+)
+$supersededGateContracts = @(
+    @{
+        Name = 'matrix-config exposes the superseded output'
+        Ok = $matrixConfigJob -match '(?m)^      superseded:\s*\$\{\{\s*steps\.superseded\.outputs\.superseded\s*\}\}\s*$'
+        Message = 'matrix-config must expose a `superseded` output wired to the detection step so every licensed tier can gate on it.'
+    },
+    @{
+        Name = 'matrix-config detects a superseded head on a hosted runner'
+        Ok = $supersededStep.Success -and $supersededStep.Value -match '(?m)^        id: superseded\s*$'
+        Message = 'matrix-config must carry a "Detect superseded pull request head" step with id `superseded`.'
+    },
+    @{
+        Name = 'superseded detection compares the queued head against the live head'
+        Ok = (
+            $supersededStep.Success -and
+            $supersededStep.Value.Contains('PR_NUMBER: ${{ github.event.pull_request.number }}') -and
+            $supersededStep.Value.Contains('EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}') -and
+            $supersededStep.Value.Contains('.head.sha')
+        )
+        Message = 'The superseded detection step must compare the run''s queued head SHA against the pull request''s live head SHA.'
+    },
+    @{
+        # Counting the two values is not enough -- swapping which BRANCH writes
+        # which value keeps the counts identical while inverting the whole
+        # guarantee. Bind them to position instead: every early exit writes
+        # false, and only the step's final, unconditional write says true. Any
+        # branch that reports superseded before the comparison has run then
+        # lands a `true` ahead of the last write and fails here.
+        Name = 'superseded detection fails open'
+        Ok = $supersededDecisions.Count -ge 4 -and
+        $supersededDecisions[-1] -eq 'true' -and
+        @($supersededDecisions[0..($supersededDecisions.Count - 2)] | Where-Object { $_ -ne 'false' }).Count -eq 0
+        Message = 'The superseded detection step must fail OPEN: every early exit (not a pull request, unresolvable head, head unchanged) must write superseded=false, and only the final unconditional write may say true, so validation is never skipped by an API hiccup.'
+    },
+    @{
+        # `gh api --jq '.head.sha'` prints the literal "null" and exits 0 when
+        # the field is absent, and "null" compares unequal to any real SHA. An
+        # emptiness check alone would turn that anomaly into a skipped run.
+        Name = 'superseded detection validates the resolved head shape'
+        Ok = $supersededStep.Success -and $supersededStep.Value -match '\[0-9a-f\]'
+        Message = 'The superseded detection step must validate that the resolved head looks like a SHA, not merely that it is non-empty, so an API response without the field cannot skip the licensed tiers.'
+    },
+    @{
+        Name = 'Unity CI Success still requires the hosted gates when superseded'
+        Ok = (
+            $workflowContent -match '(?m)^            if \[ "\$\{MATRIX_CONFIG_RESULT\}" != "success" \] \|\| \[ "\$\{RUNNER_PREFLIGHT_RESULT\}" != "success" \]; then\s*$'
+        )
+        Message = 'The superseded short-circuit must still require matrix-config and runner-preflight to have succeeded. Both jobs run to completion regardless of supersession -- matrix-config goes on to lint the test-project module manifest -- and a failed job still publishes its outputs, so waiving them would report green for a bogus UPM module id or an offline runner fleet.'
+    },
+    @{
+        Name = 'Unity CI Success treats a superseded run as a clean no-op'
+        Ok = (
+            $workflowContent.Contains('MATRIX_CONFIG_SUPERSEDED: ${{ needs.matrix-config.outputs.superseded }}') -and
+            $workflowContent -match '(?m)^          if \[ "\$\{MATRIX_CONFIG_SUPERSEDED\}" = "true" \]; then\s*$'
+        )
+        Message = 'unity-ci-success must exit 0 for a superseded run: it never ran the licensed tiers and its check belongs to the head SHA it was queued for, so it can neither gate nor authorize the current head.'
+    }
+)
+foreach ($licensedJobId in $licensedJobIds) {
+    $supersededGateContracts += @{
+        Name = "licensed job '$licensedJobId' skips when superseded"
+        Ok = (
+            $jobTexts.ContainsKey($licensedJobId) -and
+            [string]$jobTexts[$licensedJobId] -match "needs\.matrix-config\.outputs\.superseded\s*!=\s*'true'"
+        )
+        Message = "Licensed job '$licensedJobId' must skip when matrix-config reports the pull request head has moved on, so a superseded run never queues for the self-hosted Unity seat."
+    }
+}
+# The stuck-job watchdog reported success on every cycle from #315 through #328
+# while never evaluating a single queued run: `orgs/{owner}/actions/runners`
+# needs admin:org, GITHUB_TOKEN 403s, the repo-scoped fallback does not list
+# org-level runners, and the handler exited 0. A permanently green workflow that
+# is structurally blind is the same silent-failure class #328 was opened for.
+$watchdogPath = Join-Path $repoRoot '.github/workflows/stuck-job-watchdog.yml'
+if (-not (Test-Path -LiteralPath $watchdogPath)) {
+    Write-Host "::error::Stuck job watchdog workflow not found: $watchdogPath"
+    $failed = $true
+} else {
+    $watchdogContent = Get-Content -LiteralPath $watchdogPath -Raw
+    $supersededGateContracts += @(
+        @{
+            Name = 'watchdog reads the runner inventory with the build-lock reader App'
+            Ok = (
+                $watchdogContent.Contains('RUNNER_INVENTORY_TOKEN: ${{ steps.reader-token.outputs.token }}') -and
+                $watchdogContent.Contains('app-id: ${{ secrets.BUILD_LOCK_READER_APP_ID }}') -and
+                $watchdogContent -match 'RUNNER_INVENTORY_TOKEN[^\n]*\n[^\n]*orgs/\$\{OWNER\}/actions/runners'
+            )
+            Message = 'The watchdog must query orgs/{owner}/actions/runners with the build-lock reader App token. GITHUB_TOKEN lacks admin:org and 403s, and the repo-scoped fallback does not list org-level runners, so without it the audit can never see a runner.'
+            File = '.github/workflows/stuck-job-watchdog.yml'
+        },
+        @{
+            Name = 'watchdog fails closed on an unreadable runner inventory'
+            Ok = $watchdogContent -match '(?ms)could not read the runner inventory.*?flush_summary_and_exit 1'
+            Message = 'The watchdog must exit non-zero when it cannot read the runner inventory. Exiting 0 is what let it report success on every cycle while evaluating nothing -- a blind watchdog must be red, because a green check is exactly what stopped anyone from noticing.'
+            File = '.github/workflows/stuck-job-watchdog.yml'
+        }
+    )
+}
+
+foreach ($contract in $supersededGateContracts) {
+    $contractFile = if ($contract.ContainsKey('File')) { $contract.File } else { '.github/workflows/unity-tests.yml' }
+    if (-not $contract.Ok) {
+        Write-Host "::error file=$contractFile::Workflow recovery contract failed ($($contract.Name)): $($contract.Message)"
+        $failed = $true
+    } elseif ($VerboseOutput) {
+        Write-Info "Checked workflow recovery contract '$($contract.Name)'."
+    }
+}
+
 $prAcquireIdentityInputsAreExact = Test-PrCapableAcquireIdentityInputs `
     -WorkflowContent $workflowContent `
     -Jobs $jobTexts

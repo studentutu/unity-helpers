@@ -895,6 +895,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
         private static ToggleOption[] BuildEnumOptions(Type enumType, bool isFlags)
         {
             Array values = Enum.GetValues(enumType);
+            ulong underlyingMask = EnumShared.GetUnderlyingTypeMask(enumType);
             using PooledResource<List<ToggleOption>> optionsLease = Buffers<ToggleOption>.GetList(
                 values.Length,
                 out List<ToggleOption> options
@@ -915,7 +916,10 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
                 }
 
                 ulong numericValue = ConvertToUInt64(value);
-                if (isFlags && numericValue != 0UL && !IsPowerOfTwo(numericValue))
+                // Truncate to the underlying width before the power-of-two test: a signed enum's
+                // top-bit flag sign-extends to 0xFF..80, which is the value mask arithmetic needs
+                // but is not a power of two, and testing the extended pattern discards the flag.
+                if (isFlags && numericValue != 0UL && !IsPowerOfTwo(numericValue & underlyingMask))
                 {
                     Debug.LogWarning(
                         $"[{nameof(WEnumToggleButtonsUtility)}] Skipping composite flag value {name} "
@@ -1087,10 +1091,15 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
                 return;
             }
 
+            // Convert.ToInt64 throws on a ulong-backed member above long.MaxValue; the serialized
+            // property stores the same 64-bit pattern either way.
             if (option.Value is Enum enumValue)
             {
-                long numeric = Convert.ToInt64(enumValue, CultureInfo.InvariantCulture);
-                property.longValue = numeric;
+                if (enumValue.TryConvertToInt64(out long numeric))
+                {
+                    property.longValue = numeric;
+                }
+
                 return;
             }
 
@@ -1290,9 +1299,29 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
             property.longValue = unchecked((long)value);
         }
 
+        // Convert.ToUInt64 throws OverflowException on a negative enum member, and this runs inside
+        // BuildEnumOptions' loop with no handler, so a single negative member took the whole
+        // inspector down rather than drawing one button wrong.
         private static ulong ConvertToUInt64(object value)
         {
-            return Convert.ToUInt64(value, CultureInfo.InvariantCulture);
+            if (value is Enum enumValue)
+            {
+                return enumValue.TryConvertToUInt64(out ulong converted) ? converted : 0UL;
+            }
+
+            if (value == null)
+            {
+                return 0UL;
+            }
+
+            try
+            {
+                return Convert.ToUInt64(value, CultureInfo.InvariantCulture);
+            }
+            catch (Exception)
+            {
+                return 0UL;
+            }
         }
 
         private static bool IsPowerOfTwo(ulong value)

@@ -11,6 +11,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers.Utils
     using System.Runtime.CompilerServices;
     using UnityEditor;
     using UnityEngine;
+    using WallstopStudios.UnityHelpers.Core.Extension;
     using WallstopStudios.UnityHelpers.Core.Helper;
     using WallstopStudios.UnityHelpers.Editor.Core.Helper;
     using WallstopStudios.UnityHelpers.Editor.Settings;
@@ -337,16 +338,62 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers.Utils
         }
 
         /// <summary>
+        /// Gets the bit mask covering the width of an enum's underlying type.
+        /// </summary>
+        /// <param name="enumType">The enum type to measure.</param>
+        /// <returns>The mask, or <see cref="ulong.MaxValue"/> for a non-enum or 64-bit type.</returns>
+        /// <remarks>
+        /// <see cref="ConvertToUInt64"/> sign-extends, so a legitimate top-bit flag such as
+        /// <c>sbyte -128</c> becomes <c>0xFFFFFFFFFFFFFF80</c>. That is the right value for mask
+        /// arithmetic -- it matches what the serialized property reads back -- but it is not a
+        /// power of two, so a power-of-two check must run against the truncated width or the flag
+        /// is discarded as composite.
+        /// </remarks>
+        public static ulong GetUnderlyingTypeMask(Type enumType)
+        {
+            if (enumType == null || !enumType.IsEnum)
+            {
+                return ulong.MaxValue;
+            }
+
+            switch (Type.GetTypeCode(Enum.GetUnderlyingType(enumType)))
+            {
+                case TypeCode.SByte:
+                case TypeCode.Byte:
+                    return byte.MaxValue;
+                case TypeCode.Int16:
+                case TypeCode.UInt16:
+                    return ushort.MaxValue;
+                case TypeCode.Int32:
+                case TypeCode.UInt32:
+                    return uint.MaxValue;
+                default:
+                    return ulong.MaxValue;
+            }
+        }
+
+        /// <summary>
         /// Converts an object value to a UInt64 representation.
         /// </summary>
         /// <param name="value">The value to convert (typically an enum value).</param>
         /// <returns>The UInt64 representation, or 0 if conversion fails.</returns>
+        /// <remarks>
+        /// Enum values route through <see cref="EnumExtensions.TryConvertToUInt64(Enum, out ulong)"/>, which
+        /// sign-extends signed underlying types. <see cref="Convert.ToUInt64(object, IFormatProvider)"/>
+        /// throws <see cref="OverflowException"/> on every negative member, and the catch below used
+        /// to turn that into mask 0 -- rendering and round-tripping such a member as "None".
+        /// </remarks>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static ulong ConvertToUInt64(object value)
         {
             if (value == null)
             {
                 return 0UL;
+            }
+
+            if (value is Enum enumValue)
+            {
+                return enumValue.TryConvertToUInt64(out ulong converted) ? converted : 0UL;
             }
 
             try

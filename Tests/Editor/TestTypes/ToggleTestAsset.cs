@@ -40,6 +40,15 @@ namespace WallstopStudios.UnityHelpers.Tests.Editor.TestTypes
         [StringInList("Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta")]
         public string noPaginationState = "Alpha";
 
+        [WEnumToggleButtons]
+        public SignedByteExampleEnum signedByteMode = SignedByteExampleEnum.MinusOne;
+
+        [WEnumToggleButtons]
+        public SignedShortExampleEnum signedShortMode = SignedShortExampleEnum.Minimum;
+
+        [WEnumToggleButtons]
+        public SignedFlagsExampleEnum signedFlags = SignedFlagsExampleEnum.None;
+
         [Flags]
         public enum ExampleFlags
         {
@@ -54,6 +63,36 @@ namespace WallstopStudios.UnityHelpers.Tests.Editor.TestTypes
             First,
             Second,
             Third,
+        }
+
+        // Convert.ToUInt64 throws OverflowException on every member below zero, which took the
+        // whole inspector down while drawing either of these fields.
+        public enum SignedByteExampleEnum : sbyte
+        {
+            MinusTwo = -2,
+            MinusOne = -1,
+            Zero = 0,
+            One = 1,
+        }
+
+        public enum SignedShortExampleEnum : short
+        {
+            Minimum = short.MinValue,
+            MinusOne = -1,
+            Zero = 0,
+            Maximum = short.MaxValue,
+        }
+
+        // High is bit 7 of an sbyte, which is a perfectly ordinary single-bit flag but reads as
+        // -128. Sign-extending it gives 0xFFFFFFFFFFFFFF80 -- the value the serialized property
+        // round-trips -- which is not a power of two, so a naive power-of-two filter drops it.
+        [Flags]
+        public enum SignedFlagsExampleEnum : sbyte
+        {
+            None = 0,
+            Low = 1,
+            Mid = 2,
+            High = -128,
         }
 
         private static class DropdownProvider

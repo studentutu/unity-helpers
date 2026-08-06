@@ -925,6 +925,64 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
                     );
                 }
             }
+
+            // The boxed path editor tooling is forced onto must agree with the generic one for
+            // every shape. Convert.ToUInt64 throws on all six signed fixtures below zero and
+            // Convert.ToInt64 throws on UnsignedLongEnum.VeryLarge, so any conversion built on
+            // either alone fails this loop somewhere.
+            foreach (T value in values)
+            {
+                // The PUBLIC generic overload, not the internal helper: this is the one overload
+                // resolution picks for a statically-typed enum, and it must agree with the boxed
+                // path the editor tooling is forced onto.
+                Assert.IsTrue(
+                    value.TryConvertToUInt64(out ulong generic),
+                    $"{typeof(T).Name}.{value} failed the generic conversion."
+                );
+                Assert.IsTrue(
+                    ((Enum)value).TryConvertToUInt64(out ulong boxed),
+                    $"{typeof(T).Name}.{value} failed the boxed conversion."
+                );
+                Assert.AreEqual(
+                    generic,
+                    boxed,
+                    $"{typeof(T).Name}.{value}: the boxed conversion disagreed with the generic one."
+                );
+
+                Assert.IsTrue(
+                    ((Enum)value).TryConvertToInt64(out long signed),
+                    $"{typeof(T).Name}.{value} failed the signed boxed conversion."
+                );
+                Assert.IsTrue(
+                    value.TryConvertToInt64(out long genericSigned),
+                    $"{typeof(T).Name}.{value} failed the generic signed conversion."
+                );
+                Assert.AreEqual(
+                    signed,
+                    genericSigned,
+                    $"{typeof(T).Name}.{value}: the generic signed conversion disagreed with the boxed one."
+                );
+                Assert.AreEqual(
+                    unchecked((long)boxed),
+                    signed,
+                    $"{typeof(T).Name}.{value}: the signed conversion is not the same bit pattern."
+                );
+                Assert.AreEqual(
+                    value,
+                    (T)Enum.ToObject(typeof(T), signed),
+                    $"{typeof(T).Name}.{value} did not survive a round trip through its bit pattern."
+                );
+            }
+        }
+
+        [Test]
+        public void BoxedConversionRejectsNull()
+        {
+            Enum missing = null;
+            Assert.IsFalse(missing.TryConvertToUInt64(out ulong unsigned));
+            Assert.AreEqual(0UL, unsigned);
+            Assert.IsFalse(missing.TryConvertToInt64(out long signed));
+            Assert.AreEqual(0L, signed);
         }
 
         [TestCaseSource(nameof(EnumContractCases))]

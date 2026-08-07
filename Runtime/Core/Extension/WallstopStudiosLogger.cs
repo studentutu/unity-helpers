@@ -1,10 +1,6 @@
 // MIT License - Copyright (c) 2023 wallstop
 // Full license text: https://github.com/wallstop/unity-helpers/blob/main/LICENSE
 
-#if !ENABLE_UBERLOGGING && (DEVELOPMENT_BUILD || DEBUG || UNITY_EDITOR)
-#define ENABLE_UBERLOGGING
-#endif
-
 namespace WallstopStudios.UnityHelpers.Core.Extension
 {
     using System;
@@ -24,8 +20,17 @@ namespace WallstopStudios.UnityHelpers.Core.Extension
     /// <remarks>
     /// Thread Safety: Thread-safe. Automatically routes logs to Unity main thread when necessary.
     /// Performance: Uses reflection-based metadata caching with periodic cleanup. Metadata is cached per type.
-    /// Allocations: Uses metadata cache and pooled dictionary resources to minimize allocations.
-    /// Configuration: Define ENABLE_UBERLOGGING to enable logging in non-development builds.
+    /// Allocations: When disabled, none: the entry points are
+    /// <see cref="System.Diagnostics.ConditionalAttribute"/>, so the compiler removes the entire
+    /// call site -- receiver and arguments included. Nothing is evaluated and no
+    /// <see cref="System.FormattableString"/> is built. When enabled, uses the metadata cache and
+    /// pooled dictionary resources to minimize allocations.
+    /// Configuration: enabled automatically wherever Unity defines UNITY_EDITOR,
+    /// DEVELOPMENT_BUILD or DEBUG. To enable logging in a release build, define
+    /// ENABLE_UBERLOGGING (or the per-level DEBUG_LOGGING / WARN_LOGGING / ERROR_LOGGING)
+    /// <b>project-wide</b> -- for example in Player Settings' scripting define symbols. A
+    /// [Conditional] symbol is evaluated in the assembly that <i>calls</i> the method, so
+    /// defining it only inside this package has no effect on consumer code.
     /// </remarks>
     public static class WallstopStudiosLogger
     {
@@ -176,6 +181,11 @@ namespace WallstopStudios.UnityHelpers.Core.Extension
         }
 
         [HideInCallstack]
+        [System.Diagnostics.Conditional(CompilationSymbols.EnableUberLogging)]
+        [System.Diagnostics.Conditional(CompilationSymbols.DevelopmentBuild)]
+        [System.Diagnostics.Conditional(CompilationSymbols.Debug)]
+        [System.Diagnostics.Conditional(CompilationSymbols.UnityEditor)]
+        [System.Diagnostics.Conditional(CompilationSymbols.DebugLogging)]
         public static void Log(
             this Object component,
             FormattableString message,
@@ -183,12 +193,15 @@ namespace WallstopStudios.UnityHelpers.Core.Extension
             bool pretty = true
         )
         {
-#if ENABLE_UBERLOGGING || DEBUG_LOGGING
-            component.LogDebug(message, e, pretty);
-#endif
+            LogDebugCore(component, message, e, pretty);
         }
 
         [HideInCallstack]
+        [System.Diagnostics.Conditional(CompilationSymbols.EnableUberLogging)]
+        [System.Diagnostics.Conditional(CompilationSymbols.DevelopmentBuild)]
+        [System.Diagnostics.Conditional(CompilationSymbols.Debug)]
+        [System.Diagnostics.Conditional(CompilationSymbols.UnityEditor)]
+        [System.Diagnostics.Conditional(CompilationSymbols.DebugLogging)]
         public static void LogDebug(
             this Object component,
             FormattableString message,
@@ -196,7 +209,60 @@ namespace WallstopStudios.UnityHelpers.Core.Extension
             bool pretty = true
         )
         {
-#if ENABLE_UBERLOGGING || DEBUG_LOGGING
+            LogDebugCore(component, message, e, pretty);
+        }
+
+        [HideInCallstack]
+        [System.Diagnostics.Conditional(CompilationSymbols.EnableUberLogging)]
+        [System.Diagnostics.Conditional(CompilationSymbols.DevelopmentBuild)]
+        [System.Diagnostics.Conditional(CompilationSymbols.Debug)]
+        [System.Diagnostics.Conditional(CompilationSymbols.UnityEditor)]
+        [System.Diagnostics.Conditional(CompilationSymbols.WarnLogging)]
+        public static void LogWarn(
+            this Object component,
+            FormattableString message,
+            Exception e = null,
+            bool pretty = true
+        )
+        {
+            LogWarnCore(component, message, e, pretty);
+        }
+
+        [HideInCallstack]
+        [System.Diagnostics.Conditional(CompilationSymbols.EnableUberLogging)]
+        [System.Diagnostics.Conditional(CompilationSymbols.DevelopmentBuild)]
+        [System.Diagnostics.Conditional(CompilationSymbols.Debug)]
+        [System.Diagnostics.Conditional(CompilationSymbols.UnityEditor)]
+        [System.Diagnostics.Conditional(CompilationSymbols.ErrorLogging)]
+        public static void LogError(
+            this Object component,
+            FormattableString message,
+            Exception e = null,
+            bool pretty = true
+        )
+        {
+            LogErrorCore(component, message, e, pretty);
+        }
+
+        // The public entry points above are [Conditional], which strips the whole call site --
+        // receiver and arguments included -- in any assembly that defines none of the symbols.
+        // They must delegate to these unconditional cores rather than to one another: a
+        // [Conditional] call is resolved against the *calling* assembly's symbols, so a
+        // package-internal call to a [Conditional] method would be stripped whenever this
+        // package itself is compiled without them, emptying the public methods even for a
+        // consumer that did define ENABLE_UBERLOGGING.
+        //
+        // They are internal for the same reason: any other package API that is itself
+        // [Conditional] must reach the log through here, never through a [Conditional] entry
+        // point, or it inherits exactly the emptying this indirection exists to prevent.
+        [HideInCallstack]
+        internal static void LogDebugCore(
+            Object component,
+            FormattableString message,
+            Exception e,
+            bool pretty
+        )
+        {
             if (!LoggingAllowed(component))
             {
                 return;
@@ -221,18 +287,16 @@ namespace WallstopStudios.UnityHelpers.Core.Extension
                     LogOffline(LogType.Log, localComponent, localMessage, localE);
                 }
             }
-#endif
         }
 
         [HideInCallstack]
-        public static void LogWarn(
-            this Object component,
+        internal static void LogWarnCore(
+            Object component,
             FormattableString message,
-            Exception e = null,
-            bool pretty = true
+            Exception e,
+            bool pretty
         )
         {
-#if ENABLE_UBERLOGGING || WARN_LOGGING
             if (!LoggingAllowed(component))
             {
                 return;
@@ -257,18 +321,16 @@ namespace WallstopStudios.UnityHelpers.Core.Extension
                     LogOffline(LogType.Warning, localComponent, localMessage, localE);
                 }
             }
-#endif
         }
 
         [HideInCallstack]
-        public static void LogError(
-            this Object component,
+        internal static void LogErrorCore(
+            Object component,
             FormattableString message,
-            Exception e = null,
-            bool pretty = true
+            Exception e,
+            bool pretty
         )
         {
-#if ENABLE_UBERLOGGING || ERROR_LOGGING
             if (!LoggingAllowed(component))
             {
                 return;
@@ -293,7 +355,6 @@ namespace WallstopStudios.UnityHelpers.Core.Extension
                     LogOffline(LogType.Error, localComponent, localMessage, localE);
                 }
             }
-#endif
         }
 
         [HideInCallstack]
@@ -333,7 +394,6 @@ namespace WallstopStudios.UnityHelpers.Core.Extension
             Exception exception
         )
         {
-#if ENABLE_UBERLOGGING || DEBUG_LOGGING || WARN_LOGGING || ERROR_LOGGING
             try
             {
                 string contextLabel = ReferenceEquals(component, null)
@@ -354,7 +414,6 @@ namespace WallstopStudios.UnityHelpers.Core.Extension
             {
                 // Swallow
             }
-#endif
         }
     }
 }

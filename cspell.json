@@ -236,7 +236,8 @@
         "ulf",
         "alf",
         "unityci",
-        "uielements"
+        "uielements",
+        "sqr"
       ]
     },
     {
@@ -358,7 +359,9 @@
         "contravariant",
         "vtable",
         "blittable",
-        "IVT"
+        "IVT",
+        "undefining",
+        "undefines"
       ]
     },
     {
@@ -842,7 +845,8 @@
         "icall",
         "ffdx",
         "redistributables",
-        "smol"
+        "smol",
+        "ULP"
       ]
     }
   ],

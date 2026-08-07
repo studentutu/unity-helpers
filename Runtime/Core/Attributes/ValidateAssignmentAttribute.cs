@@ -156,12 +156,36 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
             );
         }
 
+        /// <summary>
+        /// Logs a warning for every <see cref="ValidateAssignmentAttribute"/> field on
+        /// <paramref name="o"/> that is null, empty, or has no elements.
+        /// </summary>
+        /// <param name="o">The Unity Object to validate. A null object is a no-op.</param>
+        /// <remarks>
+        /// Thread-safe: Yes.
+        /// Performance: O(n) in the attributed field count; the field set is cached per type.
+        /// Allocations: None when logging is disabled -- this method is
+        /// <see cref="System.Diagnostics.ConditionalAttribute"/> on the same symbol set as
+        /// <see cref="WallstopStudiosLogger.LogWarn"/>, its only observable effect. The compiler
+        /// removes the entire call site, so the reflection walk and its
+        /// <see cref="FieldInfo.GetValue(object)"/> boxing never happen in a release build.
+        /// Use <see cref="AreAnyAssignmentsInvalid"/> when the answer is needed regardless of
+        /// build configuration.
+        /// </remarks>
+        // The symbol set is the warn-level one because a warning is this method's entire observable
+        // effect. It deliberately includes DEVELOPMENT_BUILD and DEBUG rather than UNITY_EDITOR
+        // alone, so a development player still validates. Note that CI's standalone tier is a
+        // genuine Release player (run-ci-tests.ps1 clears BuildOptions.Development), so this is
+        // compiled out there -- which is why ValidateAssignmentsLogsWarningsForMissingFields uses
+        // ExpectWallstopLog, whose expectations no-op when the logger is not compiled in.
+        // The body is reflection metadata + FieldInfo.GetValue + a log call, all AOT-safe.
+        [System.Diagnostics.Conditional(CompilationSymbols.EnableUberLogging)]
+        [System.Diagnostics.Conditional(CompilationSymbols.DevelopmentBuild)]
+        [System.Diagnostics.Conditional(CompilationSymbols.Debug)]
+        [System.Diagnostics.Conditional(CompilationSymbols.UnityEditor)]
+        [System.Diagnostics.Conditional(CompilationSymbols.WarnLogging)]
         public static void ValidateAssignments(this Object o)
         {
-            // Intentionally NOT gated on UNITY_EDITOR: the sibling AreAnyAssignmentsInvalid already
-            // runs in player builds, so gating only the logging variant left this a silent no-op in
-            // builds (and on IL2CPP standalone, where the warning test expects the log). The body is
-            // reflection metadata + FieldInfo.GetValue + a log call, all AOT-safe.
             if (o == null)
             {
                 return;
@@ -176,7 +200,11 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
 
                 if (logNotAssigned)
                 {
-                    o.LogNotAssigned(field.Name);
+                    // The unconditional core, not the [Conditional] LogNotAssigned: this method is
+                    // itself [Conditional], and a [Conditional] call inside it would be stripped
+                    // whenever the package compiles without the symbols -- leaving the reflection
+                    // walk running and logging nothing.
+                    Helpers.LogNotAssignedCore(o, field.Name);
                 }
             }
         }

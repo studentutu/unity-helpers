@@ -8,12 +8,6 @@ param([switch]$VerboseOutput)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$buildLockActionCommit = 'a00614ace745152a659c5c2654f7cefb68a5a628'
-$buildLockActionVersion = 'v1.9.1'
-$acquireBuildLockActionCommit = 'a00614ace745152a659c5c2654f7cefb68a5a628'
-$acquireBuildLockActionComment = 'v1.9.1'
-$currentPrHeadGuardCommit = 'a00614ace745152a659c5c2654f7cefb68a5a628'
-$centralCleanupPolicyCommit = '673eb65e7d863a1a8a8a70882bd980e189d41754'
 
 function Write-Info($msg) {
     if ($VerboseOutput) { Write-Host "[test-unity-workflow-matrix-contract] $msg" -ForegroundColor Cyan }
@@ -87,7 +81,122 @@ function Test-RunnerBootstrapPassesMaintenanceForce {
     return $maintenanceArgsHasForceKey -or $maintenanceArgsDirectForceAssignment
 }
 
+function Get-BuildLockActionPins {
+    param(
+        [Parameter(Mandatory = $true)][string]$GitHubRoot,
+        [Parameter(Mandatory = $true)][string[]]$RequiredActionNames
+    )
+
+    # Anchored to a live `uses:` line. Matching the action path anywhere would let a commented-out
+    # reference satisfy the required-action check and then supply the SHA every downstream
+    # assertion compares against -- the exact vacuous pass this function exists to prevent.
+    $pattern = '(?m)^\s*(?:-\s*)?uses:\s*Ambiguous-Interactive/ambiguous-organization-build-lock/\.github/actions/(?<name>[A-Za-z0-9._-]+)@(?<ref>[^\s#]+)(?:[ \t]+#[ \t]*(?<comment>\S+))?'
+    $observed = @{}
+
+    $files = @(
+        Get-ChildItem -LiteralPath $GitHubRoot -Recurse -File |
+            Where-Object { $_.Extension -eq '.yml' -or $_.Extension -eq '.yaml' } |
+            Sort-Object FullName
+    )
+    foreach ($file in $files) {
+        $relativePath = $file.FullName.Substring($GitHubRoot.Length).TrimStart('\', '/').Replace('\', '/')
+        foreach ($match in [regex]::Matches((Get-Content -LiteralPath $file.FullName -Raw), $pattern)) {
+            $name = $match.Groups['name'].Value
+            if (-not $observed.ContainsKey($name)) {
+                $observed[$name] = @()
+            }
+            $observed[$name] += [pscustomobject]@{
+                Reference = $match.Groups['ref'].Value
+                Comment   = if ($match.Groups['comment'].Success) { $match.Groups['comment'].Value } else { '' }
+                File      = ".github/$relativePath"
+            }
+        }
+    }
+
+    $failed = $false
+    foreach ($name in $RequiredActionNames) {
+        if (-not $observed.ContainsKey($name)) {
+            Write-Host "::error file=scripts/tests/test-unity-workflow-matrix-contract.ps1::No workflow or composite action references the build-lock action '$name'. Every assertion about it would pass vacuously."
+            $failed = $true
+        }
+    }
+
+    $pins = @{}
+    foreach ($name in ($observed.Keys | Sort-Object)) {
+        $usages = @($observed[$name])
+
+        $unpinned = @($usages | Where-Object { $_.Reference -cnotmatch '^[0-9a-f]{40}$' })
+        if ($unpinned.Count -gt 0) {
+            $detail = ($unpinned | ForEach-Object { "$($_.File) -> @$($_.Reference)" }) -join ', '
+            Write-Host "::error file=scripts/tests/test-unity-workflow-matrix-contract.ps1::Build-lock action '$name' must be pinned to a full 40-character commit SHA, never a tag or branch. Offending: $detail."
+            $failed = $true
+            continue
+        }
+
+        $distinctReferences = @(
+            [string[]]@($usages | Select-Object -ExpandProperty Reference) |
+                Sort-Object -CaseSensitive -Unique
+        )
+        if ($distinctReferences.Count -ne 1) {
+            $detail = ($usages | ForEach-Object { "$($_.File) -> @$($_.Reference)" }) -join ', '
+            Write-Host "::error file=scripts/tests/test-unity-workflow-matrix-contract.ps1::Build-lock action '$name' is pinned to $($distinctReferences.Count) different commits. A partial bump leaves two versions live against one Unity seat. Usages: $detail."
+            $failed = $true
+            continue
+        }
+
+        $distinctComments = @(
+            [string[]]@($usages | Select-Object -ExpandProperty Comment) |
+                Sort-Object -CaseSensitive -Unique
+        )
+        if ($distinctComments.Count -ne 1) {
+            $detail = ($usages | ForEach-Object { "$($_.File) -> '# $($_.Comment)'" }) -join ', '
+            Write-Host "::error file=scripts/tests/test-unity-workflow-matrix-contract.ps1::Build-lock action '$name' carries $($distinctComments.Count) different version comments for one commit. Usages: $detail."
+            $failed = $true
+            continue
+        }
+
+        $pins[$name] = [pscustomobject]@{
+            Sha     = $distinctReferences[0]
+            Comment = $distinctComments[0]
+            Count   = $usages.Count
+        }
+    }
+
+    if ($failed) {
+        exit 1
+    }
+
+    return $pins
+}
+
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+
+# The build-lock pins are derived from the workflows rather than restated here. Restating a SHA in
+# this file never added a supply-chain control -- the `uses:` line IS the pin, and anyone able to
+# edit it can edit a literal here in the same commit -- but it did guarantee that every Dependabot
+# bump of those actions turned this test red for a reason no failure message named, on a bot PR
+# nobody owns. What a test can protect is structure, so that is what Get-BuildLockActionPins
+# asserts: every reference is a full commit SHA rather than a movable tag, and every job agrees on
+# one SHA and one version comment per action, so a partial bump still fails loudly.
+$buildLockPins = Get-BuildLockActionPins -GitHubRoot (Join-Path $repoRoot '.github') -RequiredActionNames @(
+    'acquire-build-lock',
+    'release-build-lock',
+    'check-unity-runner-availability',
+    'require-current-pr-head',
+    'require-confirmed-unity-cleanup',
+    'classify-unity-cleanup-evidence'
+)
+$acquireBuildLockActionCommit = $buildLockPins['acquire-build-lock'].Sha
+$acquireBuildLockActionComment = $buildLockPins['acquire-build-lock'].Comment
+$buildLockActionCommit = $buildLockPins['release-build-lock'].Sha
+$buildLockActionVersion = $buildLockPins['release-build-lock'].Comment
+$runnerAvailabilityActionCommit = $buildLockPins['check-unity-runner-availability'].Sha
+$runnerAvailabilityActionVersion = $buildLockPins['check-unity-runner-availability'].Comment
+$currentPrHeadGuardCommit = $buildLockPins['require-current-pr-head'].Sha
+$centralCleanupGateCommit = $buildLockPins['require-confirmed-unity-cleanup'].Sha
+$centralCleanupClassifierCommit = $buildLockPins['classify-unity-cleanup-evidence'].Sha
+Write-Info "Derived build-lock pins: $((($buildLockPins.Keys | Sort-Object) | ForEach-Object { "$_@$($buildLockPins[$_].Sha.Substring(0, 8))" }) -join ' ')"
+
 $workflowPath = Join-Path $repoRoot '.github/workflows/unity-tests.yml'
 $benchmarksWorkflowPath = Join-Path $repoRoot '.github/workflows/unity-benchmarks.yml'
 $releaseWorkflowPath = Join-Path $repoRoot '.github/workflows/release.yml'
@@ -1108,12 +1217,12 @@ if ($VerboseOutput) {
 $runnerPreflightJob = if ($runnerBootstrapJobTexts.ContainsKey('runner-preflight')) { $runnerBootstrapJobTexts['runner-preflight'] } else { '' }
 $bootstrapJob = if ($runnerBootstrapJobTexts.ContainsKey('bootstrap')) { $runnerBootstrapJobTexts['bootstrap'] } else { '' }
 $bootstrapRunsOnPattern = '(?m)^\s+runs-on:\s*\[self-hosted,\s*Windows,\s*RAM-64GB,\s*"\$\{\{\s*inputs\.runner-label\s*\}\}"\]\s*$'
-$runnerPreflightAction = "Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/check-unity-runner-availability@$buildLockActionCommit"
+$runnerPreflightAction = "Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/check-unity-runner-availability@$runnerAvailabilityActionCommit"
 $readerAppCredentialsPattern = '(?ms)reader-app-id:\s*\$\{\{\s*secrets\.BUILD_LOCK_READER_APP_ID\s*\}\}.*reader-app-private-key:\s*\$\{\{\s*secrets\.BUILD_LOCK_READER_APP_PRIVATE_KEY\s*\}\}'
 $runnerBootstrapPinsRequestedMachine = (
     $runnerBootstrapJobTexts.ContainsKey('runner-preflight') -and
     $runnerBootstrapJobTexts.ContainsKey('bootstrap') -and
-    $runnerPreflightJob.Contains("uses: $runnerPreflightAction # $buildLockActionVersion") -and
+    $runnerPreflightJob.Contains("uses: $runnerPreflightAction # $runnerAvailabilityActionVersion") -and
     $runnerPreflightJob -match $readerAppCredentialsPattern -and
     $runnerPreflightJob.Contains('required-label-sets: ''[["self-hosted","Windows","RAM-64GB","${{ inputs.runner-label }}"]]''') -and
     $bootstrapJob -match $bootstrapRunsOnPattern -and
@@ -1135,8 +1244,8 @@ $benchmarksRunnerPreflightJob = if ($benchmarksJobTexts.ContainsKey('runner-pref
 $unityWorkflowRunnerPreflightsFailClosed = (
     $jobTexts.ContainsKey('runner-preflight') -and
     $benchmarksJobTexts.ContainsKey('runner-preflight') -and
-    $unityTestsRunnerPreflightJob.Contains("uses: $runnerPreflightAction # $buildLockActionVersion") -and
-    $benchmarksRunnerPreflightJob.Contains("uses: $runnerPreflightAction # $buildLockActionVersion") -and
+    $unityTestsRunnerPreflightJob.Contains("uses: $runnerPreflightAction # $runnerAvailabilityActionVersion") -and
+    $benchmarksRunnerPreflightJob.Contains("uses: $runnerPreflightAction # $runnerAvailabilityActionVersion") -and
     $unityTestsRunnerPreflightJob -match $readerAppCredentialsPattern -and
     $benchmarksRunnerPreflightJob -match $readerAppCredentialsPattern -and
     $unityTestsRunnerPreflightJob.Contains('required-label-sets: ''[["self-hosted","Windows","RAM-64GB"]]''') -and
@@ -2387,15 +2496,21 @@ if ($sparseRegistryExitCode -ne 0) {
     Write-Info "Checked Windows runner bootstrap sparse uninstall registry entries."
 }
 
+# Two properties, and they pull against each other. `cancel-in-progress: false` is mandatory --
+# cancelling a licensed job can skip license return and lock release. But that alone makes every new
+# run queue behind its predecessor, and a superseded predecessor holds the group for as long as its
+# legs sit in the runner queue, where they cannot reach the head guard that would end them. On PR
+# #351 the head carried no Unity check at all for two hours while every other check was green.
+# Scoping the group to the head is what keeps the second property from costing the first.
 $preservesLicensedPrRuns = (
-    $workflowContent.Contains('group: unity-tests-${{ github.event.pull_request.number || github.ref }}') -and
+    $workflowContent.Contains('group: unity-tests-${{ github.event.pull_request.number || github.ref }}-${{ github.event.pull_request.head.sha || github.sha }}') -and
     $workflowContent.Contains('cancel-in-progress: false')
 )
 if (-not $preservesLicensedPrRuns) {
-    Write-Host "::error file=.github/workflows/unity-tests.yml::Unity Tests must not cancel an in-progress licensed run because cancellation can skip license return and lock release cleanup."
+    Write-Host "::error file=.github/workflows/unity-tests.yml::Unity Tests must not cancel an in-progress licensed run (cancellation can skip license return and lock release), and its concurrency group must be scoped to the head SHA so a superseded run cannot block the current head from being validated at all."
     $failed = $true
 } elseif ($VerboseOutput) {
-    Write-Info "Checked Unity Tests preserves in-progress licensed runs."
+    Write-Info "Checked Unity Tests preserves in-progress licensed runs and scopes concurrency per head."
 }
 
 $currentPrHeadGuardUses = "Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/require-current-pr-head@$currentPrHeadGuardCommit"
@@ -2621,11 +2736,11 @@ foreach ($licensedJobId in $licensedJobIds) {
 }
 
 # The per-leg guards above fire only after a leg has been dispatched, which means
-# waiting in line for the single self-hosted Unity seat. Because this workflow's
-# concurrency group cannot cancel in progress, a superseded iteration that still
-# dispatches its legs holds the group -- and therefore the successor run -- for as
-# long as that queue takes. The hosted matrix-config job must resolve it once and
-# skip the licensed tiers outright.
+# waiting in line for the single self-hosted Unity seat. The concurrency group is
+# scoped per head so that queue can no longer block the successor run outright,
+# but a superseded iteration that dispatches its legs anyway still burns runner
+# slots to fail eight guards. The hosted matrix-config job must resolve
+# supersession once and skip the licensed tiers outright.
 $matrixConfigJob = if ($jobTexts.ContainsKey('matrix-config')) { [string]$jobTexts['matrix-config'] } else { '' }
 $supersededStep = [regex]::Match(
     $matrixConfigJob,
@@ -2902,7 +3017,7 @@ if ($testRunnerTempReturnLogs -ne 3 -or $benchmarkRunnerTempReturnLogs -ne 1) {
     Write-Info 'Checked run-ci-tests workflows classify the runner-temp Unity return log.'
 }
 
-$centralClassifierUses = "Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/classify-unity-cleanup-evidence@$centralCleanupPolicyCommit"
+$centralClassifierUses = "Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/classify-unity-cleanup-evidence@$centralCleanupClassifierCommit"
 $returnActionResourceProofContract = (
     [regex]::Matches($returnUnityLicenseActionContent, [regex]::Escape("uses: $centralClassifierUses")).Count -eq 2 -and
     $returnUnityLicenseActionContent -match '(?ms)^outputs:\s*$.*?^\s+resource-safe:\s*$.*?^\s+value:\s+\$\{\{ steps\.classify_return\.outputs\.resource-safe \|\| steps\.classify_prior\.outputs\.resource-safe \}\}\s*$' -and
@@ -2951,7 +3066,7 @@ if (
     Write-Info 'Checked Docker return evidence ends with the exit_return_rc attestation, including silent EXIT-trap removal.'
 }
 
-$centralGateUses = "Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/require-confirmed-unity-cleanup@$centralCleanupPolicyCommit"
+$centralGateUses = "Ambiguous-Interactive/ambiguous-organization-build-lock/.github/actions/require-confirmed-unity-cleanup@$centralCleanupGateCommit"
 $centralLifecycleFailures = @()
 $licensedLifecycleCount = 0
 foreach ($workflowJobSet in $licensedWorkflowJobSets) {
@@ -3026,6 +3141,45 @@ if ($sharedDiagnosticEvidenceFailures.Count -gt 0) {
     $failed = $true
 } elseif ($VerboseOutput) {
     Write-Info 'Checked shared Unity export evidence is deleted only after failure diagnostics.'
+}
+
+# The central cleanup policy is also *checked out* so its runtime can be diffed against ours. That
+# ref is a `with:` input, which Dependabot never bumps, so a literal SHA there survives a bump and
+# quietly makes the parity test validate the version we stopped using -- a silent pass, not a red
+# check. Both the workflow and scripts/tests/test-portable-cleanup-classifier.js must derive it.
+$policyCheckoutWorkflowPath = Join-Path $repoRoot '.github/workflows/pwsh-invocations-lint.yml'
+if (-not (Test-Path -LiteralPath $policyCheckoutWorkflowPath)) {
+    Write-Host "::error::PowerShell invocations lint workflow not found: $policyCheckoutWorkflowPath"
+    exit 1
+}
+$policyCheckoutWorkflowContent = Get-Content -LiteralPath $policyCheckoutWorkflowPath -Raw
+$policyPinIsDerived = (
+    $policyCheckoutWorkflowContent -match '(?m)^\s+run:\s*\|\s*$[\s\S]*?node scripts/resolve-build-lock-pin\.js require-confirmed-unity-cleanup' -and
+    $policyCheckoutWorkflowContent -match '(?m)^\s+ref:\s+\$\{\{ steps\.policy_pin\.outputs\.sha \}\}\s*$' -and
+    $policyCheckoutWorkflowContent -notmatch '(?m)^\s+ref:\s+[0-9a-f]{40}\s*$'
+)
+if (-not $policyPinIsDerived) {
+    Write-Host "::error file=.github/workflows/pwsh-invocations-lint.yml::The central cleanup policy checkout must take its ref from scripts/resolve-build-lock-pin.js via steps.policy_pin.outputs.sha, never a literal commit SHA."
+    $failed = $true
+} elseif ($VerboseOutput) {
+    Write-Info 'Checked the central cleanup policy checkout derives its commit from the workflow pins.'
+}
+
+$classifierParityTestPath = Join-Path $repoRoot 'scripts/tests/test-portable-cleanup-classifier.js'
+if (-not (Test-Path -LiteralPath $classifierParityTestPath)) {
+    Write-Host "::error::Central cleanup parity test not found: $classifierParityTestPath"
+    exit 1
+}
+$classifierParityTestContent = Get-Content -LiteralPath $classifierParityTestPath -Raw
+$classifierParityDerivesPin = (
+    $classifierParityTestContent.Contains('resolveBuildLockPin("require-confirmed-unity-cleanup", root)') -and
+    $classifierParityTestContent -notmatch '[0-9a-f]{40}'
+)
+if (-not $classifierParityDerivesPin) {
+    Write-Host "::error file=scripts/tests/test-portable-cleanup-classifier.js::The central cleanup parity test must derive the pinned policy commit through resolveBuildLockPin, never restate a literal commit SHA."
+    $failed = $true
+} elseif ($VerboseOutput) {
+    Write-Info 'Checked the central cleanup parity test derives the pinned policy commit.'
 }
 
 $unityLockUsesAppCredentials = (

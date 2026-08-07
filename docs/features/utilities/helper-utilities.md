@@ -595,6 +595,71 @@ finishes. The pool posts nothing back to Unity's main thread, so this is safe fo
 items. A work item whose own continuations capture the main thread's synchronization context would
 deadlock, because `OnDestroy` runs on that thread — prefer `DisposeAsync()` there.
 
+### Semaphore Leases
+
+`SemaphoreSlim` makes you pair every wait with a `finally`. `Acquire()` returns a `SemaphoreLease`
+instead, so the critical section is a `using` block:
+
+```csharp
+using WallstopStudios.UnityHelpers.Core.Threading;
+
+private readonly SemaphoreSlim _gate = new SemaphoreSlim(1, 1);
+
+public void Append(string line)
+{
+    using (_gate.Acquire())
+    {
+        _lines.Add(line);
+    }
+}
+
+public async Task AppendAsync(string line, CancellationToken cancellationToken)
+{
+    using (await _gate.AcquireAsync(cancellationToken))
+    {
+        _lines.Add(line);
+    }
+}
+```
+
+When you would rather not block, `TryAcquire` reports failure instead:
+
+```csharp
+if (_gate.TryAcquire(TimeSpan.FromMilliseconds(50), out SemaphoreLease lease))
+{
+    using (lease)
+    {
+        // Took a permit within the timeout.
+    }
+}
+```
+
+`SemaphoreLease` is a struct, so an uncontended acquire allocates nothing.
+
+**Disposal is tracked and idempotent.** Disposing a lease twice returns one permit, not two. That
+matters more than it sounds: an extra `Release()` raises the permit count above the semaphore's
+maximum and quietly lets two callers into a section built for one. `IsHeld` reports whether a lease
+still owns a permit, and a lease from a failed `TryAcquire` is not held, so disposing it is a no-op.
+
+**Do not copy a lease.** Assigning it to another variable or passing it by value produces a second
+lease pointing at the same permit, and disposing both releases twice. The disposal tracking is
+per-lease and cannot help here — the copy carries its own flags and cannot see that the original
+already released.
+
+**Construct semaphores with an explicit maximum.** It does not make copying safe, but it decides
+whether the mistake is loud-free or silent:
+
+| Constructor               | A copied lease disposed twice                                                                                                                 |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `new SemaphoreSlim(1, 1)` | The extra release throws and `Dispose` swallows it. Count survives.                                                                           |
+| `new SemaphoreSlim(1)`    | Maximum defaults to `int.MaxValue`, so the extra release **succeeds** — the count silently rises to 2 and a second caller enters the section. |
+
+Acquire directly into a `using` and let the lease die there, and neither case can arise.
+
+`Acquire()` and `AcquireAsync()` throw `ArgumentNullException` on a null semaphore rather than
+handing back a lease that is not held — a silently unlocked critical section surfaces far from its
+cause. `TryAcquire` reports `false` instead.
+
 ---
 
 ## Logging
@@ -737,6 +802,55 @@ await FileHelper.CopyFileAsync(
 - Large file operations without blocking
 - Cancellable copy operations
 - Streaming file operations
+
+### Durable Writes for Player Data
+
+`File.WriteAllText` empties the destination before it writes a single byte. If the game is killed, the
+device loses power, or the disk fills in between, the player's save is gone and a truncated one is in its
+place. `DurableFile` writes the new contents to a sibling file, forces them to disk, and only then swaps
+them over the destination.
+
+```csharp
+using WallstopStudios.UnityHelpers.Core.Helper;
+
+if (!DurableFile.TryWriteAllText(savePath, json, out Exception error))
+{
+    Debug.LogError($"Could not save: {error}");
+    // The previous save is still on disk and still readable.
+}
+```
+
+Every method reports failure instead of throwing, and the async ones return the exception (null on
+success):
+
+```csharp
+Exception error = await DurableFile.WriteAllTextAsync(savePath, json, cancellationToken);
+
+// Append is stronger still: it never rewrites bytes that are already on disk.
+DurableFile.TryAppendAllText(ledgerPath, $"{score}\n", out Exception appendError);
+
+// Replace one file with another under the same staging discipline.
+DurableFile.TryCopy(savePath, backupPath, out Exception copyError);
+```
+
+`Serializer.WriteToJsonFile` and `WriteToJsonFileAsync` already write through this, so JSON saves get the
+guarantee without changing any code.
+
+**What it promises:**
+
+- A reader sees either the complete previous contents or the complete new ones, never a partial file.
+- The data is forced out of the page cache before the swap makes it live.
+- Concurrent writes to the same path from your game are serialized.
+
+**What it does not promise:**
+
+- It is **not** full crash safety. .NET cannot flush a directory, so a filesystem may still reorder the
+  rename behind the data write.
+- It does not coordinate with other processes. A second process writing the same file at the same time is
+  reported as a failure rather than allowed to corrupt the document.
+
+A leftover `.tmp` sibling (`DurableFile.TemporarySuffix`) is what an interrupted write leaves behind; it is
+safe to ignore or delete.
 
 ---
 

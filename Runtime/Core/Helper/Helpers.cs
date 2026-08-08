@@ -733,6 +733,11 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
         /// <param name="useJitter">If true, applies a single randomized initial delay up to <paramref name="updateRate"/>.</param>
         /// <param name="waitBefore">If true, waits one interval before the first invocation.</param>
         /// <returns>The started coroutine.</returns>
+        /// <remarks>
+        /// An exception out of <paramref name="action"/> does not stop the job. The first failure is
+        /// reported once as an error against <paramref name="monoBehaviour"/>, subsequent failures are
+        /// not reported, and the job keeps running on its interval.
+        /// </remarks>
         /// <example>
         /// <code>
         /// // Poll a service every 0.5s with staggered start
@@ -753,11 +758,12 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
             }
 
             return monoBehaviour.StartCoroutine(
-                FunctionAsCoroutine(action, updateRate, useJitter, waitBefore)
+                FunctionAsCoroutine(monoBehaviour, action, updateRate, useJitter, waitBefore)
             );
         }
 
         private static IEnumerator FunctionAsCoroutine(
+            Object context,
             Action action,
             float updateRate,
             bool useJitter,
@@ -777,9 +783,22 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                 yield return WaitForDelay(initialDelay);
             }
 
+            bool reportedFailure = false;
             while (true)
             {
-                action();
+                try
+                {
+                    action();
+                }
+                catch (Exception e)
+                {
+                    if (!reportedFailure)
+                    {
+                        ReportRepeatingJobFailure(e, context);
+                        reportedFailure = true;
+                    }
+                }
+
                 if (interval <= 0f)
                 {
                     yield return null;
@@ -788,6 +807,21 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
 
                 yield return WaitForDelay(interval);
             }
+        }
+
+        // A repeating job's whole contract is "this keeps happening". Unity stops a coroutine
+        // permanently the first time its body throws, so an unguarded invocation converts one bad
+        // tick into a subsystem that is silently dead for the rest of the session, with a single
+        // console exception that reads like one failed operation. Callers report the first failure
+        // against the owner and keep the loop alive; later failures are dropped so a job that throws
+        // every tick cannot flood the console (the first report says so explicitly).
+        private static void ReportRepeatingJobFailure(Exception e, Object context)
+        {
+            Debug.LogError(
+                "A repeating job threw; it will keep running, and further failures of this job "
+                    + $"will not be reported. {e}",
+                context
+            );
         }
 
         private static float ResolveInvocationDelay(float baseDelay)
@@ -861,6 +895,14 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
             return monoBehaviour.StartCoroutine(FunctionAfterFrame(action));
         }
 
+        /// <summary>
+        /// Spreads <paramref name="totalCount"/> invocations of <paramref name="action"/> evenly over
+        /// <paramref name="duration"/> seconds, invoking any remainder once the duration elapses.
+        /// </summary>
+        /// <remarks>
+        /// An exception out of <paramref name="action"/> does not cancel the remaining invocations.
+        /// The first failure is reported once as an error; subsequent failures are not reported.
+        /// </remarks>
         public static IEnumerator ExecuteOverTime(
             Action action,
             int totalCount,
@@ -879,6 +921,7 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
             }
 
             int totalExecuted = 0;
+            bool reportedFailure = false;
             float startTime = Time.time;
             while (!HasEnoughTimePassed(startTime, duration))
             {
@@ -889,7 +932,19 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                     && (totalExecuted + (delay ? 1f : 0f)) / totalCount <= percent
                 )
                 {
-                    action();
+                    try
+                    {
+                        action();
+                    }
+                    catch (Exception e)
+                    {
+                        if (!reportedFailure)
+                        {
+                            ReportRepeatingJobFailure(e, null);
+                            reportedFailure = true;
+                        }
+                    }
+
                     ++totalExecuted;
                 }
 
@@ -898,7 +953,19 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
 
             for (; totalExecuted < totalCount; )
             {
-                action();
+                try
+                {
+                    action();
+                }
+                catch (Exception e)
+                {
+                    if (!reportedFailure)
+                    {
+                        ReportRepeatingJobFailure(e, null);
+                        reportedFailure = true;
+                    }
+                }
+
                 ++totalExecuted;
                 yield return null;
             }

@@ -3237,7 +3237,7 @@ namespace WallstopStudios.UnityHelpers.Utils
         public readonly int length;
 
         private readonly Action<T[]> _onDispose;
-        private bool _disposed;
+        private readonly DisposalLease _lease;
 
         /// <summary>
         /// Creates a new <see cref="PooledArray{T}"/> wrapping the specified array with the given logical length.
@@ -3261,7 +3261,9 @@ namespace WallstopStudios.UnityHelpers.Utils
             this.array = array;
             this.length = length;
             _onDispose = onDispose;
-            _disposed = false;
+            // A zero-length rent has nothing to give back -- every pool hands out the same
+            // Array.Empty<T>() instance for it -- so it takes no slot and disposes to nothing.
+            _lease = array == null || array.Length == 0 ? default : DisposalLeases.Acquire();
         }
 
         /// <summary>
@@ -3280,13 +3282,7 @@ namespace WallstopStudios.UnityHelpers.Utils
         /// </remarks>
         public void Dispose()
         {
-            if (_disposed)
-            {
-                return;
-            }
-            _disposed = true;
-
-            if (array == null || array.Length == 0)
+            if (!_lease.TryClaim())
             {
                 return;
             }
@@ -3885,7 +3881,7 @@ namespace WallstopStudios.UnityHelpers.Utils
         /// </summary>
         public readonly T resource;
         private readonly Action<T> _onDispose;
-        private bool _initialized;
+        private readonly DisposalLease _lease;
 
         /// <summary>
         /// Creates a new PooledResource wrapping the specified resource with a disposal action.
@@ -3894,23 +3890,28 @@ namespace WallstopStudios.UnityHelpers.Utils
         /// <param name="onDispose">The action to invoke when disposing, typically returning the resource to a pool.</param>
         public PooledResource(T resource, Action<T> onDispose)
         {
-            _initialized = true;
             this.resource = resource;
             _onDispose = onDispose;
+            _lease = DisposalLeases.Acquire();
         }
 
         /// <summary>
         /// Disposes the resource by invoking the disposal action, typically returning it to the pool.
         /// This method is automatically called at the end of a 'using' block.
         /// </summary>
+        /// <remarks>
+        /// The resource is released at most once per <c>Get</c>, however many copies of this struct
+        /// exist and whenever each is disposed. See <see cref="DisposalLease"/> for why a copy is
+        /// the ordinary way a resource used to be returned twice.
+        /// </remarks>
         public void Dispose()
         {
-            if (!_initialized)
+            if (!_lease.TryClaim())
             {
                 return;
             }
-            _initialized = false;
-            _onDispose(resource);
+
+            _onDispose?.Invoke(resource);
         }
     }
 }

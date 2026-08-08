@@ -2502,12 +2502,50 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
                 keysProperty = dictionaryProperty.FindPropertyRelative(
                     SerializableDictionarySerializedPropertyNames.Keys
                 ),
-                valuesProperty = dictionaryProperty.FindPropertyRelative(
-                    SerializableDictionarySerializedPropertyNames.Values
-                ),
+                valuesProperty = ResolveValuesArray(dictionaryProperty),
             };
             _cachedPropertyPairs[listKey] = pair;
             return pair;
+        }
+
+        // A dictionary whose value type is a collection stores its values in the boxed array,
+        // because Unity refuses the plain one -- so a null _values is not the end of the search.
+        // Resolution order matters: _values is what every ordinary value type uses, and it is the
+        // one whose elements need no unwrapping.
+        private static SerializedProperty ResolveValuesArray(SerializedProperty dictionaryProperty)
+        {
+            return dictionaryProperty.FindPropertyRelative(
+                    SerializableDictionarySerializedPropertyNames.Values
+                )
+                ?? dictionaryProperty.FindPropertyRelative(
+                    SerializableDictionarySerializedPropertyNames.BoxedValues
+                );
+        }
+
+        // Elements of the boxed array are one-field wrappers; the drawer wants the value inside.
+        // Keyed on the array field's own name rather than on the element having a field called
+        // Data, so a consumer value type that happens to declare a Data member is never unwrapped.
+        private static SerializedProperty GetValueElement(
+            SerializedProperty valuesProperty,
+            int index
+        )
+        {
+            SerializedProperty element = valuesProperty.GetArrayElementAtIndex(index);
+            if (
+                element == null
+                || !string.Equals(
+                    valuesProperty.name,
+                    SerializableDictionarySerializedPropertyNames.BoxedValues,
+                    StringComparison.Ordinal
+                )
+            )
+            {
+                return element;
+            }
+
+            return element.FindPropertyRelative(
+                    SerializableDictionarySerializedPropertyNames.BoxedValueData
+                ) ?? element;
         }
 
         private RowRenderData GetOrCreateRowRenderData(
@@ -2549,7 +2587,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
             }
 
             data.keyProperty = keysProperty.GetArrayElementAtIndex(globalIndex);
-            data.valueProperty = valuesProperty.GetArrayElementAtIndex(globalIndex);
+            data.valueProperty = GetValueElement(valuesProperty, globalIndex);
             data.isValid = true;
 
             // Determine if the value type supports foldout/expansion.
@@ -2690,12 +2728,57 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
             return EditorGUIUtility.singleLineHeight * 1.6f;
         }
 
-        // Keys resolved and values did not: Unity serialized the TKey[] and refused the values
-        // array. Requiring both signals keeps an unresolvable property, where neither half exists,
-        // from being reported as a serialization failure it is not.
+        // Keys resolved and NEITHER values array did: Unity serialized the TKey[] and refused every
+        // field that could hold the values. Requiring both signals keeps an unresolvable property,
+        // where neither half exists, from being reported as a serialization failure it is not.
+        // Resolving the boxed array is what makes a collection-valued dictionary stop reporting an
+        // error, because that shape now round-trips.
         private static bool HasDroppedValuesArray(CachedPropertyPair propertyPair)
         {
-            return propertyPair.keysProperty != null && propertyPair.valuesProperty == null;
+            if (propertyPair.keysProperty == null)
+            {
+                return false;
+            }
+
+            SerializedProperty valuesProperty = propertyPair.valuesProperty;
+            if (valuesProperty == null)
+            {
+                return true;
+            }
+
+            // The plain array resolved, so the values have somewhere to live.
+            if (
+                !string.Equals(
+                    valuesProperty.name,
+                    SerializableDictionarySerializedPropertyNames.BoxedValues,
+                    StringComparison.Ordinal
+                )
+            )
+            {
+                return false;
+            }
+
+            // Only the boxed array resolved, and it is empty. Unity DECLARES that field on every
+            // dictionary, so its presence proves nothing -- this is equally "supported shape, no
+            // entries yet" and "value type boxing cannot repair, so nothing is ever stored". They
+            // are indistinguishable from the SerializedProperties alone: the keys array is not the
+            // tell either, because OnAfterDeserialize nulls it whenever keys and values disagree,
+            // so the second case has no keys left after one round trip. Reporting nothing keeps a
+            // merely-empty dictionary from showing a false error; #357 tracks telling them apart by
+            // asking the runtime, which is the side that actually knows.
+            if (valuesProperty.arraySize == 0)
+            {
+                return false;
+            }
+
+            // Boxes exist, so boxing is active -- but it only helps when the boxed field is itself
+            // serializable. Cache<List<ISomething>> serializes as boxes whose Data Unity still
+            // refuses, and inspecting a real element is the only way to see that.
+            SerializedProperty firstBox = valuesProperty.GetArrayElementAtIndex(0);
+            return firstBox == null
+                || firstBox.FindPropertyRelative(
+                    SerializableDictionarySerializedPropertyNames.BoxedValueData
+                ) == null;
         }
 
         internal static bool HasDroppedValuesArrayForTests(SerializedProperty dictionaryProperty)
@@ -2706,9 +2789,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
                     keysProperty = dictionaryProperty.FindPropertyRelative(
                         SerializableDictionarySerializedPropertyNames.Keys
                     ),
-                    valuesProperty = dictionaryProperty.FindPropertyRelative(
-                        SerializableDictionarySerializedPropertyNames.Values
-                    ),
+                    valuesProperty = ResolveValuesArray(dictionaryProperty),
                 }
             );
         }
@@ -3112,9 +3193,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
                     continue;
                 }
 
-                SerializedProperty valueProperty = valuesProperty.GetArrayElementAtIndex(
-                    globalIndex
-                );
+                SerializedProperty valueProperty = GetValueElement(valuesProperty, globalIndex);
                 if (valueProperty == null)
                 {
                     continue;
@@ -4910,9 +4989,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
 
             if (existingIndex >= 0)
             {
-                SerializedProperty valueProperty = valuesProperty.GetArrayElementAtIndex(
-                    existingIndex
-                );
+                SerializedProperty valueProperty = GetValueElement(valuesProperty, existingIndex);
                 SetPropertyValue(valueProperty, pending.value, valueType);
                 RegisterPaletteManualEditForKey(dictionaryProperty, pending.key, keyType);
                 affectedIndex = existingIndex;
@@ -4932,9 +5009,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
                 );
 
                 SerializedProperty keyProperty = keysProperty.GetArrayElementAtIndex(insertIndex);
-                SerializedProperty valueProperty = valuesProperty.GetArrayElementAtIndex(
-                    insertIndex
-                );
+                SerializedProperty valueProperty = GetValueElement(valuesProperty, insertIndex);
 
                 ClearArrayElement(keyProperty);
                 ClearArrayElement(valueProperty);
@@ -5895,9 +5970,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
                     for (int index = 0; index < count; index++)
                     {
                         SerializedProperty keyProperty = keysProperty.GetArrayElementAtIndex(index);
-                        SerializedProperty valueProperty = valuesProperty.GetArrayElementAtIndex(
-                            index
-                        );
+                        SerializedProperty valueProperty = GetValueElement(valuesProperty, index);
                         KeyValueSnapshot snapshot = new()
                         {
                             key = GetPropertyValue(keyProperty, keyType),
@@ -6514,7 +6587,8 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
             SerializedProperty existingKeyProperty = keysProperty.GetArrayElementAtIndex(
                 existingIndex
             );
-            SerializedProperty existingValueProperty = valuesProperty.GetArrayElementAtIndex(
+            SerializedProperty existingValueProperty = GetValueElement(
+                valuesProperty,
                 existingIndex
             );
             object existingKey = GetPropertyValue(existingKeyProperty, keyType);
@@ -10110,7 +10184,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
             for (int i = 0; i < count; i++)
             {
                 SerializedProperty keyProp = keysProperty.GetArrayElementAtIndex(i);
-                SerializedProperty valueProp = valuesProperty.GetArrayElementAtIndex(i);
+                SerializedProperty valueProp = GetValueElement(valuesProperty, i);
 
                 object keyValue = GetPropertyValueBoxed(keyProp, keyType);
                 object valueValue = GetPropertyValueBoxed(valueProp, valueType);
@@ -10129,8 +10203,11 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
             keysField.SetValue(baseDictionary, keysArray);
             valuesField.SetValue(baseDictionary, valuesArray);
 
-            // Now call EditorAfterDeserialize which will read from the updated managed fields
-            baseDictionary.EditorAfterDeserialize();
+            // The managed arrays above are the fresh copy, so ask for the rebuild that trusts them.
+            // The plain EditorAfterDeserialize would refill the values array from the boxed one --
+            // correct for every OTHER caller here, which reaches it without writing anything, and
+            // wrong for this one, which would lose the write it just made.
+            baseDictionary.EditorAfterDeserializeFromManagedArrays();
         }
 
         private static FieldInfo FindFieldInHierarchy(Type type, string fieldName)

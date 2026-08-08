@@ -24,5 +24,19 @@ namespace WallstopStudios.UnityHelpers.Tests.CustomDrawers.TestTypes
         public FloatListHashSet droppedItems = new();
 
         public FloatSerializableListHashSet wrappedItems = new();
+
+        public StringFloatListOpenGenericCacheDictionary openGenericCachedValues = new();
+
+        public StringFloatListSortedDictionary sortedDroppedValues = new();
+
+        public NestedDictionaryDictionary nestedDictionaryValues = new();
+
+        public ListOfDictionaryDictionary listOfDictionaryValues = new();
+
+        public DeeplyNestedDictionary deeplyNestedValues = new();
+
+        public DictionaryHashSet dictionaryItems = new();
+
+        public StringNestedListDictionary nestedListValues = new();
     }
 }

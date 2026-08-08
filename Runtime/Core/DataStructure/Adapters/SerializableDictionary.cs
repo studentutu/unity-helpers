@@ -131,6 +131,18 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
         internal abstract void EditorAfterDeserialize();
 
         /// <summary>
+        /// Rebuilds the runtime dictionary from the managed key/value arrays the CALLER has just
+        /// written, rather than from whatever Unity last serialized.
+        /// </summary>
+        /// <remarks>
+        /// The two differ only for a value type whose values live in the boxed array: there,
+        /// <see cref="EditorAfterDeserialize"/> must refill the values array from the boxed one,
+        /// while a caller that has just populated the values array itself needs that refill
+        /// skipped or its write is overwritten by a copy that is stale until the next serialize.
+        /// </remarks>
+        internal abstract void EditorAfterDeserializeFromManagedArrays();
+
+        /// <summary>
         /// Syncs the runtime dictionary state to the serialized arrays (_keys and _values).
         /// This is the inverse of EditorAfterDeserialize - it writes runtime state to serialized state.
         /// Used by editor code when directly modifying the dictionary and needing to persist changes.
@@ -202,6 +214,62 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
         [ProtoMember(2, OverwriteList = true)]
         protected internal TValueCache[] _values;
 
+        /// <summary>
+        /// Parallel backing array used only when Unity refuses to serialize <see cref="_values"/>.
+        /// </summary>
+        /// <remarks>
+        /// Unity drops an array whose element type is itself a collection, so a
+        /// <c>SerializableDictionary&lt;TKey, List&lt;T&gt;&gt;</c> declares a <c>List&lt;T&gt;[]</c>
+        /// that never reaches the asset. Boxing each value in a one-field serializable class makes
+        /// the collection a field of a class rather than an array element, which Unity accepts.
+        /// This field is <em>populated</em> only for the value types that need it, so every other
+        /// dictionary keeps storing its values in <see cref="_values"/> and stays readable by older
+        /// package versions. Unity still <em>declares</em> it on every dictionary -- a serialized
+        /// field cannot be conditional -- so the format cost is one empty array per dictionary and
+        /// nothing else. ProtoBuf and JSON ignore it because both serialize <see cref="_values"/>
+        /// directly and neither has the nesting restriction.
+        /// </remarks>
+        [SerializeField]
+        [ProtoIgnore]
+        [JsonIgnore]
+        protected internal SerializableDictionary.Cache<TValueCache>[] _boxedValues;
+
+        /// <summary>
+        /// Whether Unity refuses <c>TValueCache[]</c> in a way that boxing each element repairs.
+        /// </summary>
+        /// <remarks>
+        /// Exactly the two shapes Unity drops for nesting: an array element type, and
+        /// <see cref="List{T}"/>. Other unserializable value types -- interfaces, dictionaries,
+        /// classes without <see cref="SerializableAttribute"/> -- are not repaired by boxing either,
+        /// because the box's own field would be just as unserializable, so they must keep reporting
+        /// the Inspector error rather than silently switching to a field that stores nothing.
+        /// </remarks>
+        private static readonly bool RequiresBoxedValues =
+            IsCollectionUnityRefusesToNest(typeof(TValueCache))
+            && !IsCollectionUnityRefusesToNest(NestedElementType(typeof(TValueCache)));
+
+        private static bool IsCollectionUnityRefusesToNest(Type type)
+        {
+            return type != null
+                && (
+                    type.IsArray
+                    || (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(List<>))
+                );
+        }
+
+        private static Type NestedElementType(Type collectionType)
+        {
+            if (collectionType.IsArray)
+            {
+                return collectionType.GetElementType();
+            }
+
+            Type[] arguments = collectionType.IsGenericType
+                ? collectionType.GetGenericArguments()
+                : Array.Empty<Type>();
+            return arguments.Length == 1 ? arguments[0] : null;
+        }
+
         [NonSerialized]
         protected internal bool _preserveSerializedEntries;
 
@@ -247,10 +315,12 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
             {
                 public const string KeysName = nameof(_keys);
                 public const string ValuesName = nameof(_values);
+                public const string BoxedValuesName = nameof(_boxedValues);
             }
 
             internal const string KeysNameInternal = NameHolder.KeysName;
             internal const string ValuesNameInternal = NameHolder.ValuesName;
+            internal const string BoxedValuesNameInternal = NameHolder.BoxedValuesName;
         }
 
         /// <summary>
@@ -267,12 +337,24 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
         /// </example>
         public void OnAfterDeserialize()
         {
-            OnAfterDeserializeInternal(suppressWarnings: false);
+            OnAfterDeserializeInternal(suppressWarnings: false, rehydrateBoxedValues: true);
         }
 
         internal override void EditorAfterDeserialize()
         {
-            OnAfterDeserializeInternal(suppressWarnings: true);
+            // Rehydrates, because most editor callers reach here WITHOUT having written the values
+            // array -- for a collection-valued dictionary Unity only restored the boxed array, so
+            // skipping the refill would rebuild the map from a stale values array.
+            OnAfterDeserializeInternal(suppressWarnings: true, rehydrateBoxedValues: true);
+        }
+
+        internal override void EditorAfterDeserializeFromManagedArrays()
+        {
+            // The one caller that has just filled the values array from the Inspector's
+            // SerializedProperties. Rehydrating would overwrite that write with the boxed copy,
+            // which is stale until the next OnBeforeSerialize -- the same class of bug the
+            // ScriptableSingleton branch in SerializableDictionaryPropertyDrawer guards against.
+            OnAfterDeserializeInternal(suppressWarnings: true, rehydrateBoxedValues: false);
         }
 
         internal override void EditorSyncSerializedArrays()
@@ -282,8 +364,13 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
             OnBeforeSerialize();
         }
 
-        private void OnAfterDeserializeInternal(bool suppressWarnings)
+        private void OnAfterDeserializeInternal(bool suppressWarnings, bool rehydrateBoxedValues)
         {
+            if (rehydrateBoxedValues)
+            {
+                RehydrateValuesFromBoxedCache();
+            }
+
             bool keysAndValuesPresent =
                 _keys != null && _values != null && _keys.Length == _values.Length;
 
@@ -291,6 +378,7 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
             {
                 _keys = null;
                 _values = null;
+                _boxedValues = null;
                 _preserveSerializedEntries = false;
                 _hasDuplicatesOrNulls = false;
                 return;
@@ -399,6 +487,72 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
         /// </code>
         /// </example>
         public void OnBeforeSerialize()
+        {
+            OnBeforeSerializeCore();
+            MirrorValuesToBoxedCache();
+        }
+
+        /// <summary>
+        /// Restores <see cref="_values"/> from <see cref="_boxedValues"/> when Unity serialized the
+        /// boxed field instead. Every later read -- duplicate detection, order-preserving sync,
+        /// <see cref="GetValue"/> -- then works against <see cref="_values"/> unchanged.
+        /// </summary>
+        private void RehydrateValuesFromBoxedCache()
+        {
+            if (!RequiresBoxedValues || _boxedValues == null)
+            {
+                return;
+            }
+
+            int length = _boxedValues.Length;
+            TValueCache[] rehydrated = new TValueCache[length];
+            for (int index = 0; index < length; index++)
+            {
+                SerializableDictionary.Cache<TValueCache> box = _boxedValues[index];
+                rehydrated[index] = box == null ? default : box.Data;
+            }
+
+            _values = rehydrated;
+        }
+
+        /// <summary>
+        /// Copies <see cref="_values"/> into <see cref="_boxedValues"/> so Unity has a field it
+        /// will actually write. Boxes are reused in place, so a serialization cycle that changes
+        /// no entry allocates nothing.
+        /// </summary>
+        private void MirrorValuesToBoxedCache()
+        {
+            if (!RequiresBoxedValues)
+            {
+                return;
+            }
+
+            if (_values == null)
+            {
+                _boxedValues = null;
+                return;
+            }
+
+            int length = _values.Length;
+            if (_boxedValues == null || _boxedValues.Length != length)
+            {
+                _boxedValues = new SerializableDictionary.Cache<TValueCache>[length];
+            }
+
+            for (int index = 0; index < length; index++)
+            {
+                SerializableDictionary.Cache<TValueCache> box = _boxedValues[index];
+                if (box == null)
+                {
+                    box = new SerializableDictionary.Cache<TValueCache>();
+                    _boxedValues[index] = box;
+                }
+
+                box.Data = _values[index];
+            }
+        }
+
+        private void OnBeforeSerializeCore()
         {
             bool arraysIntact = _keys != null && _values != null && _keys.Length == _values.Length;
 
@@ -576,12 +730,13 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
 
             _keys = null;
             _values = null;
+            _boxedValues = null;
         }
 
         [ProtoAfterDeserialization]
         protected internal void OnProtoAfterDeserialization()
         {
-            OnAfterDeserializeInternal(suppressWarnings: false);
+            OnAfterDeserializeInternal(suppressWarnings: false, rehydrateBoxedValues: false);
         }
 
         protected abstract void SetValue(TValueCache[] cache, int index, TValue value);
@@ -605,6 +760,7 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
             _newKeysOrder?.Clear();
             _keys = null;
             _values = null;
+            _boxedValues = null;
             MarkSerializationCacheDirty();
         }
 
@@ -1120,6 +1276,7 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
             // Clear the arrays completely since we're removing all entries
             _keys = null;
             _values = null;
+            _boxedValues = null;
             MarkSerializationCacheDirty();
         }
 
@@ -1512,6 +1669,12 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
         internal const string Values = SerializableDictionary<int, int>
             .SerializedPropertyNames
             .ValuesNameInternal;
+
+        internal const string BoxedValues = SerializableDictionary<int, int>
+            .SerializedPropertyNames
+            .BoxedValuesNameInternal;
+
+        internal const string BoxedValueData = nameof(SerializableDictionary.Cache<int>.Data);
     }
 
     /// <summary>

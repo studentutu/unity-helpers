@@ -12,6 +12,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomEditors
     using WallstopStudios.UnityHelpers.Core.Extension;
     using WallstopStudios.UnityHelpers.Core.Helper;
     using WallstopStudios.UnityHelpers.Editor.Extensions;
+    using WallstopStudios.UnityHelpers.Editor.Utils;
 
     [CustomPropertyDrawer(typeof(SourceFolderEntry))]
     public sealed class SourceFolderEntryDrawer : PropertyDrawer
@@ -46,8 +47,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomEditors
             property.isExpanded = EditorGUI.Foldout(foldoutRect, property.isExpanded, label, true);
             if (property.isExpanded)
             {
-                int originalIndent = EditorGUI.indentLevel;
-                EditorGUI.indentLevel++;
+                using IndentLevelScope indentScope = IndentLevelScope.Indent();
                 float currentY = foldoutRect.yMax + EditorGUIUtility.standardVerticalSpacing;
                 float indentOffset = EditorGUI.indentLevel * 15f;
                 float startX = position.x + indentOffset;
@@ -503,9 +503,8 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomEditors
                     );
                     currentY += exLabelsHeight + EditorGUIUtility.standardVerticalSpacing;
                 }
-
-                EditorGUI.indentLevel = originalIndent;
             }
+
             EditorGUI.EndProperty();
         }
 

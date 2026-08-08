@@ -7,6 +7,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
     using UnityEditor;
     using UnityEngine;
     using WallstopStudios.UnityHelpers.Core.DataStructure.Adapters;
+    using WallstopStudios.UnityHelpers.Editor.Utils;
 
     [CustomPropertyDrawer(typeof(SerializableNullable<>), true)]
     public sealed class SerializableNullablePropertyDrawer : PropertyDrawer
@@ -78,8 +79,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
                 GUIUtility.GetControlID(FocusType.Passive),
                 label
             );
-            int previousIndent = EditorGUI.indentLevel;
-            EditorGUI.indentLevel = 0;
+            using IndentLevelScope indentScope = IndentLevelScope.AtLevel(0);
 
             float toggleWidth = EditorGUIUtility.singleLineHeight;
             float toggleHeight = EditorGUIUtility.singleLineHeight;
@@ -107,8 +107,6 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
                 );
                 EditorGUI.PropertyField(valueRect, valueProperty, GUIContent.none, true);
             }
-
-            EditorGUI.indentLevel = previousIndent;
 
             EditorGUI.EndProperty();
         }

@@ -7,6 +7,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomEditors
     using UnityEditor;
     using UnityEngine;
     using WallstopStudios.UnityHelpers.Editor.Sprites;
+    using WallstopStudios.UnityHelpers.Editor.Utils;
     using PlatformPropertyNames = WallstopStudios.UnityHelpers.Editor.Sprites.TextureSettingsApplierWindow.PlatformOverrideEntry.SerializedPropertyNames;
 
     [CustomPropertyDrawer(typeof(TextureSettingsApplierWindow.PlatformOverrideEntry))]
@@ -223,9 +224,10 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomEditors
             if (apply.boolValue)
             {
                 r.y += r.height + EditorGUIUtility.standardVerticalSpacing;
-                EditorGUI.indentLevel++;
-                EditorGUI.PropertyField(r, val, GUIContent.none);
-                EditorGUI.indentLevel--;
+                using (IndentLevelScope.Indent())
+                {
+                    EditorGUI.PropertyField(r, val, GUIContent.none);
+                }
             }
         }
 

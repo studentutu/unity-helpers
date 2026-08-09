@@ -76,12 +76,119 @@ param(
 
     [switch]$ReleasePlayerBuild,
 
-    # IL2CPP C++ compiler configuration for the standalone player build. 'Release'
-    # (the default, what shipped players run) drives the MSVC optimizer hard, which on
-    # a very large generated translation unit can hit an MSVC `C1001` optimizer ICE
-    # (pass 2 / p2). 'Debug' disables that optimization, so the standalone TEST leg --
-    # a correctness/IL2CPP-compat check, not a native-perf benchmark -- can pass it to
-    # build robustly. Inert for editmode/playmode and Mono (no IL2CPP player is built).
+    # IL2CPP C++ compiler configuration for the standalone player build. 'Release' is
+    # what CI passes on every leg: it is what a shipped player runs, so it is what the
+    # IL2CPP-compat leg should validate, and 'Debug' costs real time -- the standalone
+    # legs execute the same suite roughly 2x slower than the editor's Mono JIT (run
+    # 31221618477: 2021.3 203.3s vs 91.7s, 6000.3 314.1s vs 122.1s).
+    #
+    # 'Debug' remains the escape hatch, and it was needed once. On run 31280555886 the
+    # runners carried MSVC 14.51.36231 and all four standalone legs died with:
+    #
+    #   WallstopStudios.UnityHelpers.Tests.Runtime__13.cpp(8962):
+    #       fatal error C1001: Internal compiler error.
+    #
+    # MSVC 14.51.36231 (VS 2026) at /Ox, Unity 6000.5.2f1, with the SSA common-
+    # subexpression workaround flag already on the command line.
+    #
+    # Note the translation unit: it is the TEST assembly's generated C++, so this is a
+    # property of compiling 8,700 tests into one player. That is evidence the ICE has
+    # not been reproduced for a package-only build -- it is NOT proof a consumer is
+    # safe, because IL2CPP inlines across assemblies and package code can land in that
+    # same translation unit.
+    #
+    # That retry was run, and it failed. Run 31286672790 (2026-08-09), after the runners
+    # were updated, still resolved MSVC 14.51.36231 -- the update did not move the
+    # toolset Unity selects. Two translation units ICEd on the 2022.3 leg, not one:
+    #
+    #   WallstopStudios.UnityHelpers.Tests.Runtime__13.cpp(18446)
+    #   WallstopStudios.UnityHelpers.Tests.Runtime__14.cpp(5076)
+    #       fatal error C1001: Internal compiler error.
+    #       (compiler file '...\Compiler\Utc\src\p2\main.cpp', line 262)
+    #
+    # Same compiler file and line as run 31280555886, so it is the same optimizer defect.
+    # The line numbers moved (8962 -> 18446/5076) because the generated C++ shifted when
+    # tests were added, not because anything in our source provokes it.
+    #
+    # STEERING THE TOOLSET WAS TRIED AND IS DISPROVEN. Both runners carry 14.42.34433
+    # and 14.44.35207 beside the crashing 14.51.36231, which is merely the DEFAULT of the
+    # Visual Studio 2026 installation Unity resolves -- so f4d1d040 set the environment
+    # variable VCToolsVersion=14.44.35207 on every tier and restored 'Release'.
+    #
+    # Run 31288591021 answered it. The variable WAS set (it is in the job log), and the
+    # compiler that ran anyway was:
+    #
+    #   ...\Tools\MSVC\14.51.36231\bin\Hostx64\x64\cl.exe
+    #
+    # followed by the same C1001, twice. VCToolsVersion is an MSBuild/vcvars mechanism;
+    # Bee resolves cl.exe itself and invokes it by absolute path, so the variable never
+    # reaches the compile. The env var has been removed rather than left inert, because a
+    # no-op that looks load-bearing is worse than no attempt at all.
+    #
+    # HOW BEE PICKS A TOOLSET, MEASURED (run 31290048422, 2026-08-09). This is the useful
+    # result of the whole investigation, so it is written down rather than re-derived.
+    #
+    # VS 2026's Microsoft.VCToolsVersion.default.txt was repointed to 14.44.35207 on the
+    # runners. msvc-toolchains.txt in that run's artifact confirms the repoint took:
+    #
+    #   Visual Studio Community 2026 (18.8.12023.21)
+    #     default   = 14.44.35207
+    #     installed = [14.42.34433, 14.44.35207, 14.51.36231]
+    #
+    # And Bee invoked ...\Tools\MSVC\14.51.36231\...\cl.exe anyway, then ICEd.
+    #
+    # So Bee does NOT read the default file. It enumerates VC\Tools\MSVC and takes the
+    # HIGHEST version directory. Two consequences worth keeping:
+    #
+    #   * Repointing the default can never work, and neither can VCToolsVersion (already
+    #     disproven, run 31288591021). Nothing that merely expresses a preference works.
+    #   * The only install-side fix is to make 14.51 not exist on the box -- remove the
+    #     v145 component from VS 2026, or remove its C++ workload so Unity resolves the
+    #     2022 Build Tools installation, whose highest is 14.44.35207.
+    #
+    # THE DIRECTORY IS GONE (2026-08-09). 14.51.36231 was removed from both runners --
+    # uninstalling the component alone did not delete it, so the directory was removed by
+    # hand, and the C++ workload was then reinstalled on every Visual Studio. Both hosts
+    # now top out at 14.44.35207. 'Release' is pinned again to test the one hypothesis
+    # that survives: Bee takes the highest directory, and the highest is no longer the
+    # one that ICEs.
+    #
+    # Known wrinkle, believed harmless: VS 2026's Microsoft.VCToolsVersion.default.txt
+    # still names 14.51.36231, a directory that no longer exists. Bee is measured not to
+    # read that file (run 31290048422), so it should not matter -- but if a leg fails
+    # with a missing-toolset error rather than C1001, that dangling default is the first
+    # suspect, and repointing it to 14.44.35207 is the fix.
+    #
+    # Check msvc-toolchains.txt in the artifact before the build result, as always: it
+    # reports the installed directories, so it says whether the removal survived the
+    # workload reinstall independently of whether the compile succeeded.
+    #
+    # If this ICEs on 14.44, the toolset is exonerated entirely and the defect is not
+    # version-specific. Set both call sites in unity-tests.yml back to
+    # `${{ matrix.test-mode == 'standalone' && 'Debug' || 'Release' }}` and the remaining
+    # lever is PlayerSettings.SetAdditionalIl2CppArgs with --compiler-flags="/O1". See #374.
+    #
+    # THE DEFAULT FILE IS IGNORED TOO. The administrator repoint landed -- run 31290048422
+    # shows, on the very host that then failed:
+    #
+    #   Visual Studio Community 2026  default=14.44.35207
+    #                                 installed=[14.42.34433, 14.44.35207, 14.51.36231]
+    #
+    # and the compiler that ran was still ...\Tools\MSVC\14.51.36231\bin, with C1001 four
+    # times. So Bee reads neither the environment variable nor the installation's declared
+    # default; it resolves the highest version directory present under VC\Tools\MSVC.
+    #
+    # That narrows the remaining runner-side fix to exactly one action: UNINSTALL
+    # 14.51.36231 from VS 2026. Un-defaulting it is not enough, and has now been measured
+    # not to be enough. Note also what this does NOT show: 14.51 is not exonerated by the
+    # repoint failing, because 14.51 is what compiled -- the toolset has never actually
+    # been swapped out under an IL2CPP build.
+    #
+    # The general lesson, and the reason the check is written down: confirm which compiler
+    # actually ran from the cl.exe path in the log, never from the env var being set. The
+    # two disagreed here, and only the log said so.
+    #
+    # Inert for editmode/playmode and Mono (no IL2CPP player is built).
     [ValidateSet('Release', 'Debug')]
     [string]$Il2CppCompilerConfiguration = 'Release',
 
@@ -912,7 +1019,7 @@ function Write-UnityExecutionSymptomDiagnostics {
         '^\s+Assets[\\/]',
         'IgnoreFailingMessages:false',
         'Unhandled log message',
-        'UnexpectedLogMessageException',
+        'UnexpectedLogMessageException(?!\.cs)',
         'CleanupVerificationTask',
         'Test run completed\. Exiting with code 2',
         'One or more tests failed',
@@ -944,7 +1051,14 @@ function Write-UnityExecutionSymptomDiagnostics {
         if ($logText -match 'Files generated by test without cleanup\.') {
             Write-CiError "Unity cleanup verification failed for ${Label}: one or more tests left generated files under Assets. See the generated-file lines above."
         }
-        if ($logText -match 'Unhandled log message' -or $logText -match 'UnexpectedLogMessageException') {
+        # `UnexpectedLogMessageException` also names a FILE in the test framework, and the
+        # IL2CPP build size report lists it verbatim:
+        #   0.2 kb  0.0% Packages/com.unity.test-framework/.../UnexpectedLogMessageException.cs
+        # A bare substring match therefore reported 'the framework rejected an unexpected log' for
+        # every Release standalone failure, whatever actually went wrong (run 31292390551, where
+        # the real cause was a player crash). Exclude the source-file spelling only -- anything
+        # narrower risks missing a genuine rejection.
+        if ($logText -match 'Unhandled log message' -or $logText -match 'UnexpectedLogMessageException(?!\.cs)') {
             Write-CiError "Unity Test Framework rejected an unexpected log for ${Label}. Add a precise LogAssert.Expect for expected logs or fix the production log."
         }
         if ($logText -match 'EditorWindow\.ShowUtility' -or $logText -match 'd3d12: Unrecoverable GPU device error') {
@@ -1253,10 +1367,10 @@ public static class UhCiTestConfigurator
         PlayerSettings.SetManagedStrippingLevel(BuildTargetGroup.Standalone, ManagedStrippingLevel.Disabled);
         // Pin the IL2CPP C++ compiler configuration explicitly ($CompilerConfiguration).
         // An ephemeral CI project has no committed default, so the pin removes the
-        // variable instead of trusting any implicit default. Release matches a shipped
-        // player (and any future IL2CPP native benchmark); the standalone TEST leg pins
-        // Debug to skip the MSVC optimizer (pass 2), which can hit a `C1001` ICE on the
-        // very large generated test translation unit. Harmless under Mono.
+        // variable instead of trusting any implicit default. The standalone leg passes
+        // Debug because Release ICEs MSVC on the generated test C++ -- see the
+        // -Il2CppCompilerConfiguration parameter docs for the run and the exact file.
+        // Harmless under Mono.
         PlayerSettings.SetIl2CppCompilerConfiguration(BuildTargetGroup.Standalone, Il2CppCompilerConfiguration.$CompilerConfiguration);
 
         // Print the EFFECTIVE Unity config so the artifact log PROVES Mono/IL2CPP
@@ -2949,7 +3063,7 @@ function Write-UnityResultFailureDiagnostics {
                 'CleanupVerificationTask',
                 'IgnoreFailingMessages:false',
                 'Unhandled log message',
-                'UnexpectedLogMessageException',
+                'UnexpectedLogMessageException(?!\.cs)',
                 'EditorWindow\.ShowUtility',
                 'd3d12: Unrecoverable GPU device error',
                 'AddCursorRect called outside an editor OnGUI'
@@ -3365,6 +3479,49 @@ $RepoRoot = Resolve-FullPath -Path $RepoRoot
 Assert-RepoRoot -Path $RepoRoot
 $ArtifactsPath = Resolve-FullPath -Path $ArtifactsPath
 New-Item -ItemType Directory -Force -Path $ArtifactsPath | Out-Null
+
+# Which MSVC toolset IL2CPP will use, written INTO THE ARTIFACT. The runner
+# diagnostics step prints the same thing, but that lands in the GitHub job log,
+# which is not retrievable through the REST API -- so the one place a toolchain
+# question can actually be answered after the fact is the artifact, next to
+# unity.log. Bee echoes the compiler command line only when a build FAILS, so
+# without this a green run records nothing about what compiled it. See #374:
+# MSVC 14.51.36231 ICEs at /Ox on the generated test C++.
+try {
+    $toolchainReport = Join-Path $ArtifactsPath 'msvc-toolchains.txt'
+    $vsWhereExe = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    $toolchainLines = New-Object System.Collections.Generic.List[string]
+    if (-not (Test-Path -LiteralPath $vsWhereExe)) {
+        $toolchainLines.Add('vswhere.exe not found; no Visual Studio installation could be enumerated.')
+    }
+    else {
+        foreach ($vsInstance in @(& $vsWhereExe -products * -format json | ConvertFrom-Json)) {
+            $defaultVersionFile = Join-Path $vsInstance.installationPath 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt'
+            $defaultToolset = if (Test-Path -LiteralPath $defaultVersionFile) {
+                (Get-Content -LiteralPath $defaultVersionFile -Raw).Trim()
+            }
+            else { '<none>' }
+            $toolsRoot = Join-Path $vsInstance.installationPath 'VC\Tools\MSVC'
+            $installedToolsets = if (Test-Path -LiteralPath $toolsRoot) {
+                ((Get-ChildItem -LiteralPath $toolsRoot -Directory -ErrorAction SilentlyContinue |
+                    Select-Object -ExpandProperty Name | Sort-Object) -join ', ')
+            }
+            else { '<none>' }
+            $toolchainLines.Add(("{0} ({1})`n  path      = {2}`n  default   = {3}`n  installed = [{4}]" -f `
+                    $vsInstance.displayName, $vsInstance.installationVersion, $vsInstance.installationPath, `
+                    $defaultToolset, $installedToolsets))
+        }
+    }
+    if ($toolchainLines.Count -eq 0) {
+        $toolchainLines.Add('vswhere reported no Visual Studio installations.')
+    }
+    Set-Content -LiteralPath $toolchainReport -Value ($toolchainLines -join "`n") -Encoding utf8
+    Write-Host "MSVC toolchains recorded to $toolchainReport"
+}
+catch {
+    # Diagnostics that can fail a build are worse than no diagnostics.
+    Write-Host "MSVC toolchain report unavailable: $($_.Exception.Message)"
+}
 
 $ProjectWorkspace = Resolve-UnityProjectWorkspace `
     -RepoRoot $RepoRoot `

@@ -136,6 +136,104 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
         }
     }
 
+    /// <summary>
+    /// A contract whose members are other contracts -- the shape <c>WPROTO003</c> used to refuse.
+    /// </summary>
+    [WProtoContract]
+    public sealed partial class NestingContract
+    {
+        [WProtoMember(1)]
+        public int Id;
+
+        [WProtoMember(2)]
+        public HookedContract Child;
+
+        [WProtoMember(3)]
+        public Outer.Point Where;
+
+        [WProtoMember(4)]
+        public Outer.Point? MaybeWhere;
+    }
+
+    /// <summary>
+    /// One more level, so a hooked contract sits two prefixes deep.
+    /// </summary>
+    /// <remarks>
+    /// This is the shape that decides how sub-message lengths are produced. Re-measuring a child to
+    /// size its prefix runs the child's before-serialization hook once per enclosing level while its
+    /// after-serialization hook still runs once, so anything the before hook rents leaks one rental
+    /// per level.
+    /// </remarks>
+    [WProtoContract]
+    public sealed partial class DeepContract
+    {
+        [WProtoMember(1)]
+        public int Id;
+
+        [WProtoMember(2)]
+        public NestingContract Child;
+    }
+
+    /// <summary>A sub-message big enough to need a multi-byte length prefix.</summary>
+    [WProtoContract]
+    public sealed partial class BulkContract
+    {
+        [WProtoMember(1)]
+        public byte[] Payload;
+    }
+
+    /// <summary>Wraps <see cref="BulkContract"/> so its prefix has to be produced by a parent.</summary>
+    [WProtoContract]
+    public sealed partial class BulkHolder
+    {
+        [WProtoMember(1)]
+        public BulkContract Child;
+
+        [WProtoMember(2)]
+        public int Trailer;
+    }
+
+    /// <summary>A contract with no members, so a present one is a key and a zero length.</summary>
+    [WProtoContract]
+    public sealed partial class EmptyContract { }
+
+    /// <summary>Every shape that can carry <c>IsRequired</c>, so what it forces can be pinned.</summary>
+    [WProtoContract]
+    public sealed partial class RequiredContract
+    {
+        [WProtoMember(1, IsRequired = true)]
+        public int Number;
+
+        [WProtoMember(2, IsRequired = true)]
+        public EmptyContract Message;
+
+        [WProtoMember(3, IsRequired = true)]
+        public string Text;
+
+        [WProtoMember(4, IsRequired = true)]
+        public byte[] Bytes;
+
+        [WProtoMember(5, IsRequired = true)]
+        public Outer.Point Where;
+
+        [WProtoMember(6, IsRequired = true)]
+        public double? Ratio;
+    }
+
+    /// <summary>
+    /// A contract that refers to itself: a legal schema, and one whose measurement is unbounded
+    /// unless something bounds it.
+    /// </summary>
+    [WProtoContract]
+    public sealed partial class ChainContract
+    {
+        [WProtoMember(1)]
+        public int Id;
+
+        [WProtoMember(2)]
+        public ChainContract Next;
+    }
+
     /// <summary>The one enum the contracts above use.</summary>
     public enum Mode
     {

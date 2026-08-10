@@ -2326,6 +2326,56 @@ function Run-ReleaseTagWorkflowRetirementContractTests {
     -Message 'Expected release-prepare.yml PR body to instruct operators to run Release Publish, not Release Tag.'
 }
 
+function Run-GeneratedMetaLineEndingContractTests {
+  Write-Host ""
+  Write-Host "Generated .meta line-ending contracts:" -ForegroundColor Magenta
+  Write-Host ""
+
+  $repoRoot = Get-RepoRoot
+
+  # .gitattributes declares '*.meta text eol=crlf' and check-eol.ps1 enforces that in the WORKING
+  # TREE, but a freshly generated file never passes through git's smudge filter. A generator that
+  # writes LF therefore leaves validate:prepush failing on a file the developer did not hand-write --
+  # and agent:preflight:fix cannot clear it, because its EOL normalization runs before the step that
+  # creates the .meta. Observed twice: session 173 committed one and session 174 produced two more.
+  $attributesPath = Join-Path $repoRoot '.gitattributes'
+  $attributesContent = Get-Content -LiteralPath $attributesPath -Raw
+  $declaresCrlf = $attributesContent -match '(?m)^\*\.meta\s+text\s+eol=crlf\s*$'
+
+  Write-TestResult `
+    -TestName '.gitattributes still declares .meta as CRLF in the working tree' `
+    -Passed $declaresCrlf `
+    -Message 'Expected .gitattributes to carry "*.meta text eol=crlf"; the generators below are written to match it.'
+
+  $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) "meta-eol-contract-$([System.Guid]::NewGuid().ToString('N'))"
+  New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+  try {
+    $probePath = Join-Path $tempRoot 'Probe.cs'
+    Set-Content -LiteralPath $probePath -Value 'namespace Probe { }' -NoNewline
+
+    $generator = Join-Path $repoRoot 'scripts/generate-meta.sh'
+    & bash $generator $probePath 2>&1 | Out-Null
+
+    $metaPath = "$probePath.meta"
+    $generated = Test-Path -LiteralPath $metaPath -PathType Leaf
+    $carriageReturns = 0
+    $lineFeeds = 0
+    if ($generated) {
+      $bytes = [System.IO.File]::ReadAllBytes($metaPath)
+      $carriageReturns = @($bytes | Where-Object { $_ -eq 13 }).Count
+      $lineFeeds = @($bytes | Where-Object { $_ -eq 10 }).Count
+    }
+
+    Write-TestResult `
+      -TestName 'generate-meta.sh writes CRLF line endings' `
+      -Passed ($generated -and $lineFeeds -gt 0 -and $carriageReturns -eq $lineFeeds) `
+      -Message "Generated: $generated, CR=$carriageReturns, LF=$lineFeeds (every LF must be preceded by a CR)."
+  }
+  finally {
+    Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
 function Run-ReleasePackageContentContractTests {
   Write-Host ""
   Write-Host "Release package content contracts:" -ForegroundColor Magenta
@@ -2422,6 +2472,47 @@ function Run-ReleasePackageContentContractTests {
     $validatorContent.Contains('[System.IO.Path]::GetRelativePath($rootPath, $childPath)') -and
     -not $validatorContent.Contains('.FullName.Replace(')
   )
+  # package.json's files array and the validator's lists are two hand-maintained descriptions of the
+  # same payload, and until now nothing compared them in this direction: the checks above only assert
+  # that each list CONTAINS what a release needs. An entry that package.json ships and the validator
+  # forbids fails the release, and it fails it at the one moment nobody wants a surprise. An entry the
+  # validator allows and package.json omits is worse -- npm simply does not ship it, and no check
+  # anywhere says so.
+  $validatorForbiddenEntries = Get-PowerShellSingleQuotedArrayEntries `
+    -Content $validatorContent `
+    -VariableName 'forbiddenPackageEntries'
+  $validatorForbiddenRootMarkdownPrefixes = Get-PowerShellSingleQuotedArrayEntries `
+    -Content $validatorContent `
+    -VariableName 'forbiddenRootMarkdownArtifactPrefixes'
+  $packageFilesTopLevelEntries = @(
+    $packageFiles |
+      ForEach-Object { ($_ -split '[\\/]')[0] } |
+      Where-Object { $_ } |
+      Select-Object -Unique
+  )
+  $shippedButForbiddenEntries = @(
+    $packageFiles |
+      Where-Object {
+        $entry = $_
+        ($entry -in $validatorForbiddenEntries) -or
+        (
+          @($validatorForbiddenRootMarkdownPrefixes | Where-Object {
+              $entry.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase)
+            }).Count -gt 0
+        )
+      }
+  )
+  # package.json is never listed in files -- npm always includes it -- so the validator allowing it is
+  # not drift. Nothing else may appear in one list and not the other.
+  $shippedButNotAllowedEntries = @(
+    $packageFilesTopLevelEntries | Where-Object { $_ -cnotin $validatorAllowedTopLevelEntries }
+  )
+  $allowedButNotShippedEntries = @(
+    $validatorAllowedTopLevelEntries |
+      Where-Object { $_ -ne 'package.json' } |
+      Where-Object { $_ -cnotin $packageFilesTopLevelEntries }
+  )
+
   $validatorRejectsPrDescriptionArtifacts = (
     $validatorContent.Contains('$forbiddenRootMarkdownArtifactPrefixes') -and
     $validatorContent.Contains("'pr-description.md'") -and
@@ -2496,6 +2587,21 @@ function Run-ReleasePackageContentContractTests {
     -TestName 'npm package validator rejects PR description artifacts explicitly' `
     -Passed $validatorRejectsPrDescriptionArtifacts `
     -Message 'Expected validate-npm-package.ps1 to reject pr-description.md case variants before package publication.'
+
+  Write-TestResult `
+    -TestName 'package.json ships nothing the npm package validator forbids' `
+    -Passed ($shippedButForbiddenEntries.Count -eq 0) `
+    -Message "package.json files entries the validator forbids: $($shippedButForbiddenEntries -join ', ')"
+
+  Write-TestResult `
+    -TestName 'package.json ships nothing outside the validator top-level allowlist' `
+    -Passed ($shippedButNotAllowedEntries.Count -eq 0) `
+    -Message "package.json files entries missing from allowedTopLevelEntries: $($shippedButNotAllowedEntries -join ', ')"
+
+  Write-TestResult `
+    -TestName 'npm package validator allows nothing package.json forgets to ship' `
+    -Passed ($allowedButNotShippedEntries.Count -eq 0) `
+    -Message "allowedTopLevelEntries absent from package.json files: $($allowedButNotShippedEntries -join ', ')"
 
   Write-TestResult `
     -TestName 'npm package validator uses case-sensitive package membership checks' `
@@ -2710,5 +2816,6 @@ Run-ReleasePublishWorkflowBudgetContractTests
 Run-ReleasePrepareWorkflowContractTests
 Run-ReleaseTagWorkflowRetirementContractTests
 Run-ReleasePackageContentContractTests
+Run-GeneratedMetaLineEndingContractTests
 Run-CSharpierFormatGateContractTests
 Print-SummaryAndExit

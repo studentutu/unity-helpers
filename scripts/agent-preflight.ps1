@@ -1685,6 +1685,13 @@ $spellingTargets = @(
     }
 )
 $csharpTargets = @($relativePaths | Where-Object { $_ -like '*.cs' })
+# CSharpier formats MSBuild project files as well as C# sources, and CI runs it over the WHOLE
+# repository -- so a changed .csproj that this script never looked at still fails the build. That
+# happened: a new .csproj passed preflight and reddened the format leg. Kept separate from
+# $csharpTargets because the license-header and duplicate-using checks beside it are .cs-only.
+$csharpierTargets = @($relativePaths | Where-Object {
+        $_ -like '*.cs' -or $_ -like '*.csproj' -or $_ -like '*.props' -or $_ -like '*.targets'
+    })
 $testFiles = @($csharpTargets | Where-Object { $_ -like 'Tests/*.cs' })
 $metaRelevantPaths = @($relativePaths | Where-Object { Test-MetaRequiredPath -RelativePath $_ })
 $eolTargets = @($relativePaths)
@@ -1912,7 +1919,15 @@ if ($spellingTargets.Count -gt 0) {
         $spellingFileList = $null
         try {
             $spellingFileList = [System.IO.Path]::GetTempFileName()
-            Set-Content -LiteralPath $spellingFileList -Value $spellingTargets -Encoding UTF8
+            # ABSOLUTE paths, deliberately. cspell resolves --file-list entries relative to the
+            # LIST FILE's directory, not the working directory, and this list lives in the system
+            # temp directory -- so repo-relative entries became /tmp/<path>, every one was reported
+            # "File not found", and the step checked zero files while printing a clean summary.
+            # Measured: a misspelling in a changed C# file passed here and failed in CI.
+            $spellingAbsolute = @(
+                $spellingTargets | ForEach-Object { Join-Path -Path $repoRoot -ChildPath $_ }
+            )
+            Set-Content -LiteralPath $spellingFileList -Value $spellingAbsolute -Encoding UTF8
         }
         catch {
             Write-ErrorMsg "Failed to prepare temporary spelling file list: $($_.Exception.Message)"
@@ -2173,24 +2188,28 @@ if ($testFiles.Count -gt 0) {
     }
 }
 
-if ($csharpTargets.Count -gt 0) {
+if ($csharpierTargets.Count -gt 0) {
     if ($Fix) {
         Write-Host '[agent-preflight] Formatting changed C# files with CSharpier...' -ForegroundColor Blue
         if (-not (Test-CanRunWholeFileAutoFixOnStagedTargets `
                     -RepoRoot $repoRoot `
-                    -Paths $csharpTargets `
+                    -Paths $csharpierTargets `
                     -InitiallyUnstagedPaths $initiallyUnstagedPaths `
                     -Context 'CSharpier formatting')) {
             $failureCount++
         }
         else {
-            & (Join-Path $repoRoot 'scripts/lint-csharp-format.ps1') -Fix -SkipWhenUnavailable -Paths $csharpTargets -VerboseOutput:$VerboseOutput
+            & (Join-Path $repoRoot 'scripts/lint-csharp-format.ps1') -Fix -SkipWhenUnavailable -Paths $csharpierTargets -VerboseOutput:$VerboseOutput
             if ($LASTEXITCODE -ne 0) {
                 $failureCount++
             }
             else {
                 $stagedPaths = Get-GitStagedPaths -RepoRoot $repoRoot
-                $stagedCSharpFiles = @($csharpTargets | Where-Object { $stagedPaths.Contains($_) })
+                # $csharpierTargets, not $csharpTargets: CSharpier just reformatted the MSBuild
+                # project files too, and re-staging only the .cs ones left a reformatted .csproj
+                # out of the index -- so the next commit would push the unformatted copy and fail
+                # the very CI format leg this scope widening was meant to catch.
+                $stagedCSharpFiles = @($csharpierTargets | Where-Object { $stagedPaths.Contains($_) })
                 if ($stagedCSharpFiles.Count -gt 0) {
                     if (-not (Add-PathsToGitIndexWithRetry -RepoRoot $repoRoot -Paths $stagedCSharpFiles -InitiallyUnstagedPaths $initiallyUnstagedPaths -Context 'CSharpier formatting')) {
                         Write-ErrorMsg 'Failed to stage CSharpier formatting fixes. Git index.lock contention, pre-existing unstaged hunks, or another git error is likely.'
@@ -2206,7 +2225,7 @@ if ($csharpTargets.Count -gt 0) {
     }
 
     Write-Host '[agent-preflight] Checking CSharpier formatting on changed C# files...' -ForegroundColor Blue
-    & (Join-Path $repoRoot 'scripts/lint-csharp-format.ps1') -SkipWhenUnavailable -Paths $csharpTargets -VerboseOutput:$VerboseOutput
+    & (Join-Path $repoRoot 'scripts/lint-csharp-format.ps1') -SkipWhenUnavailable -Paths $csharpierTargets -VerboseOutput:$VerboseOutput
     if ($LASTEXITCODE -ne 0) {
         $failureCount++
     }

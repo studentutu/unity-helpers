@@ -1685,6 +1685,13 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization
         /// </remarks>
         public static T ProtoDeserialize<T>(byte[] data)
         {
+#if WALLSTOP_PROTO
+            if (data != null && WallstopProto.WProtoFacade.TryDeserialize(data, out T wproto))
+            {
+                return wproto;
+            }
+#endif
+
             if (data == null)
             {
                 SerializationFailureException.ThrowNullInput<T>(
@@ -2152,6 +2159,20 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization
         /// </example>
         public static byte[] ProtoSerialize<T>(T input, bool forceRuntimeType = false)
         {
+#if WALLSTOP_PROTO
+            // The facade swap, opt-in per type: a contract with a generated formatter takes the
+            // reflection-free path, everything else falls through to protobuf-net unchanged. Not
+            // taken when the caller asked for runtime-type dispatch, which is protobuf-net's model
+            // rather than a formatter's.
+            if (
+                !forceRuntimeType
+                && WallstopProto.WProtoFacade.TrySerialize(input, out byte[] wproto)
+            )
+            {
+                return wproto;
+            }
+#endif
+
             Type declared = typeof(T);
 
             // Intercept serializable collection types to use wrapper-based serialization
@@ -2894,8 +2915,6 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization
             out string resolvedName
         )
         {
-            resolvedName = member.Name;
-
             JsonIgnoreAttribute ignore = null;
             JsonPropertyNameAttribute propertyName = null;
             try
@@ -2906,19 +2925,19 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization
             catch
             {
                 // Defensive: malformed attribute metadata must not throw from the public API.
+                resolvedName = member.Name;
                 return true;
             }
 
             if (ignore != null && ignore.Condition == JsonIgnoreCondition.Always)
             {
+                resolvedName = null;
                 return false;
             }
 
-            if (!string.IsNullOrEmpty(propertyName?.Name))
-            {
-                resolvedName = propertyName.Name;
-            }
-
+            resolvedName = string.IsNullOrEmpty(propertyName?.Name)
+                ? member.Name
+                : propertyName.Name;
             return true;
         }
 

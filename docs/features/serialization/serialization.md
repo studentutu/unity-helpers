@@ -965,6 +965,198 @@ reading. A graph deeper than that — in practice, one containing a cycle — th
 `InvalidOperationException` naming the type, because a cyclic message has no finite encoded size and
 the alternative is a stack overflow, which cannot be caught.
 
+#### Collections
+
+A `[WProtoMember]` may be an array or a collection, and it becomes a **repeated field** — a run of
+same-numbered fields on the wire rather than one value:
+
+```csharp
+[WProtoContract]
+public sealed partial class Inventory
+{
+    [WProtoMember(1)]
+    public int[] ItemIds;
+
+    [WProtoMember(2)]
+    public List<string> Tags;
+
+    [WProtoMember(3)]
+    public HashSet<int> UnlockedRecipes;
+
+    [WProtoMember(4, OverwriteList = true)]
+    public List<Loadout> Loadouts;   // replaced on read instead of appended to
+}
+```
+
+**What is accepted.** A single-dimension array, or any type that implements `ICollection<T>` exactly
+once, has a public parameterless constructor, and has a public `Add(T)`. That is `List<T>`,
+`HashSet<T>`, `SortedSet<T>`, `Collection<T>` and your own types. The element may be any scalar
+shape, an enum, a `byte[]`, or another `[WProtoContract]`.
+
+**A collection may be a `struct`.** Nothing about `ICollection<T>` requires a class, and an inline or
+pooled buffer is a good reason to make one a value type. A struct collection is never null-checked
+and is assigned back to its member after reading, because everything in between operated on a copy.
+Iteration binds to your concrete enumerator, so a struct collection is not boxed on the write path.
+
+**Five behaviors are worth knowing.** All five are protobuf-net's, measured rather than assumed, and
+three of them are the opposite of the rule for a plain member:
+
+- **Every element is written**, including one equal to its type's default. A member holding `0` is
+  omitted; an element holding `0` is not, because dropping it would shorten the collection.
+- **Null and empty are the same bytes** — both write nothing. So an empty collection with no
+  constructor value behind it **reads back as `null`**. This is a silent data change and it is
+  reproduced deliberately, because the alternative is data protobuf-net cannot read.
+- **A null element is refused**, with an `InvalidOperationException` naming the contract and the
+  member. There is no encoding for an absent value inside a run; writing one would either invent an
+  empty value or silently shorten the collection. protobuf-net raises on the same input.
+- **Reading appends** to whatever the constructor left in the member. `OverwriteList = true` replaces
+  it instead. An **absent** field leaves the constructor's value alone either way — there is nothing
+  for an overwrite to be triggered by.
+- **Packed payloads are accepted** even though this package always writes unpacked, which is what
+  protobuf-net does. A payload written by a contract that set `IsPacked` decodes here unchanged.
+
+Dictionaries are not supported yet: a protobuf map is a repeated _sub-message_ with the key at field
+1 and the value at field 2, which is a different encoding. `Dictionary<TKey, TValue>` and its
+relatives are a build error naming the member rather than bytes nothing could read back.
+
+#### Polymorphism
+
+`[WProtoInclude(tag, typeof(Subtype))]` on a contract lets a member typed as the base round-trip as
+the concrete subtype:
+
+```csharp
+[WProtoContract]
+[WProtoInclude(100, typeof(Melee))]
+[WProtoInclude(101, typeof(Ranged))]
+public abstract partial class Weapon
+{
+    [WProtoMember(1)]
+    public int Durability;
+}
+
+[WProtoContract]
+public partial class Melee : Weapon
+{
+    [WProtoMember(1)]     // the subtype has its own tag space
+    public int Reach;
+}
+```
+
+Dispatch is a chain of type tests over the declared subtypes — static code IL2CPP compiles like any
+other, with no reflection and no `MakeGenericType`.
+
+**Four things are worth knowing, and the first is the one that surprises:**
+
+- **The include is written first, before the base's own members**, whatever its tag number. Every
+  other member obeys ascending field order; includes do not. Measured, and confirmed with an include
+  at tag 3 emitted ahead of members at tags 1 and 5.
+- **An include names a _direct_ subtype.** A grandchild is declared on the type it actually derives
+  from, not on the root — protobuf-net refuses the other arrangement outright. Each level writes its
+  own include and then its own members, so a three-level hierarchy nests naturally.
+- **An all-default subtype still writes its include** (a tag and a zero length). Dropping it because
+  the payload is empty would read the value back as its base type.
+- **A subtype nothing declares is refused**, naming the type and the fix, rather than written under
+  its nearest declared ancestor's tag and silently downgraded on read. An unrecognized include tag in
+  a _payload_ is the opposite case and is skipped as an ordinary unknown field, so a save from a
+  newer build still loads.
+
+An abstract contract must declare at least one include — reading it could otherwise never produce an
+instance — and a payload for one that names no subtype is malformed rather than an empty base.
+
+#### Surrogates
+
+Unity's `Vector3`, `Color` and `Bounds` cannot carry `[WProtoContract]` — they are not yours to
+annotate. A **surrogate** gives them a wire shape:
+
+```csharp
+[assembly: WProtoSurrogate(typeof(Vector3), typeof(Vector3Surrogate))]
+
+[WProtoContract]
+public partial struct Vector3Surrogate
+{
+    [WProtoMember(1)] public float x;
+    [WProtoMember(2)] public float y;
+    [WProtoMember(3)] public float z;
+
+    public static implicit operator Vector3(Vector3Surrogate v) => new(v.x, v.y, v.z);
+    public static implicit operator Vector3Surrogate(Vector3 v) => new() { x = v.x, y = v.y, z = v.z };
+}
+```
+
+Any member of the real type — plain, repeated, or a map value — is then written as the surrogate,
+byte-for-byte, and converted back on read. The surrogate's field numbers alone define the bytes.
+
+**The attribute goes on the assembly**, not on either type. The real type usually lives somewhere
+that cannot reference this package, and an assembly attribute is the one thing the generator can
+enumerate cheaply across every reference — which is what lets a **consumer's** build find the
+surrogates this package ships. The compilation's own declarations are searched first, so you can
+override a surrogate for a type you also use.
+
+Both conversions must exist, implicit or explicit. A default surrogated **struct** is still written
+(a tag and a zero length), following the same rule as any struct sub-message.
+
+#### Generic contracts
+
+A `[WProtoContract]` may be generic, and its members may be typed as its own parameters:
+
+```csharp
+[WProtoContract]
+public partial class Box<T>
+{
+    [WProtoMember(1)] public T Value;
+    [WProtoMember(2)] public T[] Many;
+}
+```
+
+**Each closure gets its own encoding, because it must.** The field key itself changes with `T` —
+`Box<int>.Value` is `08 01` (varint), `Box<double>` is `09 …` (fixed64), `Box<string>` is `0A …`
+(length-delimited). The generated code asks `WProtoGeneric<T>` rather than carrying a constant, and
+that is a closed generic IL2CPP compiles ahead of time like any other.
+
+**The closures you use must appear in source.** A registrar cannot register an open generic, and
+constructing one at runtime would need `MakeGenericType` — the exact call IL2CPP cannot compile. The
+generator registers every closed construction it can see in the compilation, which is what makes a
+consumer's own `Box<TheirStruct>` work without any manual registration. A construction that appears
+in no source could not have been reached at runtime either.
+
+If you need a closure that no code names directly, name it — a `static` field of that type is
+enough.
+
+A contract **nested inside** a generic type is still refused (`WPROTO009`): it is not itself generic,
+so there is no construction of it to discover, and its formatter would be emitted and never
+registered. Move it out, or make it generic itself.
+
+#### Immutable contracts
+
+A contract may keep its `readonly` fields and get-only properties:
+
+```csharp
+[WProtoContract]
+public readonly partial struct Coordinate
+{
+    [WProtoMember(1)] public readonly int X;
+    [WProtoMember(2)] public readonly int Y;
+}
+```
+
+C# permits a `readonly` field to be assigned only by a constructor of its declaring type — a nested
+formatter is not enough. But the generator reopens the contract as `partial`, so it emits a **private
+constructor there**, and the formatter builds the value once every member has been read. Your type
+keeps the immutability you chose and gains no public surface.
+
+The generated constructor takes a `WProtoConstruct` marker as its first parameter purely so it cannot
+collide with one you wrote yourself — a two-field type very plausibly has its own `(int, int)`
+constructor, and both continue to exist.
+
+Two consequences worth knowing:
+
+- **A `[WProtoBeforeDeserialization]` hook runs after construction**, because for a type whose members
+  _are_ its construction there is no earlier moment. Nothing is assigned after it, since nothing can
+  be.
+- **Immutable members and `[WProtoInclude]` cannot be combined** (`WPROTO015`). One needs the instance
+  built once the last member is read; the other replaces the instance when an include tag arrives.
+  The generator refuses rather than picking.
+
 ### Resolving a formatter
 
 `WProtoFormatterProvider` maps a message type to its `IWProtoFormatter<T>`. The lookup is a static

@@ -3,6 +3,8 @@
 
 namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
 {
+    using System.Collections.Generic;
+    using ProtoBuf;
     using WallstopStudios.UnityHelpers.Core.Serialization.WallstopProto;
 
     /// <summary>Every member shape the generator claims to support, in one contract.</summary>
@@ -125,12 +127,15 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
     public static partial class Outer
     {
         /// <summary>Proves the emitter reopens every enclosing type, not just the contract.</summary>
+        [ProtoContract]
         [WProtoContract]
         public partial struct Point
         {
+            [ProtoMember(1)]
             [WProtoMember(1)]
             public int X;
 
+            [ProtoMember(2)]
             [WProtoMember(2)]
             public int Y;
         }
@@ -194,6 +199,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
     }
 
     /// <summary>A contract with no members, so a present one is a key and a zero length.</summary>
+    [ProtoContract]
     [WProtoContract]
     public sealed partial class EmptyContract { }
 
@@ -234,6 +240,245 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
         public ChainContract Next;
     }
 
+    /// <summary>Every repeated element shape the generator claims to support.</summary>
+    /// <remarks>
+    /// Annotated for both serializers, with identical field numbers, so
+    /// <c>OracleDifferentialTests</c> can hand the same instance to each and compare bytes. Tags
+    /// that drifted apart would make that comparison meaningless, which is why the two attributes
+    /// are declared beside each other rather than in separate files.
+    /// </remarks>
+    [ProtoContract]
+    [WProtoContract]
+    public sealed partial class RepeatedContract
+    {
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public int[] Ints;
+
+        [ProtoMember(2)]
+        [WProtoMember(2)]
+        public List<int> IntList;
+
+        [ProtoMember(3)]
+        [WProtoMember(3)]
+        public string[] Texts;
+
+        [ProtoMember(4)]
+        [WProtoMember(4)]
+        public double[] Doubles;
+
+        [ProtoMember(5)]
+        [WProtoMember(5)]
+        public ulong[] Longs;
+
+        [ProtoMember(6)]
+        [WProtoMember(6)]
+        public bool[] Flags;
+
+        [ProtoMember(7)]
+        [WProtoMember(7)]
+        public Mode[] Modes;
+
+        [ProtoMember(8)]
+        [WProtoMember(8)]
+        public Outer.Point[] Points;
+
+        [ProtoMember(9)]
+        [WProtoMember(9)]
+        public EmptyContract[] Messages;
+
+        [ProtoMember(10)]
+        [WProtoMember(10)]
+        public byte[][] Blobs;
+
+        [ProtoMember(11)]
+        [WProtoMember(11)]
+        public List<Outer.Point> PointList;
+
+        [ProtoMember(12)]
+        [WProtoMember(12)]
+        public short[] Shorts;
+    }
+
+    /// <summary>
+    /// Collections the constructor has already filled, which is the only way append and overwrite
+    /// can be told apart.
+    /// </summary>
+    [ProtoContract]
+    [WProtoContract]
+    public sealed partial class SeededRepeatedContract
+    {
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public List<int> AppendedList = new List<int> { 7, 8 };
+
+        [ProtoMember(2, OverwriteList = true)]
+        [WProtoMember(2, OverwriteList = true)]
+        public List<int> OverwrittenList = new List<int> { 7, 8 };
+
+        [ProtoMember(3)]
+        [WProtoMember(3)]
+        public int[] AppendedArray = { 7, 8 };
+
+        [ProtoMember(4, OverwriteList = true)]
+        [WProtoMember(4, OverwriteList = true)]
+        public int[] OverwrittenArray = { 7, 8 };
+
+        [ProtoMember(5)]
+        [WProtoMember(5)]
+        public int Marker;
+    }
+
+    /// <summary>A struct contract carrying a repeated member.</summary>
+    [ProtoContract]
+    [WProtoContract]
+    public partial struct RepeatedStructContract
+    {
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public int[] Ints;
+
+        [ProtoMember(2)]
+        [WProtoMember(2)]
+        public int Marker;
+    }
+
+    /// <summary>
+    /// A collection implemented as a <b>struct</b>, which is the shape the emitter must not assume
+    /// away.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately minimal, and deliberately lazy about its backing store, so a
+    /// <c>default(IntBag)</c> is a legal empty value. That is what makes the copy semantics visible:
+    /// the read loop accumulates into a local copy and the formatter has to assign it back, because
+    /// every <c>Add</c> in between landed on the copy.
+    /// </remarks>
+    public struct IntBag : ICollection<int>
+    {
+        private List<int> _items;
+
+        /// <inheritdoc />
+        public int Count => _items == null ? 0 : _items.Count;
+
+        /// <inheritdoc />
+        public bool IsReadOnly => false;
+
+        /// <inheritdoc />
+        public void Add(int item)
+        {
+            _items ??= new List<int>();
+            _items.Add(item);
+        }
+
+        /// <inheritdoc />
+        public void Clear()
+        {
+            _items = null;
+        }
+
+        /// <inheritdoc />
+        public bool Contains(int item)
+        {
+            return _items != null && _items.Contains(item);
+        }
+
+        /// <inheritdoc />
+        public void CopyTo(int[] array, int arrayIndex)
+        {
+            _items?.CopyTo(array, arrayIndex);
+        }
+
+        /// <inheritdoc />
+        public bool Remove(int item)
+        {
+            return _items != null && _items.Remove(item);
+        }
+
+        /// <summary>
+        /// Returns a non-boxing enumerator, which is what <c>foreach</c> in generated code binds to.
+        /// </summary>
+        /// <returns>The enumerator.</returns>
+        public List<int>.Enumerator GetEnumerator()
+        {
+            return (_items ?? Empty).GetEnumerator();
+        }
+
+        IEnumerator<int> IEnumerable<int>.GetEnumerator()
+        {
+            return GetEnumerator();
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator()
+        {
+            return GetEnumerator();
+        }
+
+        private static readonly List<int> Empty = new List<int>();
+    }
+
+    /// <summary>
+    /// The collection shapes beyond array and <c>List&lt;T&gt;</c>, annotated for both serializers.
+    /// </summary>
+    [ProtoContract]
+    [WProtoContract]
+    public sealed partial class CollectionShapesContract
+    {
+        /// <summary>A set, which protobuf-net also treats as a repeated field.</summary>
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public HashSet<int> Set;
+
+        /// <summary>An ordered set of a length-delimited element.</summary>
+        [ProtoMember(2)]
+        [WProtoMember(2)]
+        public SortedSet<string> Sorted;
+
+        /// <summary>A collection that is neither a list nor a set.</summary>
+        [ProtoMember(3)]
+        [WProtoMember(3)]
+        public System.Collections.ObjectModel.Collection<int> Owned;
+    }
+
+    /// <summary>
+    /// A contract whose collection is a value type.
+    /// </summary>
+    /// <remarks>
+    /// Not annotated for protobuf-net: it cannot serialize this member at all, which is the whole
+    /// reason the shape is worth supporting. Its bytes are compared against the oracle's output for
+    /// an <c>int[]</c> at the same field number instead, which is the stronger claim -- a struct
+    /// collection is not a new encoding, it is the same repeated field with a different container.
+    /// </remarks>
+    [WProtoContract]
+    public sealed partial class ValueTypeCollectionContract
+    {
+        /// <summary>The struct collection.</summary>
+        [WProtoMember(1)]
+        public IntBag Bag;
+
+        /// <summary>The same, replaced rather than appended to on read.</summary>
+        [WProtoMember(2, OverwriteList = true)]
+        public IntBag Overwritten;
+
+        /// <summary>
+        /// A struct collection the constructor has already filled, which is the only way appending
+        /// into a copy can be told from replacing it.
+        /// </summary>
+        [WProtoMember(3)]
+        public IntBag Seeded = Filled();
+
+        /// <summary>The same, under <c>OverwriteList</c>.</summary>
+        [WProtoMember(4, OverwriteList = true)]
+        public IntBag SeededOverwritten = Filled();
+
+        private static IntBag Filled()
+        {
+            IntBag bag = new IntBag();
+            bag.Add(7);
+            bag.Add(8);
+            return bag;
+        }
+    }
+
     /// <summary>The one enum the contracts above use.</summary>
     public enum Mode
     {
@@ -245,5 +490,521 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
 
         /// <summary>A larger value, to exercise a multi-byte varint.</summary>
         Careful = 300,
+    }
+
+    /// <summary>
+    /// A polymorphic base, annotated for both serializers so the include encoding can be compared.
+    /// </summary>
+    /// <remarks>
+    /// The shape mirrors <c>AbstractRandom</c>, which carries 17 includes at contiguous tags
+    /// 100-116 and is the reason this feature exists.
+    /// </remarks>
+    [ProtoContract]
+    [ProtoInclude(100, typeof(IncludeAlpha))]
+    [ProtoInclude(101, typeof(IncludeBeta))]
+    [WProtoContract]
+    [WProtoInclude(100, typeof(IncludeAlpha))]
+    [WProtoInclude(101, typeof(IncludeBeta))]
+    public partial class IncludeBase
+    {
+        /// <summary>A base member, written after the include.</summary>
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public int Id;
+
+        /// <summary>A length-delimited base member.</summary>
+        [ProtoMember(2)]
+        [WProtoMember(2)]
+        public string Label;
+    }
+
+    /// <summary>A leaf subtype.</summary>
+    [ProtoContract]
+    [WProtoContract]
+    public partial class IncludeAlpha : IncludeBase
+    {
+        /// <summary>The subtype's own member, in its own tag space.</summary>
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public int AlphaOnly;
+
+        /// <summary>A second one, to prove the sub-message carries more than a marker.</summary>
+        [ProtoMember(2)]
+        [WProtoMember(2)]
+        public string AlphaText;
+    }
+
+    /// <summary>A subtype that is itself a base, so the nesting recurses.</summary>
+    [ProtoContract]
+    [ProtoInclude(200, typeof(IncludeGamma))]
+    [WProtoContract]
+    [WProtoInclude(200, typeof(IncludeGamma))]
+    public partial class IncludeBeta : IncludeBase
+    {
+        /// <summary>A fixed64 member at the middle level.</summary>
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public double BetaOnly;
+    }
+
+    /// <summary>The third level.</summary>
+    [ProtoContract]
+    [WProtoContract]
+    public partial class IncludeGamma : IncludeBeta
+    {
+        /// <summary>The deepest member.</summary>
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public bool GammaOnly;
+    }
+
+    /// <summary>Holds a polymorphic value, so the include chain sits under a length prefix.</summary>
+    [ProtoContract]
+    [WProtoContract]
+    public sealed partial class IncludeHolder
+    {
+        /// <summary>The polymorphic member.</summary>
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public IncludeBase Value;
+
+        /// <summary>A scalar after it.</summary>
+        [ProtoMember(2)]
+        [WProtoMember(2)]
+        public int Trailer;
+    }
+
+    /// <summary>
+    /// An include whose tag is <b>lower</b> than a base member's, which is what proves the include
+    /// is not merely sorted into field-number order.
+    /// </summary>
+    [ProtoContract]
+    [ProtoInclude(3, typeof(LowTagSub))]
+    [WProtoContract]
+    [WProtoInclude(3, typeof(LowTagSub))]
+    public partial class LowTagBase
+    {
+        /// <summary>A member numbered below the include.</summary>
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public int First;
+
+        /// <summary>A member numbered above the include.</summary>
+        [ProtoMember(5)]
+        [WProtoMember(5)]
+        public int Fifth;
+    }
+
+    /// <summary>The subtype for <see cref="LowTagBase"/>.</summary>
+    [ProtoContract]
+    [WProtoContract]
+    public partial class LowTagSub : LowTagBase
+    {
+        /// <summary>The subtype's own member.</summary>
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public int SubOnly;
+    }
+
+    /// <summary>
+    /// An abstract base with an include, which is the shape <c>AbstractRandom</c> has.
+    /// </summary>
+    /// <remarks>
+    /// Not annotated for protobuf-net: what it pins is that reading a payload with no include tag
+    /// fails rather than producing an instance of a type that cannot exist.
+    /// </remarks>
+    [WProtoContract]
+    [WProtoInclude(100, typeof(ConcreteShape))]
+    public abstract partial class AbstractShape
+    {
+        /// <summary>A base member.</summary>
+        [WProtoMember(1)]
+        public int Sides;
+    }
+
+    /// <summary>The only concrete shape.</summary>
+    [WProtoContract]
+    public partial class ConcreteShape : AbstractShape
+    {
+        /// <summary>The subtype's own member.</summary>
+        [WProtoMember(1)]
+        public int Edge;
+    }
+
+    /// <summary>
+    /// A subtype nothing declares, so writing it must be refused rather than downgraded.
+    /// </summary>
+    /// <remarks>
+    /// <c>value is IncludeAlpha</c> is true for this, so a formatter without the guard would write
+    /// it under Alpha's include tag and read it back as an <c>IncludeAlpha</c> — a level of type
+    /// identity lost from saved data with nothing to report it.
+    /// </remarks>
+    public sealed class UndeclaredAlpha : IncludeAlpha { }
+
+    /// <summary>
+    /// An abstract polymorphic base whose members include a <b>collection</b>.
+    /// </summary>
+    /// <remarks>
+    /// The shape that crashed. An abstract base has no instance until an include tag arrives, so a
+    /// collection element read before that tag has no member to seed from -- the generated seed
+    /// dereferenced a null <c>read</c>. Nothing covered it because the first abstract fixture held
+    /// only scalars.
+    /// </remarks>
+    [WProtoContract]
+    [WProtoInclude(100, typeof(PolyListSub))]
+    public abstract partial class PolyListBase
+    {
+        /// <summary>A collection on an abstract base.</summary>
+        [WProtoMember(1)]
+        public List<int> Items = new List<int> { 7, 8 };
+
+        /// <summary>An array too, since the two take different epilogue paths.</summary>
+        [WProtoMember(2)]
+        public int[] Extras;
+    }
+
+    /// <summary>
+    /// The subtype, whose constructor seeds a <b>different</b> collection from its base's.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately different. With identical seeds, appending onto the provisional base instance
+    /// and appending onto the final subtype produce the same answer, and a test cannot tell a
+    /// correct implementation from one that seeds too early.
+    /// </remarks>
+    [WProtoContract]
+    public partial class PolyListSub : PolyListBase
+    {
+        /// <summary>Replaces the base constructor's seed.</summary>
+        public PolyListSub()
+        {
+            Items = new List<int> { 5 };
+        }
+
+        /// <summary>The subtype's own member.</summary>
+        [WProtoMember(1)]
+        public int SubOnly;
+    }
+
+    /// <summary>Map-shaped members, annotated for both serializers.</summary>
+    [ProtoContract]
+    [WProtoContract]
+    public sealed partial class MapContract
+    {
+        /// <summary>A length-delimited key with a varint value.</summary>
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public Dictionary<string, int> ByName;
+
+        /// <summary>A varint key with a sub-message value.</summary>
+        [ProtoMember(2)]
+        [WProtoMember(2)]
+        public Dictionary<int, Outer.Point> ById;
+
+        /// <summary>An ordered dictionary, so enumeration order is deterministic.</summary>
+        [ProtoMember(3)]
+        [WProtoMember(3)]
+        public SortedDictionary<string, string> Sorted;
+
+        /// <summary>Replaced on read rather than merged into.</summary>
+        [ProtoMember(4, OverwriteList = true)]
+        [WProtoMember(4, OverwriteList = true)]
+        public Dictionary<string, int> Overwritten = new Dictionary<string, int> { { "seed", 9 } };
+
+        /// <summary>Merged into on read.</summary>
+        [ProtoMember(5)]
+        [WProtoMember(5)]
+        public Dictionary<string, int> Merged = new Dictionary<string, int> { { "seed", 9 } };
+    }
+
+    /// <summary>An enum, so an enum-keyed map has something to name.</summary>
+    public enum MapKeyKind
+    {
+        /// <summary>The default, which is also a map key worth pinning.</summary>
+        None = 0,
+
+        /// <summary>A non-default value.</summary>
+        Other = 7,
+    }
+
+    /// <summary>Map keys the protobuf SPEC does not allow but protobuf-net encodes anyway.</summary>
+    /// <remarks>
+    /// The map emitter's comment used to claim keys were restricted to "the integral types, bool and
+    /// string" and that anything else was refused. Measured against protobuf-net 3.2.56, all four of
+    /// these encode without complaint, so refusing them would have broken parity with the oracle
+    /// rather than protected anyone. This fixture is what keeps the permissiveness deliberate.
+    /// </remarks>
+    [ProtoContract]
+    [WProtoContract]
+    public sealed partial class ExoticKeyContract
+    {
+        /// <summary>A fixed32 key.</summary>
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public Dictionary<float, int> ByFloat;
+
+        /// <summary>A fixed64 key.</summary>
+        [ProtoMember(2)]
+        [WProtoMember(2)]
+        public Dictionary<double, int> ByDouble;
+
+        /// <summary>An enum key, which travels as a varint.</summary>
+        [ProtoMember(3)]
+        [WProtoMember(3)]
+        public Dictionary<MapKeyKind, int> ByEnum;
+
+        /// <summary>A bool key, which the spec does allow.</summary>
+        [ProtoMember(4)]
+        [WProtoMember(4)]
+        public Dictionary<bool, int> ByBool;
+    }
+
+    /// <summary>A map whose VALUE is a contract carrying lifecycle hooks.</summary>
+    /// <remarks>
+    /// The case the map emitter's own comment assumed away: it justified measuring an entry twice on
+    /// the grounds that "an entry is two scalars with no lifecycle hooks". A map value may be any
+    /// contract, and this is the fixture that says so.
+    /// </remarks>
+    [WProtoContract]
+    public sealed partial class HookedMapContract
+    {
+        /// <summary>A varint key with a hooked sub-message value.</summary>
+        [WProtoMember(1)]
+        public Dictionary<int, HookedContract> ById;
+    }
+
+    /// <summary>
+    /// A type this assembly does not get to annotate, standing in for <c>UnityEngine.Vector3</c>.
+    /// </summary>
+    public struct ForeignVector3
+    {
+        /// <summary>The first component.</summary>
+        public float x;
+
+        /// <summary>The second component.</summary>
+        public float y;
+
+        /// <summary>The third component.</summary>
+        public float z;
+    }
+
+    /// <summary>The contract that gives <see cref="ForeignVector3"/> a wire shape.</summary>
+    [ProtoContract]
+    [WProtoContract]
+    public partial struct ForeignVector3Surrogate
+    {
+        /// <summary>The first component.</summary>
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public float x;
+
+        /// <summary>The second component.</summary>
+        [ProtoMember(2)]
+        [WProtoMember(2)]
+        public float y;
+
+        /// <summary>The third component.</summary>
+        [ProtoMember(3)]
+        [WProtoMember(3)]
+        public float z;
+
+        /// <summary>Converts to the real type.</summary>
+        /// <param name="value">The surrogate.</param>
+        public static implicit operator ForeignVector3(ForeignVector3Surrogate value)
+        {
+            return new ForeignVector3
+            {
+                x = value.x,
+                y = value.y,
+                z = value.z,
+            };
+        }
+
+        /// <summary>Converts from the real type.</summary>
+        /// <param name="value">The real value.</param>
+        public static implicit operator ForeignVector3Surrogate(ForeignVector3 value)
+        {
+            return new ForeignVector3Surrogate
+            {
+                x = value.x,
+                y = value.y,
+                z = value.z,
+            };
+        }
+    }
+
+    /// <summary>Holds surrogated values in each position a member can occupy.</summary>
+    [ProtoContract]
+    [WProtoContract]
+    public sealed partial class SurrogateHolder
+    {
+        /// <summary>A plain surrogated member.</summary>
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public ForeignVector3 Position;
+
+        /// <summary>A repeated surrogated element.</summary>
+        [ProtoMember(2)]
+        [WProtoMember(2)]
+        public ForeignVector3[] Path;
+
+        /// <summary>A scalar after them, to pin ordering.</summary>
+        [ProtoMember(3)]
+        [WProtoMember(3)]
+        public int Trailer;
+
+        /// <summary>A surrogated map value, so the substitution reaches every shape.</summary>
+        [ProtoMember(4)]
+        [WProtoMember(4)]
+        public System.Collections.Generic.Dictionary<string, ForeignVector3> Named;
+    }
+
+    /// <summary>
+    /// A generic contract, whose members' encodings are only decided by the closure.
+    /// </summary>
+    /// <remarks>
+    /// Annotated for both serializers so the closures can be compared byte for byte. The field key
+    /// itself changes with <c>T</c> -- <c>08</c> for an int, <c>09</c> for a double, <c>0A</c> for a
+    /// string -- which is why the emitted code asks <c>WProtoGeneric&lt;T&gt;</c> instead of
+    /// carrying a constant.
+    /// </remarks>
+    [ProtoContract]
+    [WProtoContract]
+    public partial class Box<T>
+    {
+        /// <summary>A member typed as the parameter.</summary>
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public T Value;
+
+        /// <summary>A repeated member of the parameter.</summary>
+        [ProtoMember(2)]
+        [WProtoMember(2)]
+        public T[] Many;
+
+        /// <summary>A scalar, to pin ordering against the generic members.</summary>
+        [ProtoMember(3)]
+        [WProtoMember(3)]
+        public int Trailer;
+    }
+
+    /// <summary>A generic contract whose member is required.</summary>
+    /// <remarks>
+    /// IsRequired is decided at generate time for a scalar and cannot be for a type parameter: what
+    /// "required" does to a default depends on whether the closure is a value type, which is exactly
+    /// what is unknown until it closes.
+    /// </remarks>
+    [ProtoContract]
+    [WProtoContract]
+    public partial class RequiredBox<T>
+    {
+        /// <summary>A required member typed as the parameter.</summary>
+        [ProtoMember(1, IsRequired = true)]
+        [WProtoMember(1, IsRequired = true)]
+        public T Value;
+    }
+
+    /// <summary>Closures of <see cref="RequiredBox{T}"/>, one per omission rule.</summary>
+    public static class RequiredBoxClosures
+    {
+        /// <summary>A value-type closure, whose default is still written.</summary>
+        public static RequiredBox<int> Ints;
+
+        /// <summary>A reference closure, whose null stays absent even when required.</summary>
+        public static RequiredBox<string> Texts;
+    }
+
+    /// <summary>Names the closures this assembly uses, so the generator registers them.</summary>
+    /// <remarks>
+    /// A registrar cannot register an open generic, and constructing one at runtime needs
+    /// <c>MakeGenericType</c> -- the exact call IL2CPP cannot compile. The generator therefore
+    /// registers the constructions it can see in source, and this is where these ones become
+    /// visible.
+    /// </remarks>
+    public static class BoxClosures
+    {
+        /// <summary>An integer closure.</summary>
+        public static Box<int> Ints;
+
+        /// <summary>A floating-point closure, whose wire type differs from the integer one.</summary>
+        public static Box<double> Doubles;
+
+        /// <summary>A length-delimited closure.</summary>
+        public static Box<string> Texts;
+
+        /// <summary>A message closure, so the sub-message path is covered too.</summary>
+        public static Box<Outer.Point> Points;
+    }
+
+    /// <summary>
+    /// An immutable contract: every serialized member is <c>readonly</c>.
+    /// </summary>
+    /// <remarks>
+    /// The shape thirty of this package's serialized fields have -- <c>FastVector2Int.x</c>,
+    /// <c>Line2D.from</c>, <c>ImmutableBitSet._bits</c> and the rest. protobuf-net assigns them by
+    /// reflection; this generator cannot, so it emits a private constructor into the contract's
+    /// partial declaration instead. The type keeps its immutability and gains no public surface.
+    /// </remarks>
+    [ProtoContract]
+    [WProtoContract]
+    public readonly partial struct ImmutablePoint
+    {
+        /// <summary>A readonly scalar.</summary>
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public readonly int X;
+
+        /// <summary>A second one, so the constructor takes more than one argument.</summary>
+        [ProtoMember(2)]
+        [WProtoMember(2)]
+        public readonly int Y;
+
+        /// <summary>A readonly length-delimited member.</summary>
+        [ProtoMember(3)]
+        [WProtoMember(3)]
+        public readonly string Label;
+
+        /// <summary>A readonly collection, which takes the repeated path.</summary>
+        [ProtoMember(4)]
+        [WProtoMember(4)]
+        public readonly int[] Marks;
+
+        /// <summary>The author's own constructor, which the generated one must not collide with.</summary>
+        /// <param name="x">The first component.</param>
+        /// <param name="y">The second component.</param>
+        public ImmutablePoint(int x, int y)
+        {
+            X = x;
+            Y = y;
+            Label = null;
+            Marks = null;
+        }
+    }
+
+    /// <summary>An immutable reference contract, so the class path is covered too.</summary>
+    [ProtoContract]
+    [WProtoContract]
+    public sealed partial class ImmutableRecord
+    {
+        /// <summary>A get-only property, which is equally unassignable.</summary>
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public int Id { get; }
+
+        /// <summary>A readonly field.</summary>
+        [ProtoMember(2)]
+        [WProtoMember(2)]
+        public readonly string Name;
+
+        /// <summary>
+        /// A readonly collection on a REFERENCE contract, which is the case that crashes if the
+        /// seed reaches for an instance that does not exist yet: `read` is null until the
+        /// constructor runs, so seeding from `read.Tags` dereferences it.
+        /// </summary>
+        [ProtoMember(3)]
+        [WProtoMember(3)]
+        public readonly int[] Tags;
+
+        /// <summary>protobuf-net needs one; the generated constructor is separate.</summary>
+        public ImmutableRecord() { }
     }
 }

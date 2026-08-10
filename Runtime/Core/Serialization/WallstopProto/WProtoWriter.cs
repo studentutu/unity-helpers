@@ -391,40 +391,139 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.WallstopProto
         /// </remarks>
         public bool TryWriteMessage<T>(int fieldNumber, IWProtoFormatter<T> formatter, in T value)
         {
-            if (formatter == null || _depth >= WProtoReader.MaxNestingDepth)
+            if (formatter == null)
             {
                 _faulted = true;
+                return false;
+            }
+
+            if (!TryBeginLengthDelimited(fieldNumber, true, out WProtoLengthToken token))
+            {
+                return false;
+            }
+
+            bool written;
+            try
+            {
+                written = formatter.Write(ref this, value);
+            }
+            catch
+            {
+                // A formatter is contractually not allowed to throw, but this writer can outlive one
+                // that does: a caller may catch and keep writing, and a depth left one too high
+                // silently lowers the nesting bound for the rest of the message.
+                //
+                // Every path out of here decrements EXACTLY once -- this one, the failure below, and
+                // TryCloseLengthDelimited on success. A `finally` would have been simpler and was
+                // wrong: it also runs on the success path, where the close decrements too, and the
+                // counter drifts negative. Negative is the dangerous direction, because it RAISES the
+                // effective nesting bound instead of lowering it.
+                _depth--;
+                throw;
+            }
+
+            if (!written || _faulted)
+            {
+                _depth--;
+                _faulted = true;
+                return false;
+            }
+
+            return TryCloseLengthDelimited(token);
+        }
+
+        /// <summary>
+        /// Opens a length-delimited field: writes its key and reserves the length prefix, leaving the
+        /// payload to be written directly into this writer.
+        /// </summary>
+        /// <param name="fieldNumber">The field number.</param>
+        /// <param name="token">Receives the bookkeeping <see cref="TryCloseLengthDelimited"/> needs.</param>
+        /// <returns><c>true</c> when the field was opened.</returns>
+        /// <remarks>
+        /// <para>
+        /// The pair exists for payloads that are <b>not</b> a single sub-message and so cannot go
+        /// through <see cref="TryWriteMessage{T}"/> -- a map entry, which is a synthetic message built
+        /// from two independent halves. The reason to prefer it over computing the length up front is
+        /// the one in <see cref="TryWriteMessage{T}"/>'s remarks: sizing the payload during the write
+        /// pass re-measures whatever it contains, and re-measuring a contract runs its
+        /// before-serialization hook a second time.
+        /// </para>
+        /// <para>
+        /// The caller must close every token it opens. A failure between the two leaves the writer
+        /// faulted, and a faulted writer refuses all further work, so an unclosed token cannot produce
+        /// a wrong payload -- only a dead one.
+        /// </para>
+        /// </remarks>
+        public bool TryBeginLengthDelimited(int fieldNumber, out WProtoLengthToken token)
+        {
+            return TryBeginLengthDelimited(fieldNumber, true, out token);
+        }
+
+        /// <summary>
+        /// Opens a length-delimited field, optionally without charging the nesting bound.
+        /// </summary>
+        /// <param name="fieldNumber">The field number.</param>
+        /// <param name="nested">
+        /// <c>false</c> for a payload that cannot itself contain a message -- a packed run of
+        /// scalars. Such a run spends no nesting level, matching <c>TryReadPackedRun</c>, which hands
+        /// its nested reader the same depth. Charging it here would make a deep-but-legal message
+        /// decodable and not encodable.
+        /// </param>
+        /// <param name="token">Receives the bookkeeping the close needs.</param>
+        /// <returns><c>true</c> when the field was opened.</returns>
+        public bool TryBeginLengthDelimited(
+            int fieldNumber,
+            bool nested,
+            out WProtoLengthToken token
+        )
+        {
+            if (nested && _depth >= WProtoReader.MaxNestingDepth)
+            {
+                _faulted = true;
+                token = default;
                 return false;
             }
 
             if (!TryWriteTag(fieldNumber, WProtoWireType.LengthDelimited))
             {
+                token = default;
                 return false;
             }
 
             if (!TryReserve(1, out int prefixStart))
             {
+                token = default;
                 return false;
             }
 
-            int payloadStart = _position;
-            bool written;
-            _depth++;
-            try
+            if (nested)
             {
-                written = formatter.Write(ref this, value);
+                _depth++;
             }
-            finally
+
+            token = new WProtoLengthToken(prefixStart, _position, nested);
+            return true;
+        }
+
+        /// <summary>
+        /// Closes a field opened by <see cref="TryBeginLengthDelimited"/>, back-filling its length.
+        /// </summary>
+        /// <param name="token">The token from the matching open.</param>
+        /// <returns><c>true</c> when the length was written.</returns>
+        public bool TryCloseLengthDelimited(in WProtoLengthToken token)
+        {
+            if (token.Nested)
             {
-                // A formatter is contractually not allowed to throw, but this writer can outlive one
-                // that does: a caller may catch and keep writing, and a depth left one too high
-                // silently lowers the nesting bound for the rest of the message.
                 _depth--;
             }
 
-            if (!written || _faulted)
+            return TryBackfillLength(token.PrefixStart, token.PayloadStart);
+        }
+
+        private bool TryBackfillLength(int prefixStart, int payloadStart)
+        {
+            if (_faulted)
             {
-                _faulted = true;
                 return false;
             }
 
@@ -480,14 +579,19 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.WallstopProto
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool TryReserve(int count, out int start)
         {
-            start = _position;
             if (_faulted || count > _buffer.Length - _position)
             {
                 _faulted = true;
+                start = 0;
                 return false;
             }
 
+            // Held in a local because the reservation moves _position, and `start` has to be where
+            // the region BEGAN. Assigning it at the top and letting _position drift underneath is
+            // the shape this rule exists to stop.
+            int reserved = _position;
             _position += count;
+            start = reserved;
             return true;
         }
     }

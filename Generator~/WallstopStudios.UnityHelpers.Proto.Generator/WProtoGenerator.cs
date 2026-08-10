@@ -36,6 +36,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
         private const string ContractAttribute = AttributeNamespace + ".WProtoContractAttribute";
         private const string MemberAttribute = AttributeNamespace + ".WProtoMemberAttribute";
         private const string IgnoreAttribute = AttributeNamespace + ".WProtoIgnoreAttribute";
+        private const string IncludeAttribute = AttributeNamespace + ".WProtoIncludeAttribute";
         private const string BeforeSerialization =
             AttributeNamespace + ".WProtoBeforeSerializationAttribute";
         private const string AfterSerialization =
@@ -89,17 +90,30 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 ReportOrphanedHooks(context, symbol);
             }
 
+            SurrogateMap surrogates = SurrogateMap.Build(context.Compilation);
+            SurrogateMap.Validate(context.Compilation, context.ReportDiagnostic);
+
             List<string> registrations = new List<string>();
             foreach (INamedTypeSymbol contract in contracts)
             {
-                string source = Emit(context, contract, out string registration);
+                string source = Emit(context, contract, surrogates, out string registration);
                 if (source == null)
                 {
                     continue;
                 }
 
                 context.AddSource(FileNameFor(contract), SourceText.From(source, Encoding.UTF8));
-                registrations.Add(registration);
+                if (registration != null)
+                {
+                    registrations.Add(registration);
+                }
+                else
+                {
+                    foreach (string closed in ClosedConstructions(context.Compilation, contract))
+                    {
+                        registrations.Add(closed + ".WProtoFormatter.Instance");
+                    }
+                }
             }
 
             if (0 < registrations.Count)
@@ -149,6 +163,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
         private static string Emit(
             GeneratorExecutionContext context,
             INamedTypeSymbol contract,
+            SurrogateMap surrogates,
             out string registration
         )
         {
@@ -166,7 +181,12 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 return null;
             }
 
-            if (IsGenericAnywhere(contract))
+            // A contract nested INSIDE a generic type is still refused, and the reason is
+            // registration rather than emission. `Holder<T>.Inner` is not itself generic, so there is
+            // no construction of it to scan for -- the closures live on the enclosing type, and a
+            // registrar that cannot name `Holder<int>.Inner` would emit a formatter nothing ever
+            // registers. A refusal is better than a formatter that silently never resolves.
+            if (contract.ContainingType != null && IsGenericAnywhere(contract.ContainingType))
             {
                 context.ReportDiagnostic(
                     Diagnostic.Create(
@@ -178,10 +198,58 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 return null;
             }
 
-            List<Member> members = CollectMembers(context, contract);
+            List<Member> members = CollectMembers(context, contract, surrogates);
             if (members == null)
             {
                 return null;
+            }
+
+            List<Include> includes = CollectIncludes(context, contract, members);
+            if (includes == null)
+            {
+                return null;
+            }
+
+            if (contract.IsAbstract && includes.Count == 0)
+            {
+                context.ReportDiagnostic(
+                    Diagnostic.Create(
+                        WProtoDiagnostics.AbstractWithoutIncludes,
+                        contract.Locations.FirstOrDefault(),
+                        contract.Name
+                    )
+                );
+                return null;
+            }
+
+            // Two reasons a member reads into a local and is committed after the loop. A polymorphic
+            // contract can have its instance replaced by an include tag, which protobuf-net allows
+            // in either position. And a contract with a `readonly` member cannot be assigned at all
+            // -- it has to be BUILT -- so every value has to be in hand before construction.
+            bool constructAtEnd = false;
+            foreach (Member member in members)
+            {
+                constructAtEnd |= member.RequiresConstruction;
+            }
+
+            if (constructAtEnd && 0 < includes.Count)
+            {
+                // Both mechanisms want to own the instance: one replaces it when an include arrives,
+                // the other cannot create it until the last member is read. Refusing beats picking.
+                context.ReportDiagnostic(
+                    Diagnostic.Create(
+                        WProtoDiagnostics.ImmutableWithIncludes,
+                        contract.Locations.FirstOrDefault(),
+                        contract.Name
+                    )
+                );
+                return null;
+            }
+
+            foreach (Member member in members)
+            {
+                member.Deferred = constructAtEnd || 0 < includes.Count;
+                member.ConstructAtEnd = constructAtEnd;
             }
 
             Hooks hooks = CollectHooks(context, contract);
@@ -202,7 +270,18 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 return null;
             }
 
-            if (!contract.IsValueType && !HasAccessibleParameterlessConstructor(contract))
+            // Not asked of a contract that builds itself. The diagnostic exists because the formatter
+            // normally calls `new T()` to have something to read into; a contract with a member that
+            // cannot be assigned after construction never takes that path, holding every value in a
+            // local and passing them to the constructor emitted just below. Requiring a parameterless
+            // constructor as well rejected the canonical immutable class -- one parameterized
+            // constructor, all-readonly members -- for a reason that had stopped applying to it.
+            if (
+                !contract.IsValueType
+                && !contract.IsAbstract
+                && !constructAtEnd
+                && !HasAccessibleParameterlessConstructor(contract)
+            )
             {
                 context.ReportDiagnostic(
                     Diagnostic.Create(
@@ -217,7 +296,13 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             members.Sort((left, right) => left.Tag.CompareTo(right.Tag));
 
             string qualified = contract.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-            registration = qualified + ".WProtoFormatter.Instance";
+
+            // An open generic has no formatter to register; each closed construction the compilation
+            // actually uses gets one. That scan is what makes `Deque<TheirStruct>` work at the
+            // CONSUMER's build, which is the property this whole generator was chosen for.
+            registration = IsGenericAnywhere(contract)
+                ? null
+                : qualified + ".WProtoFormatter.Instance";
 
             Writer writer = new Writer();
             writer.Line("// <auto-generated />");
@@ -245,12 +330,23 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             foreach (INamedTypeSymbol container in nesting)
             {
                 writer.Line(
-                    "partial " + KeywordFor(container) + " " + container.Name + Writer.Open
+                    "partial "
+                        + KeywordFor(container)
+                        + " "
+                        + container.Name
+                        + TypeParameterList(container)
+                        + Writer.Open
                 );
                 writer.Indent();
             }
 
-            EmitFormatter(writer, contract, qualified, members, hooks);
+            if (constructAtEnd)
+            {
+                EmitConstructor(writer, contract, members);
+                writer.Blank();
+            }
+
+            EmitFormatter(writer, contract, qualified, members, includes, hooks, constructAtEnd);
 
             foreach (INamedTypeSymbol unused in nesting)
             {
@@ -272,7 +368,9 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             INamedTypeSymbol contract,
             string qualified,
             List<Member> members,
-            Hooks hooks
+            List<Include> includes,
+            Hooks hooks,
+            bool constructAtEnd
         )
         {
             writer.Line("/// <summary>Generated WallstopProto formatter. Do not edit.</summary>");
@@ -291,11 +389,70 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             writer.Line("public static readonly WProtoFormatter Instance = new WProtoFormatter();");
             writer.Blank();
 
-            EmitMeasure(writer, qualified, members, hooks);
+            EmitMeasure(writer, contract, qualified, members, includes, hooks);
             writer.Blank();
-            EmitWrite(writer, qualified, members, hooks);
+            EmitWrite(writer, contract, qualified, members, includes, hooks);
             writer.Blank();
-            EmitRead(writer, contract, qualified, members, hooks);
+            EmitRead(writer, contract, qualified, members, includes, hooks, constructAtEnd);
+
+            writer.Outdent();
+            writer.Line("}");
+        }
+
+        /// <summary>
+        /// Emits a private constructor that assigns every member, for a contract that cannot be
+        /// assigned after construction.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// This is what lets a type keep <c>readonly</c> fields and still be read. C# permits a
+        /// readonly field to be assigned only in a constructor of its declaring type -- a nested
+        /// formatter is not enough, but the generator reopens the contract as <c>partial</c>, and a
+        /// constructor emitted there IS one. No public surface changes: the constructor is private,
+        /// and the type keeps the immutability its author chose.
+        /// </para>
+        /// <para>
+        /// The <c>WProtoConstruct</c> first parameter exists only so the signature cannot collide
+        /// with a constructor the author already wrote -- a two-int type very plausibly has an
+        /// <c>(int, int)</c> constructor of its own.
+        /// </para>
+        /// <para>
+        /// A struct assigns <c>this = default</c> first, because C# requires every field to be
+        /// definitely assigned and a contract may hold fields no <c>[WProtoMember]</c> covers.
+        /// </para>
+        /// </remarks>
+        private static void EmitConstructor(
+            Writer writer,
+            INamedTypeSymbol contract,
+            List<Member> members
+        )
+        {
+            writer.Line(
+                "/// <summary>Generated WallstopProto constructor. Do not edit or call.</summary>"
+            );
+
+            StringBuilder parameters = new StringBuilder(Proto + ".WProtoConstruct wprotoMarker");
+            foreach (Member member in members)
+            {
+                parameters.Append(", ");
+                parameters.Append(member.DeclaredType);
+                parameters.Append(" wproto_");
+                parameters.Append(member.MemberName);
+            }
+
+            writer.Line("private " + contract.Name + "(" + parameters + ")" + Writer.Open);
+            writer.Indent();
+            writer.Line("_ = wprotoMarker;");
+
+            if (contract.IsValueType)
+            {
+                writer.Line("this = default(" + contract.Name + ");");
+            }
+
+            foreach (Member member in members)
+            {
+                writer.Line("this." + member.MemberName + " = wproto_" + member.MemberName + ";");
+            }
 
             writer.Outdent();
             writer.Line("}");
@@ -303,8 +460,10 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
 
         private static void EmitMeasure(
             Writer writer,
+            INamedTypeSymbol contract,
             string qualified,
             List<Member> members,
+            List<Include> includes,
             Hooks hooks
         )
         {
@@ -321,22 +480,32 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             }
 
             writer.Line("int size = 0;");
+
+            // Includes first, and not in field-number order. Measured against protobuf-net 3.2.56:
+            // the subtype's include field precedes every one of this contract's own members whatever
+            // its tag, confirmed with an include at tag 3 emitted ahead of members at tags 1 and 5.
+            EmitIncludeDispatch(
+                writer,
+                contract,
+                qualified,
+                includes,
+                include =>
+                    "size += "
+                    + Proto
+                    + ".WProtoSizes.TagSize("
+                    + include.Tag
+                    + ") + "
+                    + Proto
+                    + ".WProtoSizes.MessageSize("
+                    + include.Formatter
+                    + ", "
+                    + include.Local
+                    + ");"
+            );
+
             foreach (Member member in members)
             {
-                writer.Line("if (" + member.PresenceTest + ")" + Writer.Open);
-                writer.Indent();
-                writer.Line(
-                    "size += "
-                        + Proto
-                        + ".WProtoSizes.TagSize("
-                        + member.Tag
-                        + ") + "
-                        + member.SizeExpression
-                        + ";"
-                );
-                writer.Outdent();
-                writer.Line("}");
-                writer.Blank();
+                member.EmitMeasure(writer);
             }
 
             writer.Line("return size;");
@@ -346,8 +515,10 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
 
         private static void EmitWrite(
             Writer writer,
+            INamedTypeSymbol contract,
             string qualified,
             List<Member> members,
+            List<Include> includes,
             Hooks hooks
         )
         {
@@ -362,18 +533,24 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             );
             writer.Indent();
 
+            EmitIncludeDispatch(
+                writer,
+                contract,
+                qualified,
+                includes,
+                include =>
+                    "if (!writer.TryWriteMessage("
+                    + include.Tag
+                    + ", "
+                    + include.Formatter
+                    + ", "
+                    + include.Local
+                    + "))"
+            );
+
             foreach (Member member in members)
             {
-                writer.Line("if (" + member.PresenceTest + ")" + Writer.Open);
-                writer.Indent();
-                writer.Line("if (!(" + member.WriteExpression + "))" + Writer.Open);
-                writer.Indent();
-                writer.Line("return false;");
-                writer.Outdent();
-                writer.Line("}");
-                writer.Outdent();
-                writer.Line("}");
-                writer.Blank();
+                member.EmitWrite(writer);
             }
 
             if (hooks.AfterSerialization != null)
@@ -391,7 +568,9 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             INamedTypeSymbol contract,
             string qualified,
             List<Member> members,
-            Hooks hooks
+            List<Include> includes,
+            Hooks hooks,
+            bool constructAtEnd
         )
         {
             writer.Line("/// <inheritdoc />");
@@ -405,18 +584,41 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             );
             writer.Indent();
 
-            writer.Line(
-                contract.IsValueType
-                    ? qualified + " read = default(" + qualified + ");"
-                    : qualified + " read = new " + qualified + "();"
-            );
+            bool polymorphic = 0 < includes.Count;
 
-            if (hooks.BeforeDeserialization != null)
+            if (constructAtEnd)
+            {
+                // Deliberately not created here: a readonly member can only be assigned by a
+                // constructor, so there is nothing to assign onto until the last value is in hand.
+                writer.Line(qualified + " read = default(" + qualified + ");");
+            }
+            else if (contract.IsValueType)
+            {
+                writer.Line(qualified + " read = default(" + qualified + ");");
+            }
+            else if (contract.IsAbstract)
+            {
+                // An abstract contract has no instance of its own; the payload's include tag is the
+                // only thing that can produce one, and a payload without one is malformed rather
+                // than an empty base.
+                writer.Line(qualified + " read = null;");
+            }
+            else
+            {
+                writer.Line(qualified + " read = new " + qualified + "();");
+            }
+
+            if (hooks.BeforeDeserialization != null && !polymorphic && !constructAtEnd)
             {
                 writer.Line("read." + hooks.BeforeDeserialization + "();");
             }
 
             writer.Blank();
+            foreach (Member member in members)
+            {
+                member.EmitReadLocals(writer);
+            }
+
             writer.Line(
                 "while (reader.TryReadTag(out int fieldNumber, out int wireType))" + Writer.Open
             );
@@ -424,25 +626,46 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             writer.Line("switch (fieldNumber)" + Writer.Open);
             writer.Indent();
 
-            foreach (Member member in members)
+            foreach (Include include in includes)
             {
                 writer.Line(
                     "case "
-                        + member.Tag
+                        + include.Tag
                         + " when wireType == "
-                        + member.WireType
-                        + ":"
+                        + Proto
+                        + ".WProtoWireType.LengthDelimited:"
                         + Writer.Open
                 );
                 writer.Indent();
-                foreach (string line in member.ReadStatements("read", qualified))
-                {
-                    writer.Line(line);
-                }
-
+                writer.Line(
+                    "if (!reader.TryReadMessage("
+                        + include.Formatter
+                        + ", out "
+                        + include.Qualified
+                        + " "
+                        + include.Local
+                        + "))"
+                        + Writer.Open
+                );
+                writer.Indent();
+                writer.Line("value = default(" + qualified + ");");
+                writer.Line("return false;");
+                writer.Outdent();
+                writer.Line("}");
+                writer.Blank();
+                // Last include wins. A payload naming two sibling subtypes is nonsense either way,
+                // and this is the branch where protobuf-net 3.2.56 recurses until the stack runs
+                // out -- a crash that cannot be caught, from an untrusted save file. A plain
+                // assignment cannot.
+                writer.Line("read = " + include.Local + ";");
                 writer.Line("break;");
                 writer.Outdent();
                 writer.Line("}");
+            }
+
+            foreach (Member member in members)
+            {
+                member.EmitReadCases(writer, qualified);
             }
 
             writer.Line("default:" + Writer.Open);
@@ -473,6 +696,61 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             writer.Outdent();
             writer.Line("}");
             writer.Blank();
+
+            if (contract.IsAbstract)
+            {
+                writer.Line("if (read == null)" + Writer.Open);
+                writer.Indent();
+                writer.Line("value = default(" + qualified + ");");
+                writer.Line("return false;");
+                writer.Outdent();
+                writer.Line("}");
+                writer.Blank();
+            }
+
+            if (hooks.BeforeDeserialization != null && polymorphic)
+            {
+                // Deliberately here rather than at the top. The hook's contract is "after the
+                // instance exists and before any member is assigned", and for a polymorphic contract
+                // the instance does not exist until an include tag has been seen. Every member of
+                // such a contract is deferred, so nothing has been assigned yet either.
+                writer.Line("read." + hooks.BeforeDeserialization + "();");
+                writer.Blank();
+            }
+
+            // After the malformed check, deliberately: a collection accumulated from a payload that
+            // turned out to be truncated must not be committed onto the instance the caller gets
+            // back, for the same reason the after-deserialization hook does not run on a failed read.
+            foreach (Member member in members)
+            {
+                member.EmitReadEpilogue(writer);
+            }
+
+            if (constructAtEnd)
+            {
+                StringBuilder arguments = new StringBuilder(
+                    "default(" + Proto + ".WProtoConstruct)"
+                );
+                foreach (Member member in members)
+                {
+                    arguments.Append(", ");
+                    arguments.Append(member.ReadLocal);
+                }
+
+                writer.Line("read = new " + qualified + "(" + arguments + ");");
+                writer.Blank();
+
+                if (hooks.BeforeDeserialization != null)
+                {
+                    // The instance did not exist any earlier, so this is the first moment the hook
+                    // could run. Its contract -- "after the instance exists, before any member is
+                    // assigned" -- cannot be honoured literally for a type whose members ARE its
+                    // construction; the closest true statement is that nothing has been assigned
+                    // since, because nothing can be.
+                    writer.Line("read." + hooks.BeforeDeserialization + "();");
+                    writer.Blank();
+                }
+            }
 
             if (hooks.AfterDeserialization != null)
             {
@@ -520,6 +798,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             writer.Line("#endif");
             writer.Line("internal static void Register()" + Writer.Open);
             writer.Indent();
+            writer.Line(Proto + ".WProtoScalarFormatters.RegisterAll();");
             foreach (string registration in registrations)
             {
                 writer.Line(Proto + ".WProtoFormatterProvider.Register(" + registration + ");");
@@ -534,9 +813,321 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             return writer.ToString();
         }
 
+        /// <summary>
+        /// Reads and validates the contract's <c>[WProtoInclude]</c> list, deepest subtype first.
+        /// </summary>
+        /// <remarks>
+        /// The ordering is load-bearing rather than cosmetic. <c>value is Beta</c> is true for a
+        /// <c>Gamma</c>, so a dispatch chain that tested the shallower type first would write a
+        /// <c>Gamma</c> under Beta's include tag and lose the Gamma level entirely -- a silent type
+        /// downgrade. Sorting by inheritance depth, deepest first, makes the first matching test the
+        /// most derived one.
+        /// </remarks>
+        /// <summary>
+        /// Returns the type parameter list to reopen <paramref name="symbol"/> with, or empty.
+        /// </summary>
+        /// <remarks>
+        /// A reopened <c>partial</c> declaration that drops its type parameters does not compile, so
+        /// this is not cosmetic. Constraints are deliberately omitted: C# forbids restating them on a
+        /// secondary partial declaration when the primary already carries them.
+        /// </remarks>
+        private static string TypeParameterList(INamedTypeSymbol symbol)
+        {
+            if (!symbol.IsGenericType || symbol.TypeParameters.Length == 0)
+            {
+                return string.Empty;
+            }
+
+            StringBuilder builder = new StringBuilder("<");
+            for (int index = 0; index < symbol.TypeParameters.Length; index++)
+            {
+                if (0 < index)
+                {
+                    builder.Append(", ");
+                }
+
+                builder.Append(symbol.TypeParameters[index].Name);
+            }
+
+            builder.Append('>');
+            return builder.ToString();
+        }
+
+        /// <summary>
+        /// Finds every closed construction of <paramref name="contract"/> the compilation names.
+        /// </summary>
+        /// <remarks>
+        /// A registrar cannot register an open generic, and nothing can construct one at runtime
+        /// without <c>MakeGenericType</c> -- the exact call IL2CPP cannot compile. So the
+        /// constructions are discovered from the source the compiler is already parsing: every type
+        /// the semantic model resolves anywhere in this compilation, deduplicated. A construction
+        /// that appears in no source cannot be reached at runtime either.
+        /// </remarks>
+        private static IEnumerable<string> ClosedConstructions(
+            Compilation compilation,
+            INamedTypeSymbol contract
+        )
+        {
+            HashSet<string> found = new HashSet<string>();
+
+            foreach (SyntaxTree tree in compilation.SyntaxTrees)
+            {
+                SemanticModel model = compilation.GetSemanticModel(tree);
+                foreach (SyntaxNode node in tree.GetRoot().DescendantNodes())
+                {
+                    if (!(node is TypeSyntax type))
+                    {
+                        continue;
+                    }
+
+                    if (
+                        !(model.GetTypeInfo(type).Type is INamedTypeSymbol named)
+                        || !named.IsGenericType
+                        || named.IsUnboundGenericType
+                    )
+                    {
+                        continue;
+                    }
+
+                    if (
+                        !SymbolEqualityComparer.Default.Equals(
+                            named.ConstructedFrom,
+                            contract.ConstructedFrom
+                        )
+                    )
+                    {
+                        continue;
+                    }
+
+                    // Recursive, not a scan of the direct arguments. `Box<Wrapper<T>>` has no type
+                    // parameter among its own arguments -- `Wrapper<T>` is a named type -- yet T is
+                    // still unbound, and a registrar cannot name it. Recording it as closed emitted a
+                    // registration that fails the CONSUMER's build, which is a worse failure than the
+                    // missing registration it was trying to avoid.
+                    if (!IsOpen(named))
+                    {
+                        found.Add(named.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
+                    }
+                }
+            }
+
+            return found;
+        }
+
+        /// <summary>
+        /// Reports whether <paramref name="type"/> still mentions a type parameter anywhere within
+        /// it, at any depth.
+        /// </summary>
+        /// <param name="type">The type to inspect.</param>
+        /// <returns><c>true</c> when the type cannot be named as a closed construction.</returns>
+        private static bool IsOpen(ITypeSymbol type)
+        {
+            switch (type)
+            {
+                case ITypeParameterSymbol _:
+                    return true;
+                case IArrayTypeSymbol array:
+                    return IsOpen(array.ElementType);
+                case IPointerTypeSymbol pointer:
+                    return IsOpen(pointer.PointedAtType);
+                case INamedTypeSymbol named:
+                    // The containing type matters as much as the arguments: `Outer<T>.Inner<int>` has
+                    // only closed arguments of its own and still cannot be named.
+                    if (named.ContainingType != null && IsOpen(named.ContainingType))
+                    {
+                        return true;
+                    }
+
+                    foreach (ITypeSymbol argument in named.TypeArguments)
+                    {
+                        if (IsOpen(argument))
+                        {
+                            return true;
+                        }
+                    }
+
+                    return false;
+                default:
+                    return false;
+            }
+        }
+
+        private static List<Include> CollectIncludes(
+            GeneratorExecutionContext context,
+            INamedTypeSymbol contract,
+            List<Member> members
+        )
+        {
+            List<Include> includes = new List<Include>();
+            HashSet<int> claimed = new HashSet<int>();
+            foreach (Member member in members)
+            {
+                claimed.Add(member.Tag);
+            }
+
+            bool failed = false;
+            foreach (AttributeData attribute in contract.GetAttributes())
+            {
+                if (
+                    attribute.AttributeClass == null
+                    || attribute.AttributeClass.ToDisplayString() != IncludeAttribute
+                    || attribute.ConstructorArguments.Length < 2
+                )
+                {
+                    continue;
+                }
+
+                int tag = (int)(attribute.ConstructorArguments[0].Value ?? 0);
+                INamedTypeSymbol subType =
+                    attribute.ConstructorArguments[1].Value as INamedTypeSymbol;
+                string name = subType == null ? "?" : subType.Name;
+
+                string problem = null;
+                if (subType == null)
+                {
+                    problem = "the subtype could not be resolved";
+                }
+                else if (!SymbolEqualityComparer.Default.Equals(subType.BaseType, contract))
+                {
+                    // Measured: protobuf-net 3.2.56 refuses a grandchild declared on the grandparent
+                    // with "Unexpected sub-type", so an include names a DIRECT subtype and a deeper
+                    // type is declared on the type it actually derives from.
+                    problem =
+                        "'"
+                        + name
+                        + "' does not derive DIRECTLY from '"
+                        + contract.Name
+                        + "'; declare it on its immediate base type instead";
+                }
+                else if (!Shape.IsContract(subType))
+                {
+                    problem = "'" + name + "' is not itself a [WProtoContract]";
+                }
+                else if (tag < 1 || 536870911 < tag || (19000 <= tag && tag <= 19999))
+                {
+                    problem =
+                        "field number "
+                        + tag
+                        + " is outside 1-536870911 or inside the reserved 19000-19999 range";
+                }
+                else if (!claimed.Add(tag))
+                {
+                    problem =
+                        "field number " + tag + " is already claimed on '" + contract.Name + "'";
+                }
+
+                if (problem != null)
+                {
+                    context.ReportDiagnostic(
+                        Diagnostic.Create(
+                            WProtoDiagnostics.BadInclude,
+                            contract.Locations.FirstOrDefault(),
+                            contract.Name,
+                            tag,
+                            name,
+                            problem
+                        )
+                    );
+                    failed = true;
+                    continue;
+                }
+
+                includes.Add(new Include(tag, subType));
+            }
+
+            // Direct subtypes of one type are mutually exclusive, so the chain's order cannot
+            // change which branch matches; sorting by tag only makes the emitted code deterministic.
+            includes.Sort((left, right) => left.Tag.CompareTo(right.Tag));
+
+            return failed ? null : includes;
+        }
+
+        /// <summary>
+        /// Emits the runtime-type dispatch chain shared by measuring and writing.
+        /// </summary>
+        private static void EmitIncludeDispatch(
+            Writer writer,
+            INamedTypeSymbol contract,
+            string qualified,
+            List<Include> includes,
+            System.Func<Include, string> body
+        )
+        {
+            // The guard is needed whether or not this contract declares includes: a subtype nobody
+            // declared reaches its nearest ANNOTATED ancestor's formatter, which for a leaf contract
+            // has no dispatch chain at all. A sealed class and a struct cannot be subclassed, so
+            // they pay nothing.
+            bool guard = !contract.IsValueType && !contract.IsSealed;
+            if (includes.Count == 0 && !guard)
+            {
+                return;
+            }
+
+            bool first = true;
+            foreach (Include include in includes)
+            {
+                writer.Line(
+                    (first ? "if (" : "else if (")
+                        + "value is "
+                        + include.Qualified
+                        + " "
+                        + include.Local
+                        + ")"
+                        + Writer.Open
+                );
+                writer.Indent();
+
+                string emitted = body(include);
+                if (emitted.StartsWith("if (", System.StringComparison.Ordinal))
+                {
+                    writer.Line(emitted + Writer.Open);
+                    writer.Indent();
+                    writer.Line("return false;");
+                    writer.Outdent();
+                    writer.Line("}");
+                }
+                else
+                {
+                    writer.Line(emitted);
+                }
+
+                writer.Outdent();
+                writer.Line("}");
+                first = false;
+            }
+
+            if (guard)
+            {
+                // Not a fall-through: a value whose runtime type is a subtype nothing declares would
+                // otherwise be written under its nearest declared ancestor's tag and read back as
+                // that ancestor -- a level of type identity gone from saved data with nothing to
+                // report it. protobuf-net raises "Unexpected sub-type" on the same value.
+                writer.Line(
+                    (first ? "if (" : "else if (")
+                        + "value != null && value.GetType() != typeof("
+                        + qualified
+                        + "))"
+                        + Writer.Open
+                );
+                writer.Indent();
+                writer.Line(
+                    "throw "
+                        + Proto
+                        + ".WProtoFormatterProvider.UnexpectedSubtype(typeof("
+                        + qualified
+                        + "), value.GetType());"
+                );
+                writer.Outdent();
+                writer.Line("}");
+            }
+
+            writer.Blank();
+        }
+
         private static List<Member> CollectMembers(
             GeneratorExecutionContext context,
-            INamedTypeSymbol contract
+            INamedTypeSymbol contract,
+            SurrogateMap surrogates
         )
         {
             List<Member> members = new List<Member>();
@@ -601,25 +1192,23 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                     continue;
                 }
 
-                if (!assignable)
-                {
-                    Report(
-                        context,
-                        WProtoDiagnostics.MemberNotAssignable,
-                        symbol,
-                        contract.Name,
-                        symbol.Name
-                    );
-                    failed = true;
-                    continue;
-                }
-
-                Member member = Member.Create(symbol.Name, tag, type, IsRequired(attribute));
+                Member member = Member.Create(
+                    contract.Name,
+                    symbol.Name,
+                    tag,
+                    type,
+                    NamedFlag(attribute, "IsRequired"),
+                    NamedFlag(attribute, "OverwriteList"),
+                    surrogates,
+                    out bool ambiguous
+                );
                 if (member == null)
                 {
                     Report(
                         context,
-                        WProtoDiagnostics.UnsupportedMemberType,
+                        ambiguous
+                            ? WProtoDiagnostics.AmbiguousListContract
+                            : WProtoDiagnostics.UnsupportedMemberType,
                         symbol,
                         contract.Name,
                         symbol.Name,
@@ -629,6 +1218,10 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                     continue;
                 }
 
+                member.DeclaredType = type.ToDisplayString(
+                    SymbolDisplayFormat.FullyQualifiedFormat
+                );
+                member.RequiresConstruction = !assignable;
                 claimed[tag] = symbol.Name;
                 members.Add(member);
             }
@@ -709,13 +1302,13 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             );
         }
 
-        private static bool IsRequired(AttributeData attribute)
+        private static bool NamedFlag(AttributeData attribute, string name)
         {
             foreach (KeyValuePair<string, TypedConstant> argument in attribute.NamedArguments)
             {
-                if (argument.Key == "IsRequired" && argument.Value.Value is bool required)
+                if (argument.Key == name && argument.Value.Value is bool flag)
                 {
-                    return required;
+                    return flag;
                 }
             }
 

@@ -48,15 +48,215 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
             );
         }
 
-        [Test]
-        public void AnUnsupportedMemberTypeIsAnError()
+        // Every one of these is a shape a developer would reasonably expect to work, which is why it
+        // has to fail the build with a message rather than silently get no formatter.
+        //
+        // LinkedList and
+        // ReadOnlyCollection implement ICollection<T> with an explicit Add, so nothing can fill
+        // them; Queue and Stack do not implement it at all. The rest are element-shape refusals: a
+        // jagged array of anything but bytes, a rank-2 array, and a nullable element (protobuf-net
+        // refuses a null element, so Nullable<T>[] is a collection that can only hold values it
+        // cannot write).
+        [TestCase("System.Collections.Generic.LinkedList<int>")]
+        [TestCase("System.Collections.ObjectModel.ReadOnlyCollection<int>")]
+        [TestCase("System.Collections.Generic.Queue<int>")]
+        [TestCase("System.Collections.Generic.Stack<int>")]
+        [TestCase("System.Collections.Generic.IList<int>")]
+        [TestCase("System.Collections.Generic.List<System.Collections.Generic.List<int>>")]
+        [TestCase("int[][]")]
+        [TestCase("int[,]")]
+        [TestCase("int?[]")]
+        [TestCase("System.DateTime")]
+        public void AnUnsupportedMemberTypeIsAnError(string declaredType)
         {
             AssertDiagnostic(
                 "WPROTO003",
                 "Values",
                 @"[WProtoContract] public sealed partial class Unsupported
                   {
-                      [WProtoMember(1)] public System.Collections.Generic.List<int> Values;
+                      [WProtoMember(1)] public "
+                    + declaredType
+                    + @" Values;
+                  }"
+            );
+        }
+
+        [Test]
+        public void EveryConstructibleCollectionIsAccepted()
+        {
+            // The counterpart to the list above, and the reason it is worth having: WPROTO003 fired
+            // on List<int> until this session, so "it errors" is not by itself evidence that the
+            // error is right. The requirement is ICollection<T> plus a parameterless constructor
+            // plus an accessible Add -- not "is one of the types this generator has heard of".
+            AssertNoDiagnostics(
+                @"[WProtoContract] public sealed partial class Supported
+                  {
+                      [WProtoMember(1)] public int[] Ints;
+                      [WProtoMember(2)] public System.Collections.Generic.List<string> Texts;
+                      [WProtoMember(3)] public byte[][] Blobs;
+                      [WProtoMember(4, OverwriteList = true)] public double[] Doubles;
+                      [WProtoMember(5)] public System.Collections.Generic.HashSet<int> Set;
+                      [WProtoMember(6)] public System.Collections.Generic.SortedSet<string> Sorted;
+                      [WProtoMember(7)] public System.Collections.ObjectModel.Collection<int> Owned;
+                      [WProtoMember(8)] public System.Collections.Generic.Dictionary<string, int> Map;
+                      [WProtoMember(9)] public System.Collections.Generic.SortedDictionary<string, int> SortedMap;
+                  }"
+            );
+        }
+
+        [Test]
+        public void ATypeThatIsBothAMessageAndACollectionIsRefusedRatherThanGuessedAt()
+        {
+            // Eight of this package's own contracts are exactly this shape -- Deque, CyclicBuffer,
+            // SparseSet, BitSet and the four Serializable* collections all carry
+            // [ProtoContract(IgnoreListHandling = true)] today. Reading one as a repeated field
+            // silently discards its [WProtoMember]s; reading it as a message silently discards its
+            // elements. protobuf-net picks list handling and needs a flag to be told otherwise;
+            // this refuses to pick.
+            AssertDiagnostic(
+                "WPROTO012",
+                "Items",
+                @"[WProtoContract] public sealed partial class Bag : System.Collections.Generic.List<int>
+                  {
+                      [WProtoMember(1)] public int Capacity;
+                  }
+
+                  [WProtoContract] public sealed partial class Holder
+                  {
+                      [WProtoMember(1)] public Bag Items;
+                  }"
+            );
+        }
+
+        [Test]
+        public void IgnoreListHandlingResolvesTheAmbiguityTowardsAMessage()
+        {
+            AssertNoDiagnostics(
+                @"[WProtoContract(IgnoreListHandling = true)] public sealed partial class Bag : System.Collections.Generic.List<int>
+                  {
+                      [WProtoMember(1)] public int Capacity;
+                  }
+
+                  [WProtoContract] public sealed partial class Holder
+                  {
+                      [WProtoMember(1)] public Bag Items;
+                  }"
+            );
+        }
+
+        // An include names a subtype the wire can identify, so all four of these would produce a
+        // formatter that cannot round-trip: a subtype that is not one, a subtype with no contract of
+        // its own, a reserved or out-of-range field number, and a number a member already claims.
+        [TestCase("[WProtoInclude(100, typeof(Stranger))]", "does not derive")]
+        [TestCase("[WProtoInclude(100, typeof(Bare))]", "not itself a [WProtoContract]")]
+        [TestCase("[WProtoInclude(19500, typeof(Sub))]", "reserved")]
+        [TestCase("[WProtoInclude(1, typeof(Sub))]", "already claimed")]
+        public void AnUnusableIncludeIsAnError(string include, string mustSay)
+        {
+            AssertDiagnostic(
+                "WPROTO013",
+                mustSay,
+                @"[WProtoContract] public partial class Stranger { }
+                  public partial class Bare : Root { }
+
+                  [WProtoContract] "
+                    + include
+                    + @" public partial class Root
+                  {
+                      [WProtoMember(1)] public int Value;
+                  }
+
+                  [WProtoContract] public partial class Sub : Root
+                  {
+                      [WProtoMember(1)] public int SubValue;
+                  }"
+            );
+        }
+
+        [Test]
+        public void AnAbstractContractWithNoIncludesIsAnError()
+        {
+            // Reading it could never produce an instance, and the failure would otherwise be a
+            // generated `new AbstractThing()` that does not compile in a file nobody wrote.
+            AssertDiagnostic(
+                "WPROTO014",
+                "Shape",
+                @"[WProtoContract] public abstract partial class Shape
+                  {
+                      [WProtoMember(1)] public int Sides;
+                  }"
+            );
+        }
+
+        [Test]
+        public void AnAbstractContractWithIncludesIsAccepted()
+        {
+            // The shape AbstractRandom has: no instance of its own, and 17 subtypes that do.
+            AssertNoDiagnostics(
+                @"[WProtoContract] [WProtoInclude(100, typeof(Square))] public abstract partial class Shape
+                  {
+                      [WProtoMember(1)] public int Sides;
+                  }
+
+                  [WProtoContract] public partial class Square : Shape
+                  {
+                      [WProtoMember(1)] public int Edge;
+                  }"
+            );
+        }
+
+        [Test]
+        public void ASurrogateShippedByAReferencedAssemblyIsFoundFromAConsumerCompilation()
+        {
+            // The property the whole design exists for, and the one an in-assembly fixture cannot
+            // reach: this synthetic compilation is a *consumer*, and `ForeignVector3`'s surrogate is declared
+            // by an assembly attribute on the assembly it references. If referenced assemblies were
+            // not searched, `ForeignVector3` would be an unsupported member type and this would be WPROTO003 —
+            // which is exactly how a game would discover that none of its Vector3s serialize.
+            AssertNoDiagnostics(
+                @"[WProtoContract] public sealed partial class ConsumerThing
+                  {
+                      [WProtoMember(1)] public WallstopStudios.UnityHelpers.Proto.Generator.Tests.ForeignVector3 Where;
+                      [WProtoMember(2)] public WallstopStudios.UnityHelpers.Proto.Generator.Tests.ForeignVector3[] Path;
+                  }"
+            );
+        }
+
+        [Test]
+        public void ACollectionImplementedAsAStructIsAcceptedLikeAnyOther()
+        {
+            // The assumption being refused: nothing about ICollection<T> requires a class, and an
+            // inline or pooled buffer is a natural struct. A generator that emits `member != null`
+            // for every collection does not merely produce redundant code for one -- it produces
+            // code that does not compile.
+            AssertNoDiagnostics(
+                @"public struct Bag : System.Collections.Generic.ICollection<int>
+                  {
+                      private System.Collections.Generic.List<int> _items;
+                      public int Count { get { return _items == null ? 0 : _items.Count; } }
+                      public bool IsReadOnly { get { return false; } }
+                      public void Add(int item)
+                      {
+                          if (_items == null) { _items = new System.Collections.Generic.List<int>(); }
+                          _items.Add(item);
+                      }
+                      public void Clear() { _items = null; }
+                      public bool Contains(int item) { return _items != null && _items.Contains(item); }
+                      public void CopyTo(int[] array, int index) { }
+                      public bool Remove(int item) { return false; }
+                      public System.Collections.Generic.IEnumerator<int> GetEnumerator()
+                      {
+                          return (_items ?? new System.Collections.Generic.List<int>()).GetEnumerator();
+                      }
+                      System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator()
+                      {
+                          return GetEnumerator();
+                      }
+                  }
+
+                  [WProtoContract] public sealed partial class Holder
+                  {
+                      [WProtoMember(1)] public Bag Values;
                   }"
             );
         }
@@ -94,14 +294,18 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
         }
 
         [Test]
-        public void AReadOnlyMemberIsAnError()
+        public void AnImmutableContractIsAccepted()
         {
-            AssertDiagnostic(
-                "WPROTO007",
-                "Value",
+            // Refused until this session. A readonly field can only be assigned by a constructor of
+            // its declaring type -- and the generator reopens the contract as partial, so it emits
+            // one there. The type keeps its immutability and gains no public surface.
+            AssertNoDiagnostics(
                 @"[WProtoContract] public sealed partial class Frozen
                   {
                       [WProtoMember(1)] public readonly int Value;
+                      [WProtoMember(2)] public string Name { get; }
+                      [WProtoMember(3)] public readonly int[] Marks;
+                      public Frozen() { }
                   }"
             );
         }
@@ -167,14 +371,16 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
         }
 
         [Test]
-        public void AGenericContractIsARefusalRatherThanAWrongFormatter()
+        public void AGenericContractIsAccepted()
         {
-            AssertDiagnostic(
-                "WPROTO009",
-                "Boxed",
+            // Refused until this session. The closure decides each member's wire type, so the
+            // emitted code asks WProtoGeneric<T> rather than carrying a constant.
+            AssertNoDiagnostics(
                 @"[WProtoContract] public sealed partial class Boxed<T>
                   {
                       [WProtoMember(1)] public int Value;
+                      [WProtoMember(2)] public T Payload;
+                      [WProtoMember(3)] public T[] Many;
                   }"
             );
         }
@@ -182,10 +388,11 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
         [Test]
         public void AContractNestedInsideAGenericTypeIsARefusalToo()
         {
-            // The contract itself is not generic; the type it is nested in is. The formatter is
-            // emitted by reopening every enclosing type as partial, and a reopened declaration that
-            // drops its type parameters does not compile -- so this has to be caught here rather
-            // than surface as a compile error in a file the developer never wrote.
+            // The contract itself is not generic; the type it is nested in is. Emission would work
+            // -- every enclosing type is reopened with its type parameters -- but REGISTRATION would
+            // not: `Inner` has no constructions of its own to discover, so its formatter would be
+            // emitted and never registered, and `Get<Holder<int>.Inner>()` would throw at runtime in
+            // a shipped player. Refusing at build time is the lesser failure.
             AssertDiagnostic(
                 "WPROTO009",
                 "Inner",
@@ -207,7 +414,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
             // fixture, with private members, private hooks, and a hand-written formatter of its own.
             // Every enclosing type has to be partial too, and a hand-written nested formatter must
             // not be mistaken for a conflict.
-            ImmutableArray<Diagnostic> diagnostics = Run(
+            AssertNoDiagnostics(
                 @"public sealed partial class Fixture
                   {
                       [WProtoContract(Name = ""player_state"")]
@@ -234,7 +441,22 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
                       }
                   }"
             );
+        }
 
+        [Test]
+        public void AValidContractProducesNoDiagnosticsAtAll()
+        {
+            AssertNoDiagnostics(
+                @"[WProtoContract] public sealed partial class Fine
+                  {
+                      [WProtoMember(1)] public int Value;
+                  }"
+            );
+        }
+
+        private static void AssertNoDiagnostics(string source)
+        {
+            ImmutableArray<Diagnostic> diagnostics = Run(source);
             Assert.IsEmpty(
                 diagnostics.Where(d => d.Id.StartsWith("WPROTO", StringComparison.Ordinal)),
                 string.Join("; ", diagnostics.Select(d => d.ToString()))
@@ -242,18 +464,135 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
         }
 
         [Test]
-        public void AValidContractProducesNoDiagnosticsAtAll()
+        public void ASurrogateThatIsNotAContractIsAnError()
         {
-            ImmutableArray<Diagnostic> diagnostics = Run(
-                @"[WProtoContract] public sealed partial class Fine
+            // Without this the pair compiles, emits a formatter lookup for a type that has none, and
+            // fails on the first save in a shipped player.
+            AssertDiagnostic(
+                "WPROTO016",
+                "Plain",
+                @"[assembly: WProtoSurrogate(typeof(Consumer.Real), typeof(Consumer.Plain))]
+                  public struct Real { public int X; }
+                  public struct Plain
                   {
-                      [WProtoMember(1)] public int Value;
+                      public int X;
+                      public static implicit operator Plain(Real value) => new Plain { X = value.X };
+                      public static implicit operator Real(Plain value) => new Real { X = value.X };
+                  }"
+            );
+        }
+
+        [Test]
+        public void ASurrogateThatCannotConvertBackIsAnError()
+        {
+            // The worse of the two failures: one-way conversion writes bytes that look correct and
+            // reads a value that never comes back.
+            AssertDiagnostic(
+                "WPROTO017",
+                "OneWay",
+                @"[assembly: WProtoSurrogate(typeof(Consumer.Real), typeof(Consumer.OneWay))]
+                  public struct Real { public int X; }
+                  [WProtoContract] public partial struct OneWay
+                  {
+                      [WProtoMember(1)] public int X;
+                      public static implicit operator OneWay(Real value) => new OneWay { X = value.X };
+                  }"
+            );
+        }
+
+        [Test]
+        public void AWellFormedSurrogatePairIsNotAnError()
+        {
+            // The control. Both checks are cheap to write in a way that fires on everything, and a
+            // pair of red tests cannot tell that apart from working.
+            ImmutableArray<Diagnostic> diagnostics = Run(
+                @"[assembly: WProtoSurrogate(typeof(Consumer.Real), typeof(Consumer.Good))]
+                  public struct Real { public int X; }
+                  [WProtoContract] public partial struct Good
+                  {
+                      [WProtoMember(1)] public int X;
+                      public static implicit operator Good(Real value) => new Good { X = value.X };
+                      public static implicit operator Real(Good value) => new Real { X = value.X };
                   }"
             );
 
+            Assert.IsFalse(
+                diagnostics.Any(d => d.Id == "WPROTO016" || d.Id == "WPROTO017"),
+                string.Join("; ", diagnostics.Select(d => d.Id + " " + d.GetMessage()))
+            );
+        }
+
+        [Test]
+        public void AnOpenConstructionNestedInATypeArgumentIsNotRegistered()
+        {
+            // The registrar can only name CLOSED types. `Box<int>` is closed; `Box<Wrapper<T>>` is
+            // not, because T is still unbound -- but the check only looked at DIRECT type arguments,
+            // and `Wrapper<T>` is not itself a type parameter, so it was recorded as closed and
+            // emitted into a registrar that cannot name it.
+            //
+            // Asserted by compiling the generated code rather than by reading it: "the consumer's
+            // build fails" is the actual symptom, and it is what a reader of this test cares about.
+            ImmutableArray<Diagnostic> errors = CompileGenerated(
+                @"public sealed class Wrapper<T> { public T Item; }
+                  [WProtoContract] public partial class Box<T> { [WProtoMember(1)] public int Value; }
+                  public static class Holder<T> { public static Box<Wrapper<T>> Nested; }
+                  public static class Closed { public static Box<int> Fine; }"
+            );
+
             Assert.IsEmpty(
-                diagnostics.Where(d => d.Id.StartsWith("WPROTO", StringComparison.Ordinal)),
-                string.Join("; ", diagnostics.Select(d => d.ToString()))
+                errors.Select(d => d.Id + " " + d.GetMessage()),
+                "the generated registrar must not name an open construction"
+            );
+        }
+
+        [Test]
+        public void AnImmutableClassWithOnlyAParameterizedConstructorIsAccepted()
+        {
+            // WPROTO011 exists because the formatter normally calls `new T()` to have something to
+            // read into. A contract with a member that cannot be assigned after construction does not
+            // take that path at all -- it holds every value in a local and BUILDS the instance with
+            // the constructor the generator emits -- so demanding a parameterless one rejected the
+            // canonical immutable class for a reason that no longer applied to it.
+            ImmutableArray<Diagnostic> reported = Run(
+                @"[WProtoContract] public sealed partial class Immutable
+                  {
+                      [WProtoMember(1)] public readonly int X;
+                      public Immutable(int x) { X = x; }
+                  }"
+            );
+
+            Assert.IsFalse(
+                reported.Any(d => d.Id == "WPROTO011"),
+                string.Join("; ", reported.Select(d => d.Id + " " + d.GetMessage()))
+            );
+
+            // And the emitted constructor has to actually compile, which is the half a diagnostic
+            // assertion cannot see.
+            Assert.IsEmpty(
+                CompileGenerated(
+                        @"[WProtoContract] public sealed partial class Immutable
+                          {
+                              [WProtoMember(1)] public readonly int X;
+                              public Immutable(int x) { X = x; }
+                          }"
+                    )
+                    .Select(d => d.Id + " " + d.GetMessage())
+            );
+        }
+
+        [Test]
+        public void AMutableClassWithNoParameterlessConstructorIsStillAnError()
+        {
+            // The control for the relaxation above: nothing here is immutable, so the formatter does
+            // need `new T()` and the diagnostic must still fire.
+            AssertDiagnostic(
+                "WPROTO011",
+                "Mutable",
+                @"[WProtoContract] public sealed partial class Mutable
+                  {
+                      [WProtoMember(1)] public int X;
+                      public Mutable(int x) { X = x; }
+                  }"
             );
         }
 
@@ -264,7 +603,10 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
 
             Assert.IsNotNull(
                 match,
-                "expected " + id + ", saw: " + string.Join("; ", diagnostics.Select(d => d.Id))
+                "expected "
+                    + id
+                    + ", saw: "
+                    + string.Join("; ", diagnostics.Select(d => d.Id + " " + d.GetMessage()))
             );
             Assert.AreEqual(DiagnosticSeverity.Error, match.Severity);
             Assert.IsTrue(
@@ -275,9 +617,30 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
 
         private static ImmutableArray<Diagnostic> Run(string body)
         {
+            return Run(body, out Compilation _);
+        }
+
+        private static ImmutableArray<Diagnostic> Run(string body, out Compilation generated)
+        {
+            // An [assembly:] attribute must precede every namespace, so a fixture that needs one
+            // writes it at the top of its body and it is hoisted out here rather than ending up
+            // inside `namespace Consumer` where it would not compile.
+            List<string> assemblyAttributes = new List<string>();
+            List<string> rest = new List<string>();
+            foreach (string line in body.Split('\n'))
+            {
+                (
+                    line.TrimStart().StartsWith("[assembly:", StringComparison.Ordinal)
+                        ? assemblyAttributes
+                        : rest
+                ).Add(line);
+            }
+
             string source =
-                "namespace Consumer { using WallstopStudios.UnityHelpers.Core.Serialization.WallstopProto; "
-                + body
+                "using WallstopStudios.UnityHelpers.Core.Serialization.WallstopProto;\n"
+                + string.Join("\n", assemblyAttributes)
+                + "\nnamespace Consumer { using WallstopStudios.UnityHelpers.Core.Serialization.WallstopProto; "
+                + string.Join("\n", rest)
                 + " }";
 
             List<MetadataReference> references = new List<MetadataReference>();
@@ -300,11 +663,29 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
                 .Create(new WProtoGenerator())
                 .RunGeneratorsAndUpdateCompilation(
                     compilation,
-                    out Compilation _,
+                    out Compilation updated,
                     out ImmutableArray<Diagnostic> diagnostics
                 );
 
+            generated = updated;
             return diagnostics;
+        }
+
+        /// <summary>
+        /// Compiles the generator's own output and returns its errors.
+        /// </summary>
+        /// <remarks>
+        /// The generator reporting no diagnostic is not the same as the consumer's build succeeding.
+        /// Emitted code that does not compile is the failure a developer actually hits, and it is
+        /// invisible to a suite that only inspects what the generator chose to report.
+        /// </remarks>
+        private static ImmutableArray<Diagnostic> CompileGenerated(string body)
+        {
+            Run(body, out Compilation generated);
+            return generated
+                .GetDiagnostics()
+                .Where(d => d.Severity == DiagnosticSeverity.Error)
+                .ToImmutableArray();
         }
     }
 }

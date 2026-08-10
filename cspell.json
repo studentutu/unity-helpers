@@ -502,7 +502,8 @@
         "asmdef",
         "asmref",
         "stcf",
-        "WProto"
+        "WProto",
+        "Prd"
       ]
     },
     {
@@ -860,7 +861,8 @@
         "vswhere",
         "EAGAIN",
         "nologo",
-        "cmp"
+        "cmp",
+        "surrogated"
       ]
     }
   ],

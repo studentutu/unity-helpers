@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <IsPackable>false</IsPackable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <!-- Compiled from the repository root so the generator sees the same sources Unity does. -->
+    <RepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/../..'))</RepoRoot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The real serializer, not a copy. The bootstrap is excluded because it is the one file that
+         references UnityEngine, and the Unity-free compilation is exactly what makes this harness
+         possible. -->
+    <Compile
+      Include="$(RepoRoot)/Runtime/Core/Serialization/WallstopProto/*.cs"
+      Exclude="$(RepoRoot)/Runtime/Core/Serialization/WallstopProto/WProtoBootstrap.cs;$(RepoRoot)/Runtime/Core/Serialization/WallstopProto/WProtoBuiltInFormatters.cs"
+    />
+    <Compile Include="*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The analyzer under test is the DLL this package SHIPS, not a fresh build of the sources
+         beside it. That is the only binary Unity ever loads, and pointing the suite at a rebuild
+         would leave a stale committed DLL undetectable. Byte-comparing the two instead was tried
+         and abandoned: the compiler hashes source file paths into the assembly, so a CI checkout
+         and a developer's working copy never produce identical bytes however deterministic the
+         build is. -->
+    <Analyzer Include="$(RepoRoot)/Runtime/Analyzers/WallstopStudios.UnityHelpers.Proto.Generator.dll" />
+
+    <!-- Referenced normally as well, so the diagnostic tests can drive the generator through a
+         Roslyn GeneratorDriver over a synthetic consumer compilation. -->
+    <ProjectReference Include="../WallstopStudios.UnityHelpers.Proto.Generator/WallstopStudios.UnityHelpers.Proto.Generator.csproj">
+      <!-- Building the generator normally refreshes the shipped DLL. Not from here: these tests
+           validate the shipped artifact, and a run that rewrote it first could never fail. -->
+      <Properties>CopyAnalyzerPayload=false</Properties>
+    </ProjectReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="NUnit" Version="3.14.0" />
+    <PackageReference Include="NUnit3TestAdapter" Version="4.6.0" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.11.0" />
+  </ItemGroup>
+</Project>

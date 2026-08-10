@@ -1,0 +1,73 @@
+name: WallstopProto Generator
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "Generator~/**"
+      - "Runtime/Analyzers/**"
+      - "Runtime/Core/Serialization/WallstopProto/**"
+      - ".github/workflows/wproto-generator.yml"
+  pull_request:
+    paths:
+      - "Generator~/**"
+      - "Runtime/Analyzers/**"
+      - "Runtime/Core/Serialization/WallstopProto/**"
+      - ".github/workflows/wproto-generator.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  generator:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          # Pinned to a patch. The byte comparison below is only meaningful against the same
+          # compiler, and every SDK patch ships its own Roslyn; 9.0.x floated onto a different one
+          # and the gate failed for a reason no developer could reproduce.
+          dotnet-version: "9.0.306"
+
+      - name: Build the generator to a scratch directory
+        # AnalyzerPayloadOutputDir is redirected so the build cannot quietly refresh the committed
+        # DLL it is about to be compared against.
+        run: |
+          dotnet build "Generator~/WallstopStudios.UnityHelpers.Proto.Generator/WallstopStudios.UnityHelpers.Proto.Generator.csproj" \
+            -c Release --nologo -p:AnalyzerPayloadOutputDir="$RUNNER_TEMP/analyzer"
+
+      - name: Verify the shipped analyzer matches its sources
+        # Byte-exact, and reproducible off this machine only because the project sets
+        # ContinuousIntegrationBuild -- determinism alone still embeds source paths, which is what
+        # made an earlier version of this step fail for a reason no developer could reproduce.
+        run: |
+          set -euo pipefail
+          built="$RUNNER_TEMP/analyzer/WallstopStudios.UnityHelpers.Proto.Generator.dll"
+          shipped="Runtime/Analyzers/WallstopStudios.UnityHelpers.Proto.Generator.dll"
+          if ! cmp -s "$built" "$shipped"; then
+            echo "::error::$shipped does not match a build of the sources beside it. Rebuild it:"
+            echo "  dotnet build \"Generator~/WallstopStudios.UnityHelpers.Proto.Generator/WallstopStudios.UnityHelpers.Proto.Generator.csproj\" -c Release"
+            echo "(the build copies its own output into Runtime/Analyzers)"
+            exit 1
+          fi
+          echo "Shipped analyzer is byte-identical to a fresh build of its sources."
+
+      - name: Verify where the analyzer is placed
+        # Unity scopes an analyzer by its nearest enclosing asmdef. Under an editor-only one it
+        # reaches no consumer runtime code at all, and the failure reads as a missing generated
+        # type rather than as anything naming the analyzer.
+        run: node scripts/tests/test-analyzer-placement.js
+
+      - name: Test the generator
+        # The formatters under test are the shipped analyzer's own output, produced the way Unity
+        # produces them, rather than a transcription of what it ought to emit.
+        run: dotnet test "Generator~/WallstopStudios.UnityHelpers.Proto.Generator.Tests/WallstopStudios.UnityHelpers.Proto.Generator.Tests.csproj" -c Release --nologo

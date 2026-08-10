@@ -35,7 +35,9 @@
     "Samples~/**/Library/**",
     "Samples~/**/Temp/**",
     "Samples~/**/obj/**",
-    "perf-results/**"
+    "perf-results/**",
+    "Generator~/**/obj/**",
+    "Generator~/**/bin/**"
   ],
   "files": [
     "**/*.{md,markdown}",
@@ -855,7 +857,10 @@
         "varints",
         "zigzag",
         "MSVC",
-        "vswhere"
+        "vswhere",
+        "EAGAIN",
+        "nologo",
+        "cmp"
       ]
     }
   ],

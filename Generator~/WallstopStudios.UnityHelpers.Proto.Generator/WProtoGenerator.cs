@@ -109,12 +109,19 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 }
                 else
                 {
+                    // A generic subtype's closures need the same entry point a non-generic one gets.
+                    string entryPoint =
+                        RootContract(contract) == null
+                            ? ".WProtoFormatter.Instance"
+                            : ".WProtoRootFormatter.Instance";
                     foreach (string closed in ClosedConstructions(context.Compilation, contract))
                     {
-                        registrations.Add(closed + ".WProtoFormatter.Instance");
+                        registrations.Add(closed + entryPoint);
                     }
                 }
             }
+
+            registrations.AddRange(ForeignClosures(context.Compilation));
 
             if (0 < registrations.Count)
             {
@@ -123,6 +130,116 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                     SourceText.From(EmitRegistrar(context, registrations), Encoding.UTF8)
                 );
             }
+        }
+
+        /// <summary>
+        /// Registers closures of generic contracts that another assembly declares.
+        /// </summary>
+        /// <param name="compilation">The compilation being generated for.</param>
+        /// <returns>One registration expression per closure found here and not declared here.</returns>
+        /// <remarks>
+        /// <para>
+        /// This is the consumer story, and without it the story is only half true. A generic
+        /// contract's formatter is emitted once, open, into the assembly that declares it; only a
+        /// <b>closed</b> construction can be registered, and the assembly that declares the contract
+        /// usually never mentions the closure a consumer cares about. <c>Deque&lt;TheirStruct&gt;</c>
+        /// cannot appear in this package's own sources by construction -- the struct does not exist
+        /// yet -- so nothing registered it and it threw on its first serialization.
+        /// </para>
+        /// <para>
+        /// The scan runs from the closures rather than from the references. Walking every namespace
+        /// of every referenced assembly looking for annotations would cost more than the whole
+        /// generator; asking "is the type this construction closes a contract" costs one attribute
+        /// lookup per constructed generic already in the syntax.
+        /// </para>
+        /// <para>
+        /// Two guards keep this from breaking a build it was meant to help. The formatter has to be
+        /// <b>accessible</b> from here, since an internal contract in a reference without
+        /// <c>InternalsVisibleTo</c> cannot be named; and it has to <b>exist</b>, because a
+        /// referenced assembly compiled without this analyzer has the attribute and no formatter, and
+        /// naming one that is not there would fail the consumer's build rather than the absent
+        /// registration it is replacing.
+        /// </para>
+        /// </remarks>
+        private static IEnumerable<string> ForeignClosures(Compilation compilation)
+        {
+            HashSet<string> found = new HashSet<string>();
+            List<string> registrations = new List<string>();
+
+            foreach (SyntaxTree tree in compilation.SyntaxTrees)
+            {
+                SemanticModel model = compilation.GetSemanticModel(tree);
+                foreach (SyntaxNode node in tree.GetRoot().DescendantNodes())
+                {
+                    if (!(node is TypeSyntax type))
+                    {
+                        continue;
+                    }
+
+                    if (
+                        !(Resolve(model, type) is INamedTypeSymbol named)
+                        || !named.IsGenericType
+                        || named.IsUnboundGenericType
+                        || IsOpen(named)
+                    )
+                    {
+                        continue;
+                    }
+
+                    INamedTypeSymbol definition = named.ConstructedFrom;
+                    if (
+                        definition == null
+                        || SymbolEqualityComparer.Default.Equals(
+                            definition.ContainingAssembly,
+                            compilation.Assembly
+                        )
+                        || !HasAttribute(definition, ContractAttribute)
+                    )
+                    {
+                        continue;
+                    }
+
+                    string entryPoint = FormatterNameFor(definition);
+                    if (
+                        entryPoint == null
+                        || !compilation.IsSymbolAccessibleWithin(named, compilation.Assembly)
+                    )
+                    {
+                        continue;
+                    }
+
+                    string qualified = named.ToDisplayString(
+                        SymbolDisplayFormat.FullyQualifiedFormat
+                    );
+                    if (found.Add(qualified))
+                    {
+                        registrations.Add(qualified + "." + entryPoint + ".Instance");
+                    }
+                }
+            }
+
+            return registrations;
+        }
+
+        /// <summary>
+        /// Names the nested formatter a referenced contract actually carries, or <c>null</c>.
+        /// </summary>
+        /// <param name="definition">The generic contract's unbound definition.</param>
+        /// <returns>The nested type name to register, or <c>null</c> when there is none.</returns>
+        private static string FormatterNameFor(INamedTypeSymbol definition)
+        {
+            foreach (string candidate in new[] { "WProtoRootFormatter", "WProtoFormatter" })
+            {
+                foreach (INamedTypeSymbol nested in definition.GetTypeMembers(candidate))
+                {
+                    if (nested.DeclaredAccessibility == Accessibility.Public)
+                    {
+                        return candidate;
+                    }
+                }
+            }
+
+            return null;
         }
 
         private static void ReportOrphanedHooks(
@@ -270,16 +387,36 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 return null;
             }
 
+            // SkipConstructor means no constructor the author wrote may run, so the formatter reads
+            // into an instance made by a private constructor emitted alongside it. Only meaningful
+            // for a reference type that is created here at all: a struct has no constructor to skip,
+            // an abstract contract creates nothing, and one that builds itself never calls `new`.
+            //
+            // The last condition is about not breaking the consumer's source. Emitting ANY
+            // constructor into a type that declares none removes the implicit parameterless one, so
+            // `new Theirs()` stops compiling -- an attribute silently breaking unrelated code. A type
+            // that declares no constructor also has nothing to skip: the implicit one runs field
+            // initializers and nothing else, which is exactly what the emitted one would do.
+            bool skipConstructor =
+                Shape.SkipsConstructor(contract)
+                && !contract.IsValueType
+                && !contract.IsAbstract
+                && !constructAtEnd
+                && DeclaresAConstructor(contract);
+
             // Not asked of a contract that builds itself. The diagnostic exists because the formatter
             // normally calls `new T()` to have something to read into; a contract with a member that
             // cannot be assigned after construction never takes that path, holding every value in a
             // local and passing them to the constructor emitted just below. Requiring a parameterless
             // constructor as well rejected the canonical immutable class -- one parameterized
             // constructor, all-readonly members -- for a reason that had stopped applying to it.
+            // SkipConstructor is the same argument: the instance comes from a constructor emitted
+            // here, so what the author declared is not consulted.
             if (
                 !contract.IsValueType
                 && !contract.IsAbstract
                 && !constructAtEnd
+                && !skipConstructor
                 && !HasAccessibleParameterlessConstructor(contract)
             )
             {
@@ -297,12 +434,38 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
 
             string qualified = contract.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
 
+            // A subtype's ENTRY POINT is not the formatter that writes its own members. Measured
+            // against protobuf-net 3.2.56: serializing a subtype under its own declared type produces
+            // exactly the bytes serializing it as its base does -- the include wrapping its members,
+            // then the base's members. Registering the own-members formatter wrote only the subtype's
+            // half, which protobuf-net then read as the BASE's fields, silently and with no error.
+            INamedTypeSymbol root = RootContract(contract);
+
+            // A subtype is written as its base writes it, so the base has to have a tag to write it
+            // under. Without the declaration there is none: serializing one reaches the base's
+            // dispatch chain, matches no branch, and fails at run time in a shipped player. The
+            // alternative -- writing this type's members alone -- is what protobuf-net would read
+            // back as the BASE's fields, so refusing is the only answer that is not silently wrong.
+            if (root != null && !DeclaresInclude(contract.BaseType, contract))
+            {
+                context.ReportDiagnostic(
+                    Diagnostic.Create(
+                        WProtoDiagnostics.SubtypeNotIncluded,
+                        contract.Locations.FirstOrDefault(),
+                        contract.Name,
+                        contract.BaseType.Name
+                    )
+                );
+                return null;
+            }
+
+            string entryPoint =
+                root == null ? ".WProtoFormatter.Instance" : ".WProtoRootFormatter.Instance";
+
             // An open generic has no formatter to register; each closed construction the compilation
             // actually uses gets one. That scan is what makes `Deque<TheirStruct>` work at the
             // CONSUMER's build, which is the property this whole generator was chosen for.
-            registration = IsGenericAnywhere(contract)
-                ? null
-                : qualified + ".WProtoFormatter.Instance";
+            registration = IsGenericAnywhere(contract) ? null : qualified + entryPoint;
 
             Writer writer = new Writer();
             writer.Line("// <auto-generated />");
@@ -345,8 +508,28 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 EmitConstructor(writer, contract, members);
                 writer.Blank();
             }
+            else if (skipConstructor)
+            {
+                EmitSkippingConstructor(writer, contract);
+                writer.Blank();
+            }
 
-            EmitFormatter(writer, contract, qualified, members, includes, hooks, constructAtEnd);
+            if (root != null)
+            {
+                EmitRootFormatter(writer, qualified, root);
+                writer.Blank();
+            }
+
+            EmitFormatter(
+                writer,
+                contract,
+                qualified,
+                members,
+                includes,
+                hooks,
+                constructAtEnd,
+                skipConstructor
+            );
 
             foreach (INamedTypeSymbol unused in nesting)
             {
@@ -370,7 +553,8 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             List<Member> members,
             List<Include> includes,
             Hooks hooks,
-            bool constructAtEnd
+            bool constructAtEnd,
+            bool skipConstructor
         )
         {
             writer.Line("/// <summary>Generated WallstopProto formatter. Do not edit.</summary>");
@@ -393,8 +577,239 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             writer.Blank();
             EmitWrite(writer, contract, qualified, members, includes, hooks);
             writer.Blank();
-            EmitRead(writer, contract, qualified, members, includes, hooks, constructAtEnd);
+            EmitRead(
+                writer,
+                contract,
+                qualified,
+                members,
+                includes,
+                hooks,
+                constructAtEnd,
+                skipConstructor
+            );
 
+            writer.Outdent();
+            writer.Line("}");
+        }
+
+        /// <summary>
+        /// Reports whether <paramref name="baseType"/> declares <paramref name="subType"/> with
+        /// <c>[WProtoInclude]</c>.
+        /// </summary>
+        /// <param name="baseType">The immediate base contract.</param>
+        /// <param name="subType">The contract that derives from it.</param>
+        /// <returns><c>true</c> when the base names it.</returns>
+        /// <remarks>
+        /// The IMMEDIATE base, deliberately. protobuf-net refuses a grandchild declared on the
+        /// grandparent with "Unexpected sub-type" (measured), so each level declares only what
+        /// derives directly from it.
+        /// </remarks>
+        private static bool DeclaresInclude(INamedTypeSymbol baseType, INamedTypeSymbol subType)
+        {
+            foreach (AttributeData attribute in baseType.GetAttributes())
+            {
+                if (
+                    attribute.AttributeClass?.ToDisplayString() != IncludeAttribute
+                    || attribute.ConstructorArguments.Length < 2
+                )
+                {
+                    continue;
+                }
+
+                if (
+                    attribute.ConstructorArguments[1].Value is INamedTypeSymbol declared
+                    && SymbolEqualityComparer.Default.Equals(
+                        declared.OriginalDefinition,
+                        subType.OriginalDefinition
+                    )
+                )
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Reports whether <paramref name="contract"/> writes any constructor of its own.
+        /// </summary>
+        /// <param name="contract">The contract to inspect.</param>
+        /// <returns><c>true</c> when at least one instance constructor appears in source.</returns>
+        private static bool DeclaresAConstructor(INamedTypeSymbol contract)
+        {
+            foreach (IMethodSymbol constructor in contract.InstanceConstructors)
+            {
+                if (!constructor.IsImplicitlyDeclared)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Finds the outermost contract in <paramref name="contract"/>'s base chain, or <c>null</c>
+        /// when it is the outermost itself.
+        /// </summary>
+        /// <param name="contract">The contract to walk up from.</param>
+        /// <returns>The contract that owns the wire shape, or <c>null</c>.</returns>
+        /// <remarks>
+        /// The chain stops at the first ancestor that is not a contract, because that is where
+        /// protobuf-net's model stops too: a contract deriving from a plain class owns its own shape.
+        /// </remarks>
+        private static INamedTypeSymbol RootContract(INamedTypeSymbol contract)
+        {
+            INamedTypeSymbol root = null;
+            for (
+                INamedTypeSymbol current = contract.BaseType;
+                current != null && Shape.IsContract(current);
+                current = current.BaseType
+            )
+            {
+                root = current;
+            }
+
+            return root;
+        }
+
+        /// <summary>
+        /// Emits the formatter registered for a subtype: the one that writes the whole hierarchy.
+        /// </summary>
+        /// <param name="writer">The output.</param>
+        /// <param name="qualified">The subtype's fully qualified name.</param>
+        /// <param name="root">The outermost contract in its base chain.</param>
+        /// <remarks>
+        /// <para>
+        /// Serializing a subtype under its own declared type must produce the same bytes as
+        /// serializing it as its base, because that is what protobuf-net does -- the root's formatter
+        /// dispatches on the runtime type, writes the include holding the subtype's members, then
+        /// writes its own. The nested <c>WProtoFormatter</c> beside this one writes only the include's
+        /// payload and is what the root reaches for; this is the entry point.
+        /// </para>
+        /// <para>
+        /// <b>Read narrows rather than assumes.</b> The root produces whatever type the payload's
+        /// include names, which need not be this one -- a save written by a build where the member
+        /// held a sibling is ordinary input, not corruption. Handing that back through a blind cast
+        /// would throw from inside generated code; refusing lets the caller see a failed read.
+        /// </para>
+        /// </remarks>
+        private static void EmitRootFormatter(
+            Writer writer,
+            string qualified,
+            INamedTypeSymbol root
+        )
+        {
+            string rootQualified = root.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+
+            writer.Line("/// <summary>Generated WallstopProto entry point. Do not edit.</summary>");
+            writer.Line(
+                "public sealed class WProtoRootFormatter : "
+                    + Proto
+                    + ".IWProtoFormatter<"
+                    + qualified
+                    + ">"
+                    + Writer.Open
+            );
+            writer.Indent();
+            writer.Line(
+                "/// <summary>The shared instance; the formatter holds no state.</summary>"
+            );
+            writer.Line(
+                "public static readonly WProtoRootFormatter Instance = new WProtoRootFormatter();"
+            );
+            writer.Blank();
+            writer.Line("/// <inheritdoc />");
+            writer.Line("public int Measure(in " + qualified + " value)" + Writer.Open);
+            writer.Indent();
+            writer.Line("return " + rootQualified + ".WProtoFormatter.Instance.Measure(value);");
+            writer.Outdent();
+            writer.Line("}");
+            writer.Blank();
+            writer.Line("/// <inheritdoc />");
+            writer.Line(
+                "public bool Write(ref "
+                    + Proto
+                    + ".WProtoWriter writer, in "
+                    + qualified
+                    + " value)"
+                    + Writer.Open
+            );
+            writer.Indent();
+            writer.Line(
+                "return " + rootQualified + ".WProtoFormatter.Instance.Write(ref writer, value);"
+            );
+            writer.Outdent();
+            writer.Line("}");
+            writer.Blank();
+            writer.Line("/// <inheritdoc />");
+            writer.Line(
+                "public bool TryRead(ref "
+                    + Proto
+                    + ".WProtoReader reader, out "
+                    + qualified
+                    + " value)"
+                    + Writer.Open
+            );
+            writer.Indent();
+            writer.Line(
+                "if (!"
+                    + rootQualified
+                    + ".WProtoFormatter.Instance.TryRead(ref reader, out "
+                    + rootQualified
+                    + " read))"
+                    + Writer.Open
+            );
+            writer.Indent();
+            writer.Line("value = default(" + qualified + ");");
+            writer.Line("return false;");
+            writer.Outdent();
+            writer.Line("}");
+            writer.Blank();
+            writer.Line("value = read as " + qualified + ";");
+            writer.Line("return value != null;");
+            writer.Outdent();
+            writer.Line("}");
+            writer.Outdent();
+            writer.Line("}");
+        }
+
+        /// <summary>
+        /// Emits a private constructor that runs no user code, for a contract declared
+        /// <c>SkipConstructor</c>.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// protobuf-net implements the same flag by allocating the object uninitialized. That is a
+        /// reflection call, which is the one thing this serializer exists to avoid, so the instance
+        /// comes from a constructor emitted into the contract's own <c>partial</c> declaration
+        /// instead -- statically dispatched, and AOT-compiled like any other.
+        /// </para>
+        /// <para>
+        /// <b>The difference is stated rather than hidden.</b> C# field initializers and base
+        /// constructors still run here and do not under protobuf-net. That makes the resulting object
+        /// MORE initialized, never less: <c>AbstractRandom</c>'s sixteen-byte scratch buffer exists
+        /// after this and is <c>null</c> after protobuf-net's. Every such field is then overwritten
+        /// by the payload or left at a value the type's own author chose, which is the outcome the
+        /// flag is reached for in the first place.
+        /// </para>
+        /// </remarks>
+        private static void EmitSkippingConstructor(Writer writer, INamedTypeSymbol contract)
+        {
+            writer.Line(
+                "/// <summary>Generated WallstopProto constructor. Do not edit or call.</summary>"
+            );
+            writer.Line(
+                "private "
+                    + contract.Name
+                    + "("
+                    + Proto
+                    + ".WProtoConstruct wprotoMarker)"
+                    + Writer.Open
+            );
+            writer.Indent();
+            writer.Line("_ = wprotoMarker;");
             writer.Outdent();
             writer.Line("}");
         }
@@ -570,7 +985,8 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             List<Member> members,
             List<Include> includes,
             Hooks hooks,
-            bool constructAtEnd
+            bool constructAtEnd,
+            bool skipConstructor
         )
         {
             writer.Line("/// <inheritdoc />");
@@ -602,6 +1018,17 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 // only thing that can produce one, and a payload without one is malformed rather
                 // than an empty base.
                 writer.Line(qualified + " read = null;");
+            }
+            else if (skipConstructor)
+            {
+                writer.Line(
+                    qualified
+                        + " read = new "
+                        + qualified
+                        + "(default("
+                        + Proto
+                        + ".WProtoConstruct));"
+                );
             }
             else
             {
@@ -881,7 +1308,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                     }
 
                     if (
-                        !(model.GetTypeInfo(type).Type is INamedTypeSymbol named)
+                        !(Resolve(model, type) is INamedTypeSymbol named)
                         || !named.IsGenericType
                         || named.IsUnboundGenericType
                     )
@@ -912,6 +1339,25 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             }
 
             return found;
+        }
+
+        /// <summary>
+        /// Resolves the type a piece of type syntax names, however it is spelled.
+        /// </summary>
+        /// <param name="model">The semantic model for the syntax's tree.</param>
+        /// <param name="type">The type syntax.</param>
+        /// <returns>The named type, or <c>null</c> when the syntax names none.</returns>
+        /// <remarks>
+        /// <c>GetTypeInfo</c> alone is not enough, and the gap has a specific shape:
+        /// <c>new Box&lt;int&gt;()</c> binds its type syntax to a CONSTRUCTOR, so the type info is
+        /// empty and the closure went undiscovered -- silently, and only until the first
+        /// serialization in a shipped player. Object creation is the most natural way to name a
+        /// closure and can easily be the only one in a consumer's assembly, so both questions are
+        /// asked.
+        /// </remarks>
+        private static ITypeSymbol Resolve(SemanticModel model, TypeSyntax type)
+        {
+            return model.GetTypeInfo(type).Type ?? model.GetSymbolInfo(type).Symbol as ITypeSymbol;
         }
 
         /// <summary>

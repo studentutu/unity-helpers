@@ -875,6 +875,17 @@ int payloadSize =
 
 ### Annotating your own contracts
 
+> **`[ProtoContract]` is not read.** WallstopProto has its own attributes and only its own attributes.
+> A type annotated for protobuf-net keeps being served by protobuf-net; it does **not** get a
+> generated formatter, and it will not be AOT-safe under IL2CPP. Moving a contract across means
+> adding `[WProtoContract]` beside `[ProtoContract]` and `[WProtoMember(n)]` beside each
+> `[ProtoMember(n)]`, with the same field numbers.
+>
+> This is deliberate. Reusing protobuf-net's attributes would have made the two serializers
+> indistinguishable at the declaration, so a feature protobuf-net supports and this one does not —
+> `AsReference`, `DynamicType`, `DataFormat` — would read as supported and silently mean something
+> else. Separate attributes make the set of things that round-trip explicit.
+
 Annotate a type and a formatter is generated for it, in your assembly, at your build. Field numbers
 are the wire contract; `Name` is not written to the wire at all, and exists so a schema, a
 diagnostic, or a payload dump does not change meaning when you rename a C# member:
@@ -1063,6 +1074,14 @@ other, with no reflection and no `MakeGenericType`.
 An abstract contract must declare at least one include — reading it could otherwise never produce an
 instance — and a payload for one that names no subtype is malformed rather than an empty base.
 
+**A subtype is written as its base writes it**, whichever type you name at the call site.
+`ProtoSerialize<Melee>(melee)` and `ProtoSerialize<Weapon>(melee)` produce the same bytes: the
+include holding `Melee`'s members, then `Weapon`'s. That is what protobuf-net does, so payloads move
+between the two serializers unchanged.
+
+The consequence is that annotating a subtype whose base is a contract, without the base declaring it,
+is a build error (`WPROTO018`) — there would be no tag to write it under.
+
 #### Surrogates
 
 Unity's `Vector3`, `Color` and `Bounds` cannot carry `[WProtoContract]` — they are not yours to
@@ -1156,6 +1175,42 @@ Two consequences worth knowing:
 - **Immutable members and `[WProtoInclude]` cannot be combined** (`WPROTO015`). One needs the instance
   built once the last member is read; the other replaces the instance when an include tag arrives.
   The generator refuses rather than picking.
+
+#### Reading without running your constructor
+
+Some types cannot be read into a freshly constructed instance, because the constructor does work the
+payload is meant to replace. A pseudo-random generator is the canonical case: its constructor seeds a
+live generator, and the hook that rebuilds one from a saved seed sensibly does nothing when a
+generator already exists — so constructing first hands back a generator on a **different stream** than
+the one you saved, with nothing to report it.
+
+`SkipConstructor` says not to:
+
+```csharp
+[WProtoContract(SkipConstructor = true)]
+public sealed partial class Generator
+{
+    [WProtoMember(1)]
+    private int _seed;
+
+    private State _state;
+
+    public Generator() => _state = State.From(Guid.NewGuid());   // never runs on read
+
+    [WProtoAfterDeserialization]
+    private void Rebuild() => _state ??= State.From(_seed);
+}
+```
+
+This mirrors protobuf-net's flag of the same name, and produces the same bytes. It differs in **how**:
+protobuf-net allocates the object uninitialized through reflection, which is exactly what does not
+survive IL2CPP, so the generator emits a private constructor into your type's `partial` declaration
+instead. The consequence is that C# field initializers and base constructors still run, where under
+protobuf-net they do not — the object is more initialized, never less.
+
+The flag is **inert on a type that declares no constructor of its own**. There is nothing to skip
+there, and emitting a constructor would delete the implicit parameterless one and stop `new Yours()`
+from compiling in your own code.
 
 ### Resolving a formatter
 

@@ -1,0 +1,85 @@
+// MIT License - Copyright (c) 2026 wallstop
+// Full license text: https://github.com/wallstop/unity-helpers/blob/main/LICENSE
+
+namespace WallstopStudios.UnityHelpers.Core.Serialization.WallstopProto
+{
+    using System;
+
+    /// <summary>
+    /// Names the contract that answers when a value is held as an interface, or as an abstract type
+    /// that carries no contract of its own.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A declared type with no members has no encoding. <c>IRandom</c> is the declared type this
+    /// package's own documentation recommends, and nothing about the interface says which contract
+    /// should read a payload written for it, so without a declaration WallstopProto has to decline
+    /// and every such call travels the protobuf-net path -- the one that cannot run under IL2CPP.
+    /// This is the missing sentence: for <c>IRandom</c>, the answer is <c>AbstractRandom</c>.
+    /// </para>
+    /// <para>
+    /// <b>It is not a guess and not a new encoding.</b> The bytes are the root contract's, which is
+    /// exactly what <c>Serializer.ProtoDeserialize&lt;IRandom&gt;</c> already produces:
+    /// <c>ResolveProtobufRootType</c> scans the interface's declaring assembly for a unique abstract
+    /// <c>[ProtoContract]</c> base and hands protobuf-net that type. Declaring the pair states the
+    /// same answer ahead of time, so the reflection scan is not needed to find it.
+    /// </para>
+    /// <para>
+    /// <b>It applies at the root only</b>, like <see cref="WProtoRootMarshalAttribute"/> though for
+    /// a different reason. A marshal hides from the member path because its types have two
+    /// encodings chosen by position; a declared root hides because a member has no encoding for it
+    /// at all -- an interface-typed <c>[WProtoMember]</c> is <c>WPROTO003</c>, and the only member
+    /// positions that could reach the adapter are a generic contract's type argument and a
+    /// marshalled collection's element, where writing the root contract's message would be a shape
+    /// protobuf-net has no counterpart for. Registered in
+    /// <see cref="WProtoDeclaredRootProvider"/>, which <see cref="WProtoGeneric{T}"/> cannot see.
+    /// </para>
+    /// <para>
+    /// <b>A consumer's explicit registration still wins.</b>
+    /// <c>Serializer.RegisterProtobufRoot(declared, root)</c> names a different root for the same
+    /// declared type, and it is a runtime call about this program rather than a declaration shipped
+    /// in a package, so it takes precedence whichever runs first --
+    /// <see cref="WProtoDeclaredRootProvider"/> keeps the two apart rather than letting registration
+    /// order decide. The adapter then declines and protobuf-net serves the call exactly as it does
+    /// today.
+    /// </para>
+    /// <para>
+    /// <b>A second declaration is not a way to override the first.</b> Only the declaring assembly's
+    /// own attributes are read, so a consumer's pair for a type this package also declares is a
+    /// second registration rather than a replacement -- and both registrars run in the same
+    /// unordered Unity phase, exactly as <see cref="WProtoRootMarshalProvider"/> describes. Which
+    /// one wins is the assembly load order. Use <c>Serializer.RegisterProtobufRoot</c> to override
+    /// one, or register from a later phase of your own.
+    /// </para>
+    /// <example>
+    /// <code>
+    /// [assembly: WProtoDeclaredRoot(typeof(IRandom), typeof(AbstractRandom))]
+    /// </code>
+    /// </example>
+    /// </remarks>
+    [AttributeUsage(AttributeTargets.Assembly, AllowMultiple = true, Inherited = false)]
+    public sealed class WProtoDeclaredRootAttribute : Attribute
+    {
+        /// <summary>
+        /// Initializes a new instance of the <see cref="WProtoDeclaredRootAttribute"/> class.
+        /// </summary>
+        /// <param name="declaredType">
+        /// The type a value is held as -- an interface, or an abstract type with no contract.
+        /// </param>
+        /// <param name="rootType">
+        /// The <c>[WProtoContract]</c> whose formatter serves it. Must be assignable to
+        /// <paramref name="declaredType"/>.
+        /// </param>
+        public WProtoDeclaredRootAttribute(Type declaredType, Type rootType)
+        {
+            DeclaredType = declaredType;
+            RootType = rootType;
+        }
+
+        /// <summary>The type a value is held as.</summary>
+        public Type DeclaredType { get; }
+
+        /// <summary>The contract whose formatter serves it.</summary>
+        public Type RootType { get; }
+    }
+}

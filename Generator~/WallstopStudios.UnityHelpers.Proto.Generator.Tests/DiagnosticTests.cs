@@ -627,6 +627,275 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
             );
         }
 
+        /// <summary>
+        /// Every shape of <c>[assembly: WProtoDeclaredRoot]</c> that cannot be registered.
+        /// </summary>
+        /// <remarks>
+        /// The generated registration is <c>WProtoDeclaredRootProvider.Register&lt;D, R&gt;()</c>,
+        /// whose constraints are <c>D : class</c> and <c>R : D</c>. Each case below would otherwise
+        /// be a compiler error inside generated code that names neither the attribute nor the file
+        /// it is written in -- or, for the two that do compile, a silent wire change.
+        /// </remarks>
+        [TestCaseSource(nameof(BadDeclaredRoots))]
+        public void AnUnusableDeclaredRootIsAnError(string id, string mustName, string source)
+        {
+            AssertDiagnostic(id, mustName, source);
+        }
+
+        [Test]
+        public void AWellFormedDeclaredRootReportsNothingAndCompiles()
+        {
+            // The generator reporting no diagnostic is not the same as the registration compiling:
+            // the constraints are checked where the call is emitted, not where the attribute is.
+            const string source =
+                @"[assembly: WProtoDeclaredRoot(typeof(Consumer.IThing), typeof(Consumer.Thing))]
+                  public interface IThing { }
+                  [WProtoContract] public partial class Thing : IThing { [WProtoMember(1)] public int A; }";
+
+            Assert.IsEmpty(
+                Run(source)
+                    .Where(d => d.Id.StartsWith("WPROTO0", StringComparison.Ordinal))
+                    .Select(d => d.Id + " " + d.GetMessage())
+            );
+            Assert.IsEmpty(CompileGenerated(source).Select(d => d.Id + " " + d.GetMessage()));
+        }
+
+        /// <summary>
+        /// A closure the registrar cannot name is skipped, and now says so.
+        /// </summary>
+        /// <remarks>
+        /// Skipping is right -- naming a private nested type from the registrar is <c>CS0122</c> in
+        /// the build of the assembly that declared it, which is worse than a missing registration.
+        /// But until now it was invisible: the type simply threw on its first serialization, in a
+        /// shipped player, naming nothing that would lead back here.
+        /// </remarks>
+        [Test]
+        public void AClosureTheRegistrarCannotNameIsAnnounced()
+        {
+            const string source =
+                @"[WProtoContract] public partial class Box<T> { [WProtoMember(1)] public T Value; }
+                  public sealed class Holder
+                  {
+                      private sealed class Hidden { }
+                      private Box<Hidden> _box = new Box<Hidden>();
+                  }";
+
+            ImmutableArray<Diagnostic> diagnostics = Run(source);
+            Diagnostic match = diagnostics.FirstOrDefault(d => d.Id == "WPROTO028");
+
+            Assert.IsNotNull(
+                match,
+                "saw: " + string.Join("; ", diagnostics.Select(d => d.Id + " " + d.GetMessage()))
+            );
+            Assert.AreEqual(DiagnosticSeverity.Warning, match.Severity);
+            Assert.IsTrue(
+                match.GetMessage().Contains("Hidden"),
+                "the message must name the part that cannot be written: " + match.GetMessage()
+            );
+            Assert.IsEmpty(
+                CompileGenerated(source).Select(d => d.Id + " " + d.GetMessage()),
+                "the point of skipping is that the consumer's build still succeeds"
+            );
+        }
+
+        /// <summary>
+        /// A generic contract's own declaration is unnameable too, and must stay silent.
+        /// </summary>
+        /// <remarks>
+        /// <c>Box&lt;T&gt;</c> has no name a registrar can write either, for the same reason a
+        /// private type does not. Warning about it would fire on every generic contract in the
+        /// source that declares it, which is noise nobody can act on.
+        /// </remarks>
+        [Test]
+        public void AnOpenConstructionIsNotAnnounced()
+        {
+            Assert.IsEmpty(
+                Run(
+                        @"[WProtoContract] public partial class Box<T> { [WProtoMember(1)] public T Value; }
+                          public sealed class Holder<T> { private Box<T> _box; }"
+                    )
+                    .Where(d => d.Id == "WPROTO028")
+                    .Select(d => d.GetMessage())
+            );
+        }
+
+        /// <summary>
+        /// A marshalled collection closed over an unnameable type is announced too.
+        /// </summary>
+        /// <remarks>
+        /// It was not, and the reason is worth pinning: the marshal's formatter is closed over the
+        /// SAME arguments as the collection, so whenever an argument is what makes the closure
+        /// unnameable -- the only shape this happens in -- the formatter is unnameable too, and
+        /// asking about it first short-circuited the report away. Seven live cases in this
+        /// repository's own tests were skipped in silence until the two were swapped.
+        /// </remarks>
+        [Test]
+        public void AMarshalledClosureTheRegistrarCannotNameIsAnnounced()
+        {
+            ImmutableArray<Diagnostic> diagnostics = Run(
+                @"[assembly: WProtoRootMarshal(typeof(Consumer.Ring<>), typeof(Consumer.RingFormatter<>))]
+                  public sealed class Ring<T> { }
+                  public sealed class RingFormatter<T> : IWProtoFormatter<Consumer.Ring<T>>
+                  {
+                      public int Measure(in Consumer.Ring<T> value) => 0;
+                      public bool Write(ref WProtoWriter writer, in Consumer.Ring<T> value) => true;
+                      public bool TryRead(ref WProtoReader reader, out Consumer.Ring<T> value) { value = null; return true; }
+                  }
+                  public sealed class Holder
+                  {
+                      private sealed class Hidden { }
+                      private Ring<Hidden> _ring = new Ring<Hidden>();
+                  }"
+            );
+
+            Diagnostic match = diagnostics.FirstOrDefault(d => d.Id == "WPROTO028");
+            Assert.IsNotNull(
+                match,
+                "saw: " + string.Join("; ", diagnostics.Select(d => d.Id + " " + d.GetMessage()))
+            );
+            Assert.IsTrue(match.GetMessage().Contains("Hidden"), match.GetMessage());
+        }
+
+        /// <summary>
+        /// Shapes that are unnameable to the compiler's eye but perfectly writable, or the reverse.
+        /// </summary>
+        /// <remarks>
+        /// <c>dynamic</c> is a keyword rather than a declaration, so <c>Box&lt;dynamic&gt;</c> has a
+        /// name and warning about it offered advice ("make 'dynamic' public") nobody can take. A
+        /// <c>file</c> type is the opposite: it reports <c>Internal</c> and satisfies
+        /// <c>IsSymbolAccessibleWithin</c>, so the registrar emitted its name and the consumer's
+        /// build failed <c>CS0234</c> — the failure the skip exists to prevent, one file over.
+        /// </remarks>
+        [Test]
+        public void DynamicIsNameableAndAFileLocalTypeIsNot()
+        {
+            Assert.IsEmpty(
+                Run(
+                        @"[WProtoContract] public partial class Box<T> { [WProtoMember(1)] public T Value; }
+                          public sealed class Holder { private Box<dynamic> _box = new Box<dynamic>(); }"
+                    )
+                    .Where(d => d.Id == "WPROTO028")
+                    .Select(d => d.GetMessage())
+            );
+
+            const string fileLocal =
+                @"[WProtoContract] public partial class Box<T> { [WProtoMember(1)] public T Value; }
+                  file sealed class Hid { }
+                  file sealed class FileHolder { private Box<Hid> _box = new Box<Hid>(); }";
+
+            Assert.IsNotEmpty(
+                Run(fileLocal).Where(d => d.Id == "WPROTO028").Select(d => d.GetMessage()),
+                "a file-local type cannot be named from the registrar"
+            );
+            Assert.IsEmpty(
+                CompileGenerated(fileLocal).Select(d => d.Id + " " + d.GetMessage()),
+                "and skipping it is what keeps the consumer's build compiling"
+            );
+        }
+
+        /// <summary>
+        /// A CLOSED generic pair is the shape WPROTO026's own message tells consumers to write.
+        /// </summary>
+        /// <remarks>
+        /// The check was `0 &lt; Arity`, and arity is the number of type parameters -- one for
+        /// `IThing&lt;int&gt;` just as much as for `IThing&lt;&gt;`. So the diagnostic rejected the
+        /// only form it offers as the remedy.
+        /// </remarks>
+        [Test]
+        public void AClosedGenericDeclaredRootIsAccepted()
+        {
+            const string source =
+                @"[assembly: WProtoDeclaredRoot(typeof(Consumer.IThing<int>), typeof(Consumer.Thing<int>))]
+                  public interface IThing<T> { }
+                  [WProtoContract] public partial class Thing<T> : IThing<T> { [WProtoMember(1)] public int A; }";
+
+            Assert.IsEmpty(
+                Run(source)
+                    .Where(d => d.Id.StartsWith("WPROTO0", StringComparison.Ordinal))
+                    .Select(d => d.Id + " " + d.GetMessage())
+            );
+            Assert.IsEmpty(CompileGenerated(source).Select(d => d.Id + " " + d.GetMessage()));
+        }
+
+        [Test]
+        public void ADeclaredRootWithNoTypesAtAllIsReported()
+        {
+            // `typeof()` cannot be written, but `null` can, and the pair reader used to drop it --
+            // an attribute that neither registered anything nor said why.
+            AssertDiagnostic(
+                "WPROTO023",
+                "<missing>",
+                "[assembly: WProtoDeclaredRoot(null, null)]\npublic interface IThing { }"
+            );
+        }
+
+        private static IEnumerable<TestCaseData> BadDeclaredRoots()
+        {
+            yield return new TestCaseData(
+                "WPROTO023",
+                "Consumer.Stray",
+                @"[assembly: WProtoDeclaredRoot(typeof(Consumer.IThing), typeof(Consumer.Stray))]
+                  public interface IThing { }
+                  [WProtoContract] public partial class Stray { [WProtoMember(1)] public int A; }"
+            ).SetName("ARootThatIsNotAssignableToItsDeclaredTypeIsAnError");
+
+            yield return new TestCaseData(
+                "WPROTO029",
+                "int",
+                @"[assembly: WProtoDeclaredRoot(typeof(int), typeof(Consumer.Thing))]
+                  [WProtoContract] public partial class Thing { [WProtoMember(1)] public int A; }"
+            ).SetName("AValueTypeAsTheDeclaredTypeIsAnError");
+
+            yield return new TestCaseData(
+                "WPROTO024",
+                "Consumer.Thing",
+                @"[assembly: WProtoDeclaredRoot(typeof(Consumer.Thing), typeof(Consumer.Thing))]
+                  [WProtoContract] public partial class Thing { [WProtoMember(1)] public int A; }"
+            ).SetName("ARootThatIsItsOwnDeclaredTypeIsAnError");
+
+            yield return new TestCaseData(
+                "WPROTO025",
+                "Consumer.Base",
+                @"[assembly: WProtoDeclaredRoot(typeof(Consumer.Base), typeof(Consumer.Sub))]
+                  [WProtoContract] [WProtoInclude(100, typeof(Consumer.Sub))] public partial class Base { [WProtoMember(1)] public int A; }
+                  [WProtoContract] public partial class Sub : Base { [WProtoMember(1)] public int B; }"
+            ).SetName("ADeclaredTypeThatIsItselfAContractIsAnError");
+
+            yield return new TestCaseData(
+                "WPROTO026",
+                "Consumer.IThing",
+                @"[assembly: WProtoDeclaredRoot(typeof(Consumer.IThing<>), typeof(Consumer.Thing<>))]
+                  public interface IThing<T> { }
+                  [WProtoContract] public partial class Thing<T> : IThing<T> { [WProtoMember(1)] public int A; }"
+            ).SetName("AGenericDeclaredRootIsAnError");
+
+            yield return new TestCaseData(
+                "WPROTO029",
+                "Consumer.Plain",
+                @"[assembly: WProtoDeclaredRoot(typeof(Consumer.Plain), typeof(Consumer.Sub))]
+                  public class Plain { }
+                  [WProtoContract] public partial class Sub : Plain { [WProtoMember(1)] public int A; }"
+            ).SetName("ADeclaredTypeAValueCanBeIsAnError");
+
+            yield return new TestCaseData(
+                "WPROTO029",
+                "Consumer.IThing[]",
+                @"[assembly: WProtoDeclaredRoot(typeof(Consumer.IThing[]), typeof(Consumer.Thing[]))]
+                  public interface IThing { }
+                  [WProtoContract] public partial class Thing : IThing { [WProtoMember(1)] public int A; }"
+            ).SetName("AnArrayAsTheDeclaredTypeIsAnError");
+
+            yield return new TestCaseData(
+                "WPROTO027",
+                "Consumer.IThing",
+                @"[assembly: WProtoDeclaredRoot(typeof(Consumer.IThing), typeof(Consumer.First))]
+                  [assembly: WProtoDeclaredRoot(typeof(Consumer.IThing), typeof(Consumer.Second))]
+                  public interface IThing { }
+                  [WProtoContract] public partial class First : IThing { [WProtoMember(1)] public int A; }
+                  [WProtoContract] public partial class Second : IThing { [WProtoMember(1)] public int B; }"
+            ).SetName("TwoRootsForOneDeclaredTypeIsAnError");
+        }
+
         private static void AssertDiagnostic(string id, string mustName, string source)
         {
             ImmutableArray<Diagnostic> diagnostics = Run(source);

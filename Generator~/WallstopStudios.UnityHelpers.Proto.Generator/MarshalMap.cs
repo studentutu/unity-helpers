@@ -194,7 +194,11 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
         /// generic contracts use, and the property that makes a consumer's own closure work at all.
         /// </para>
         /// </remarks>
-        internal IEnumerable<string> Registrations(Compilation compilation)
+        internal IEnumerable<string> Registrations(
+            Compilation compilation,
+            Action<Diagnostic> report,
+            HashSet<string> announced
+        )
         {
             HashSet<string> found = new HashSet<string>();
             List<string> registrations = new List<string>();
@@ -242,11 +246,26 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                     }
 
                     INamedTypeSymbol formatter = Close(definition, closure.TypeArguments);
+                    if (formatter == null || !Satisfies(definition, closure.TypeArguments))
+                    {
+                        continue;
+                    }
+
+                    // The closure is what a developer wrote and can act on; the formatter is named
+                    // by an attribute they may not own, so an unnameable one is skipped quietly.
+                    // The closure is asked FIRST. The formatter is closed over the same arguments,
+                    // so whenever an argument is what makes the closure unnameable -- the only shape
+                    // that happens in practice -- the formatter is unnameable too, and asking it
+                    // first short-circuited the report away. Measured: StandInRing<Hidden> was
+                    // skipped in silence with the two swapped.
                     if (
-                        formatter == null
-                        || !Satisfies(definition, closure.TypeArguments)
-                        || !TypeNaming.IsNameable(formatter, compilation)
-                        || !TypeNaming.IsNameable(closure, compilation)
+                        TypeNaming.ReportIfUnnameable(
+                            closure,
+                            compilation,
+                            type.GetLocation(),
+                            report,
+                            announced
+                        ) || !TypeNaming.IsNameable(formatter, compilation)
                     )
                     {
                         continue;

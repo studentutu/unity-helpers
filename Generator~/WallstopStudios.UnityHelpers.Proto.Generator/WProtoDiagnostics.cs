@@ -217,6 +217,85 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             isEnabledByDefault: true
         );
 
+        internal static readonly DiagnosticDescriptor DeclaredRootNotAssignable =
+            new DiagnosticDescriptor(
+                "WPROTO023",
+                "WallstopProto declared root is not assignable to its declared type",
+                "[assembly: WProtoDeclaredRoot(typeof({0}), typeof({1}))] names '{1}' as the contract serving '{0}', but a '{1}' cannot be held as a '{0}'. The registration is emitted as WProtoDeclaredRootProvider.Register<{0}, {1}>(), whose constraint is 'TRoot : TDeclared', so a root that does not derive from its declared type is a compiler error inside generated code that never names this attribute.",
+                "WallstopProto",
+                DiagnosticSeverity.Error,
+                isEnabledByDefault: true
+            );
+
+        internal static readonly DiagnosticDescriptor SelfDeclaredRoot = new DiagnosticDescriptor(
+            "WPROTO024",
+            "WallstopProto declared root is its own root",
+            "[assembly: WProtoDeclaredRoot(typeof({0}), typeof({0}))] names '{0}' as the contract serving itself. The adapter registered for a declared type resolves its root through the same provider, so it would find itself and recurse. A type that has its own formatter needs no declared root; remove the attribute.",
+            "WallstopProto",
+            DiagnosticSeverity.Error,
+            isEnabledByDefault: true
+        );
+
+        internal static readonly DiagnosticDescriptor DeclaredRootOnContract =
+            new DiagnosticDescriptor(
+                "WPROTO025",
+                "WallstopProto declared root names a contract as the declared type",
+                "[assembly: WProtoDeclaredRoot(typeof({0}), typeof({1}))] names '{0}', which is also a [WProtoContract]. Registering the adapter would replace '{0}'s own generated formatter, so every value written as a '{0}' would silently become '{1}'s message instead. A declared root is for a type that has no encoding of its own -- an interface, or an abstract type carrying no contract. Use [WProtoInclude] on '{0}' if '{1}' is meant to be a subtype of it.",
+                "WallstopProto",
+                DiagnosticSeverity.Error,
+                isEnabledByDefault: true
+            );
+
+        internal static readonly DiagnosticDescriptor GenericDeclaredRoot =
+            new DiagnosticDescriptor(
+                "WPROTO026",
+                "WallstopProto declared root names a generic type",
+                "[assembly: WProtoDeclaredRoot(typeof({0}), typeof({1}))] names a generic type. Unlike a root marshal, a declared root is registered exactly once for the pair it names and is never closed over a construction found in source, so an open generic has nothing to register. Declare one pair per closed construction you need.",
+                "WallstopProto",
+                DiagnosticSeverity.Error,
+                isEnabledByDefault: true
+            );
+
+        internal static readonly DiagnosticDescriptor DuplicateDeclaredRoot =
+            new DiagnosticDescriptor(
+                "WPROTO027",
+                "WallstopProto declared root is declared twice",
+                "[assembly: WProtoDeclaredRoot(typeof({0}), typeof({1}))] is the second root this assembly declares for '{0}'. A declared type has exactly one root -- a payload does not name the contract that wrote it, so a reader that had two answers would have to guess -- and only the first is registered. Delete one.",
+                "WallstopProto",
+                DiagnosticSeverity.Error,
+                isEnabledByDefault: true
+            );
+
+        /// <summary>
+        /// The one warning here, and the only diagnostic that reports a SKIP rather than a refusal.
+        /// </summary>
+        /// <remarks>
+        /// Skipping is the right behaviour: naming a consumer's private nested type from the
+        /// registrar is <c>CS0122</c> in their own build, which is worse than the missing
+        /// registration. But the skip is otherwise invisible until the type is serialized in a
+        /// shipped player, so it is announced. A warning rather than an error because the developer
+        /// may never serialize that closure, and failing their build over a type they declared
+        /// privately would be the very outcome the skip exists to avoid.
+        /// </remarks>
+        internal static readonly DiagnosticDescriptor UnnameableClosure = new DiagnosticDescriptor(
+            "WPROTO028",
+            "WallstopProto cannot register a closed construction it cannot name",
+            "'{0}' is a closed construction WallstopProto would register a formatter for, but the generated registrar cannot write its name: '{1}' cannot be named from the generated registrar, which is a type of its own. It is skipped, so serializing one throws at run time rather than failing this build. Widen '{1}' to internal or public -- or, if it is `file`-local or otherwise unnameable, register the formatter yourself from code that can name it.",
+            "WallstopProto",
+            DiagnosticSeverity.Warning,
+            isEnabledByDefault: true
+        );
+
+        internal static readonly DiagnosticDescriptor DeclaredRootOnInstantiableType =
+            new DiagnosticDescriptor(
+                "WPROTO029",
+                "WallstopProto declared root names a type that can be instantiated",
+                "[assembly: WProtoDeclaredRoot(typeof({0}), typeof({1}))] names '{0}', which is neither an interface nor abstract. A declared root exists for a type that has no encoding of its own; a '{0}' that is actually a '{0}' would be served by the adapter, fail to narrow to '{1}', and encode to nothing -- measured as a populated value writing zero bytes and reading back as '{1}'. Make '{0}' abstract, or give it its own [WProtoContract] -- and if it is a value type or an array, which can be neither, remove the attribute.",
+                "WallstopProto",
+                DiagnosticSeverity.Error,
+                isEnabledByDefault: true
+            );
+
         internal static readonly DiagnosticDescriptor HookSignature = new DiagnosticDescriptor(
             "WPROTO008",
             "WallstopProto lifecycle hook has the wrong signature",

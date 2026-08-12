@@ -943,6 +943,13 @@ quietly got no formatter would surface as an exception from the first save in a 
 
 A generic contract is still out of scope and reports `WPROTO009` rather than guessing.
 
+There is one **warning**, and it reports a skip rather than a refusal. `WPROTO028` fires when a
+closed construction found in your source cannot be named by the generated registrar — most often a
+generic contract or a marshalled collection closed over a `private` nested type. Naming one from the
+registrar would be `CS0122` in your own build, so it is skipped instead; the warning is there because
+the skip is otherwise invisible until that type is serialized in a shipped player. Widen the offending
+type to `internal`, or register the formatter yourself from code that can name it.
+
 #### Contracts that hold other contracts
 
 A `[WProtoMember]` whose type is another contract is written as a nested message, and a contract may
@@ -1272,11 +1279,9 @@ Three rules decide the rest:
   declined rather than failed, and protobuf-net's runtime model answers it.
 - **`forceRuntimeType` does not turn the swap off.** A generated formatter already dispatches on the
   runtime type, which is what that flag asks for.
-- **An `interface`-typed declared type is not served.** There is no formatter for an interface, and
-  nothing says which contract should answer for it. Declare the field as the abstract base — the
-  advice [Protobuf Polymorphism](#protobuf-polymorphism-inheritance--interfaces) already gives — or
-  register a root with `Serializer.RegisterProtobufRoot<TInterface, TConcrete>()` and take
-  protobuf-net's path.
+- **An `interface`-typed declared type is served only when a root is declared for it.** An interface
+  has no members, so nothing about it says which contract should answer. Say so once with
+  [a declared root](#declared-roots-serving-an-interface); `IRandom` already has one.
 
 Two consequences on the read side are worth knowing:
 
@@ -1326,6 +1331,65 @@ Nothing about your own contracts changes. A member typed as one of these collect
 exactly as it was before — a map for the dictionaries, a repeated field for the sets — and the three
 that implement neither `ICollection<T>` nor `IDictionary<,>` are still refused as members, with the
 same `WPROTO003` they always produced.
+
+### Declared roots: serving an interface
+
+A generator is almost never held as its concrete type. `IRandom` is the declared type this package's
+own documentation recommends, and an interface has no members to encode — so nothing about it says
+which contract should read a payload written for it. A **declared root** is that missing sentence,
+written once at assembly level:
+
+```csharp
+[assembly: WProtoDeclaredRoot(typeof(IRandom), typeof(AbstractRandom))]
+```
+
+That pair ships, so `IRandom` needs nothing from you:
+
+```csharp
+IRandom rng = new PcgRandom(seed);
+
+// Served through AbstractRandom's include chain -- byte-for-byte what protobuf-net writes, because
+// its own root resolution already picks AbstractRandom for IRandom.
+byte[] bytes = Serializer.ProtoSerialize(rng);
+IRandom restored = Serializer.ProtoDeserialize<IRandom>(bytes); // comes back a PcgRandom
+```
+
+Declare your own the same way, naming any interface — or any abstract type that carries no
+`[WProtoContract]` — and the `[WProtoContract]` that serves it. The generator emits the registration
+into the declaring assembly and reports the pairs that cannot work: a root that is not assignable to
+the declared type (`WPROTO023`), a type named as its own root (`WPROTO024`), a declared type that is
+already a contract (`WPROTO025`), an open generic (`WPROTO026`), two roots for one declared type
+(`WPROTO027`), and a declared type that is neither an interface nor abstract (`WPROTO029`).
+
+Like a root marshal, a declared root applies **at the root only** — though for a different reason. A
+marshal hides from the member path because its types have two encodings chosen by position; a
+declared root hides because a member has no encoding for it at all. An interface-typed
+`[WProtoMember]` is a `WPROTO003` build error, and the only member positions that could reach the
+adapter are a generic contract's type argument and a marshalled collection's element
+(`Deque<IRandom>`), where writing the root contract's message would be a shape protobuf-net has no
+counterpart for. Those decline and fall back exactly as they did before the pair existed.
+
+**Declaring a root asserts that this contract owns the declared type**, exactly as
+`Serializer.RegisterProtobufRoot` does — and with the same consequence, because a payload does not
+name the contract that wrote it. What the two serializers do about that is identical, and worth
+stating precisely:
+
+- **Writing** a value whose runtime type is outside the root's chain is declined, and protobuf-net
+  writes it as its own type — the behaviour that shipped. Your own `IRandom` implementation keeps
+  working.
+- **Reading** into the declared type has no such information, so those bytes come back as the root.
+  With `AbstractRandom` that fails loudly, because an abstract root's payload must carry an include
+  tag; with a **concrete** root it is a plausible wrong object. That is what naming a root means, not
+  a WallstopProto behaviour: `RegisterProtobufRoot<IEvent, PlayerJoined>()` decodes any `IEvent`
+  payload as a `PlayerJoined` too. Name the concrete type explicitly —
+  `ProtoDeserialize<IThing>(bytes, typeof(TheirThing))` — when more than one implementation writes.
+
+Your own root still wins over a declaration. `Serializer.RegisterProtobufRoot<IRandom, YourRandom>()`
+says this program has a different answer, and WallstopProto stops answering for that declared type on
+both sides, whichever registration ran first; releasing it restores the declared pair. Declaring a
+**second** `[assembly: WProtoDeclaredRoot]` for a type another package already declares is not the
+way to override one: both registrars run in the same unordered Unity phase, so which wins is the load
+order. Use `RegisterProtobufRoot`, or register from a later phase of your own.
 
 ### Hostile payloads
 

@@ -71,10 +71,7 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.WallstopProto
         /// </remarks>
         public static WProtoWriteResult Serialize<T>(T value, ref byte[] buffer)
         {
-            if (
-                !WProtoFormatterProvider.TryGet(out IWProtoFormatter<T> formatter)
-                || !CanServe(value, formatter)
-            )
+            if (!TryResolve(value, out IWProtoFormatter<T> formatter))
             {
                 return new WProtoWriteResult(null, false);
             }
@@ -176,10 +173,7 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.WallstopProto
         /// </remarks>
         public static bool TryDeserializeAs<T>(ReadOnlySpan<byte> data, Type concrete, out T value)
         {
-            if (
-                !WProtoFormatterProvider.TryGet(out IWProtoFormatter<T> formatter)
-                || !CanRead(formatter, concrete)
-            )
+            if (!TryResolveForRead(concrete, out IWProtoFormatter<T> formatter))
             {
                 value = default;
                 return false;
@@ -201,6 +195,93 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.WallstopProto
                     + "the payload is truncated, malformed, or was written by a different contract. "
                     + "This type has a generated formatter, so it is not retried with protobuf-net."
             );
+        }
+
+        /// <summary>
+        /// Finds the formatter that writes <typeparamref name="T"/>, contract or root marshal.
+        /// </summary>
+        /// <typeparam name="T">The declared type.</typeparam>
+        /// <param name="value">The value to serialize.</param>
+        /// <param name="formatter">Receives the formatter, or <c>null</c> when unserved.</param>
+        /// <returns><c>true</c> when the request is WallstopProto's to answer.</returns>
+        /// <remarks>
+        /// A root marshal is asked no subtype question, and that is not an oversight. It replaces
+        /// <c>Serializer</c>'s wrapper interception, which selects on the <b>declared</b> type alone
+        /// -- a value held as <c>SerializableDictionary&lt;K, V&gt;</c> has always been written as
+        /// that dictionary's wrapper whatever its runtime type is. Asking here would change which
+        /// bytes an existing consumer's subclass produces, which is the one thing this port must not
+        /// do.
+        /// </remarks>
+        private static bool TryResolve<T>(T value, out IWProtoFormatter<T> formatter)
+        {
+            if (WProtoFormatterProvider.TryGet(out formatter))
+            {
+                if (CanEncode(formatter) && CanServe(value, formatter))
+                {
+                    return true;
+                }
+
+                formatter = null;
+                return false;
+            }
+
+            return WProtoRootMarshalProvider.TryGet(out formatter) && CanEncode(formatter);
+        }
+
+        /// <summary>
+        /// Finds the formatter that reads <typeparamref name="T"/>, contract or root marshal.
+        /// </summary>
+        /// <typeparam name="T">The declared type.</typeparam>
+        /// <param name="concrete">The type the caller named, or <c>null</c> for none.</param>
+        /// <param name="formatter">Receives the formatter, or <c>null</c> when unserved.</param>
+        /// <returns><c>true</c> when the request is WallstopProto's to answer.</returns>
+        /// <remarks>
+        /// The read mirror of <see cref="TryResolve{T}"/>, including the marshal's indifference to
+        /// the concrete type: the wrapper interception it replaces hands back the declared type on
+        /// every payload, so a caller naming a subtype gets the same value it always did.
+        /// </remarks>
+        private static bool TryResolveForRead<T>(Type concrete, out IWProtoFormatter<T> formatter)
+        {
+            if (WProtoFormatterProvider.TryGet(out formatter))
+            {
+                if (CanEncode(formatter) && CanRead(formatter, concrete))
+                {
+                    return true;
+                }
+
+                formatter = null;
+                return false;
+            }
+
+            return WProtoRootMarshalProvider.TryGet(out formatter) && CanEncode(formatter);
+        }
+
+        /// <summary>
+        /// Reports whether a formatter can encode the type it is registered for at all.
+        /// </summary>
+        /// <typeparam name="T">The declared type.</typeparam>
+        /// <param name="formatter">The formatter found for it.</param>
+        /// <returns><c>true</c> when the request is WallstopProto's to answer.</returns>
+        /// <remarks>
+        /// <para>
+        /// Two kinds of formatter are registered for closures nobody chose one by one: a root
+        /// marshal, registered for every construction of its collection found in source, and a
+        /// GENERIC CONTRACT's formatter, registered for every closure of itself. Either can be handed
+        /// an element WallstopProto has no formatter for -- a type protobuf-net reaches through a
+        /// surrogate, or an enum, both substituted while a contract is generated and unknown at the
+        /// closure.
+        /// </para>
+        /// <para>
+        /// It has to be declined HERE, before a hook runs and before a byte is written: the
+        /// alternative is a throw from inside <c>Measure</c>, where the reflection path this replaces
+        /// fell through to protobuf-net and round-tripped. An empty collection hides it, because the
+        /// element loop never runs, so the first failure would land on real data.
+        /// </para>
+        /// </remarks>
+        private static bool CanEncode<T>(IWProtoFormatter<T> formatter)
+        {
+            return !(formatter is IWProtoConditionalFormatter conditional)
+                || conditional.CanServe();
         }
 
         /// <summary>

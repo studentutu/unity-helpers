@@ -68,6 +68,20 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
     }
 
     /// <summary>
+    /// A skipped-constructor contract whose repeated initializer must not become payload state.
+    /// </summary>
+    [ProtoContract(SkipConstructor = true)]
+    [WProtoContract(SkipConstructor = true)]
+    public sealed partial class SkippingCollectionContract
+    {
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public int[] Values = { 99 };
+
+        public SkippingCollectionContract() { }
+    }
+
+    /// <summary>
     /// The flag on a type that writes no constructor of its own, which must stay constructible.
     /// </summary>
     /// <remarks>

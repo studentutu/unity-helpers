@@ -35,6 +35,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
         private const string AttributeNamespace =
             "WallstopStudios.UnityHelpers.Core.Serialization.WallstopProto";
         private const string ContractAttribute = AttributeNamespace + ".WProtoContractAttribute";
+        private const string ProtobufContractAttribute = "ProtoBuf.ProtoContractAttribute";
         private const string MemberAttribute = AttributeNamespace + ".WProtoMemberAttribute";
         private const string IgnoreAttribute = AttributeNamespace + ".WProtoIgnoreAttribute";
         private const string IncludeAttribute = AttributeNamespace + ".WProtoIncludeAttribute";
@@ -86,6 +87,21 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 {
                     contracts.Add(symbol);
                     continue;
+                }
+
+                AttributeData protobufContract = FindAttribute(symbol, ProtobufContractAttribute);
+                if (protobufContract != null)
+                {
+                    Location location =
+                        protobufContract.ApplicationSyntaxReference?.GetSyntax().GetLocation()
+                        ?? symbol.Locations.FirstOrDefault();
+                    context.ReportDiagnostic(
+                        Diagnostic.Create(
+                            WProtoDiagnostics.UnportedProtobufContract,
+                            location,
+                            symbol.ToDisplayString()
+                        )
+                    );
                 }
 
                 ReportOrphanedHooks(context, symbol);
@@ -447,6 +463,11 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 && !contract.IsAbstract
                 && !constructAtEnd
                 && DeclaresAConstructor(contract);
+
+            foreach (Member member in members)
+            {
+                member.SkipConstructor = skipConstructor;
+            }
 
             // Not asked of a contract that builds itself. The diagnostic exists because the formatter
             // normally calls `new T()` to have something to read into; a contract with a member that

@@ -134,19 +134,26 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
         // Every one of these is a shape a developer would reasonably expect to work, which is why it
         // has to fail the build with a message rather than silently get no formatter.
         //
-        // LinkedList and
-        // ReadOnlyCollection implement ICollection<T> with an explicit Add, so nothing can fill
-        // them; Queue and Stack do not implement it at all. The rest are element-shape refusals: a
-        // jagged array of anything but bytes, a rank-2 array, and a nullable element (protobuf-net
-        // refuses a null element, so Nullable<T>[] is a collection that can only hold values it
-        // cannot write).
-        [TestCase("System.Collections.Generic.LinkedList<int>")]
-        [TestCase("System.Collections.ObjectModel.ReadOnlyCollection<int>")]
-        [TestCase("System.Collections.Generic.Queue<int>")]
-        [TestCase("System.Collections.Generic.Stack<int>")]
-        [TestCase("System.Collections.Generic.IList<int>")]
+        // A CONSUMER'S OWN collection interface is the one worth explaining. protobuf-net writes it
+        // and then throws InvalidCastException on read, because it fills a List<T> and hands it
+        // back for a type that is not one -- measured against 3.2.56. The generator has no
+        // implementation it could pick either, so it refuses at build time instead, which is the
+        // same answer arriving somewhere it can be acted on.
+        //
+        // The nested and jagged shapes are refusals worth stating rather than gaps. protobuf-net
+        // refuses every one of them too, at WRITE, on both 2.4.9 and 3.2.56 ("Nested or jagged
+        // lists, arrays and maps are not supported"), so there is no wire form to be compatible
+        // with -- measured, not assumed. `byte[][]` is the exception and is accepted above, because
+        // a byte[] is one length-delimited value rather than a repeated field.
+        //
+        // The last two are element-shape refusals: a nullable element (protobuf-net refuses a null
+        // element, so Nullable<T>[] is a collection that can only hold values it cannot write), and
+        // a BCL type with no mapping.
+        [TestCase("Consumer.IOwnList<int>")]
         [TestCase("System.Collections.Generic.List<System.Collections.Generic.List<int>>")]
+        [TestCase("System.Collections.Generic.List<int[]>")]
         [TestCase("int[][]")]
+        [TestCase("int[][][]")]
         [TestCase("int[,]")]
         [TestCase("int?[]")]
         [TestCase("System.DateTime")]
@@ -155,7 +162,9 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
             AssertDiagnostic(
                 "WPROTO003",
                 "Values",
-                @"[WProtoContract] public sealed partial class Unsupported
+                @"public interface IOwnList<T> : System.Collections.Generic.IList<T> { }
+
+                  [WProtoContract] public sealed partial class Unsupported
                   {
                       [WProtoMember(1)] public "
                     + declaredType
@@ -185,6 +194,41 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
                       [WProtoMember(9)] public System.Collections.Generic.SortedDictionary<string, int> SortedMap;
                   }"
             );
+        }
+
+        [Test]
+        public void EveryStdlibCollectionShapeIsAcceptedAndCompiles()
+        {
+            // The shapes #395 was filed about. Four of them cannot be filled through
+            // ICollection<T>.Add at all -- LinkedList and ReadOnlyCollection implement it
+            // explicitly, Queue and Stack do not implement it -- and the interfaces have nothing to
+            // construct, so each needed a per-type answer rather than the generic one.
+            //
+            // Compiled rather than only scanned for diagnostics: an emitter that names the wrong
+            // fill method (`pending.Enqueue` on a List<T>, `new ReadOnlyCollection<T>()`) reports
+            // nothing and breaks the consumer's build.
+            const string source =
+                @"[WProtoContract] public sealed partial class Stdlib
+                  {
+                      [WProtoMember(1)] public System.Collections.Generic.LinkedList<int> Linked;
+                      [WProtoMember(2)] public System.Collections.Generic.Queue<int> Queued;
+                      [WProtoMember(3)] public System.Collections.Generic.Stack<int> Stacked;
+                      [WProtoMember(4)] public System.Collections.ObjectModel.ReadOnlyCollection<int> Frozen;
+                      [WProtoMember(5)] public System.Collections.Generic.IList<int> Listed;
+                      [WProtoMember(6)] public System.Collections.Generic.ICollection<string> Collected;
+                      [WProtoMember(7)] public System.Collections.Generic.IEnumerable<int> Enumerated;
+                      [WProtoMember(8)] public System.Collections.Generic.IReadOnlyList<int> ReadOnlyListed;
+                      [WProtoMember(9)] public System.Collections.Generic.IReadOnlyCollection<int> ReadOnlyCollected;
+                      [WProtoMember(10)] public System.Collections.Generic.ISet<int> SetOf;
+                      [WProtoMember(11)] public System.Collections.Generic.IDictionary<string, int> Mapped;
+                      [WProtoMember(12)] public System.Collections.Generic.IReadOnlyDictionary<string, int> ReadOnlyMapped;
+                      [WProtoMember(13)] public System.Collections.ObjectModel.ReadOnlyDictionary<string, int> FrozenMap;
+                      [WProtoMember(14, OverwriteList = true)] public System.Collections.Generic.Stack<int> ReplacedStack;
+                      [WProtoMember(15)] public System.Collections.Generic.IReadOnlySet<int> ReadOnlySetOf;
+                  }";
+
+            AssertNoDiagnostics(source);
+            Assert.IsEmpty(CompileGenerated(source).Select(d => d.Id + " " + d.GetMessage()));
         }
 
         [Test]
@@ -312,7 +356,11 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
             // inline or pooled buffer is a natural struct. A generator that emits `member != null`
             // for every collection does not merely produce redundant code for one -- it produces
             // code that does not compile.
-            AssertNoDiagnostics(
+            //
+            // Which is why the generated code is COMPILED here rather than only scanned for
+            // WPROTO diagnostics: `member != null` on a struct is CS0019, a compiler error inside
+            // emitted source, and the generator reports nothing at all about it.
+            const string source =
                 @"public struct Bag : System.Collections.Generic.ICollection<int>
                   {
                       private System.Collections.Generic.List<int> _items;
@@ -340,8 +388,64 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
                   [WProtoContract] public sealed partial class Holder
                   {
                       [WProtoMember(1)] public Bag Values;
-                  }"
-            );
+                  }";
+
+            AssertNoDiagnostics(source);
+            Assert.IsEmpty(CompileGenerated(source).Select(d => d.Id + " " + d.GetMessage()));
+        }
+
+        [Test]
+        public void AMapImplementedAsAStructIsAcceptedLikeAnyOther()
+        {
+            // The other half of the same assumption (#388). The map path accepts a struct
+            // dictionary -- a value type has a parameterless constructor by definition, so
+            // `MapMember.TryCreate` says yes -- and then emitted `value.Members != null` and
+            // `read.Members ?? new Members()` for it. Both are CS0019 on a struct, so a consumer
+            // whose dictionary is an inline buffer got a compiler error inside generated source
+            // they never wrote, naming an operator rather than a serializer.
+            const string source =
+                @"public struct Pairs : System.Collections.Generic.IDictionary<int, int>
+                  {
+                      private System.Collections.Generic.Dictionary<int, int> _items;
+                      private System.Collections.Generic.Dictionary<int, int> Items
+                      {
+                          get
+                          {
+                              if (_items == null) { _items = new System.Collections.Generic.Dictionary<int, int>(); }
+                              return _items;
+                          }
+                      }
+                      public int this[int key] { get { return Items[key]; } set { Items[key] = value; } }
+                      public System.Collections.Generic.ICollection<int> Keys { get { return Items.Keys; } }
+                      public System.Collections.Generic.ICollection<int> Values { get { return Items.Values; } }
+                      public int Count { get { return Items.Count; } }
+                      public bool IsReadOnly { get { return false; } }
+                      public void Add(int key, int value) { Items.Add(key, value); }
+                      public void Add(System.Collections.Generic.KeyValuePair<int, int> item) { Items.Add(item.Key, item.Value); }
+                      public void Clear() { _items = null; }
+                      public bool Contains(System.Collections.Generic.KeyValuePair<int, int> item) { return Items.ContainsKey(item.Key); }
+                      public bool ContainsKey(int key) { return Items.ContainsKey(key); }
+                      public void CopyTo(System.Collections.Generic.KeyValuePair<int, int>[] array, int index) { }
+                      public bool Remove(int key) { return Items.Remove(key); }
+                      public bool Remove(System.Collections.Generic.KeyValuePair<int, int> item) { return Items.Remove(item.Key); }
+                      public bool TryGetValue(int key, out int value) { return Items.TryGetValue(key, out value); }
+                      public System.Collections.Generic.IEnumerator<System.Collections.Generic.KeyValuePair<int, int>> GetEnumerator()
+                      {
+                          return Items.GetEnumerator();
+                      }
+                      System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator()
+                      {
+                          return GetEnumerator();
+                      }
+                  }
+
+                  [WProtoContract] public sealed partial class Holder
+                  {
+                      [WProtoMember(1)] public Pairs Members;
+                  }";
+
+            AssertNoDiagnostics(source);
+            Assert.IsEmpty(CompileGenerated(source).Select(d => d.Id + " " + d.GetMessage()));
         }
 
         [TestCase(0)]

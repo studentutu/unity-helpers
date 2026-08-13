@@ -36,14 +36,21 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
 
         private const string PairType = "global::System.Collections.Generic.KeyValuePair";
 
+        private const string DictionaryType = "global::System.Collections.Generic.Dictionary";
+
+        private const string ReadOnlyDictionaryType =
+            "global::System.Collections.ObjectModel.ReadOnlyDictionary";
+
         private readonly Shape _key;
         private readonly Shape _value;
         private readonly string _keyQualified;
         private readonly string _valueQualified;
         private readonly string _mapQualified;
+        private readonly string _accumulatorQualified;
+        private readonly string _commitGeneric;
         private readonly string _contractName;
         private readonly bool _overwrite;
-        private readonly bool _valueIsReference;
+        private readonly bool _mapIsValueType;
         private readonly bool _keyIsString;
         private readonly bool _valueIsString;
 
@@ -56,8 +63,10 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             string keyQualified,
             string valueQualified,
             string mapQualified,
+            string accumulatorQualified,
+            string commitGeneric,
             bool overwrite,
-            bool valueIsReference,
+            bool mapIsValueType,
             bool keyIsString,
             bool valueIsString
         )
@@ -69,11 +78,23 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             _keyQualified = keyQualified;
             _valueQualified = valueQualified;
             _mapQualified = mapQualified;
+            _accumulatorQualified = accumulatorQualified;
+            _commitGeneric = commitGeneric;
             _overwrite = overwrite;
-            _valueIsReference = valueIsReference;
+            _mapIsValueType = mapIsValueType;
             _keyIsString = keyIsString;
             _valueIsString = valueIsString;
         }
+
+        /// <summary>
+        /// Whether entries are collected into a dictionary of a different type from the member's.
+        /// </summary>
+        /// <remarks>
+        /// True for the two dictionary interfaces and for <c>ReadOnlyDictionary&lt;K,V&gt;</c>: none
+        /// can be constructed and filled, so the member's current entries are copied into a
+        /// <c>Dictionary&lt;K,V&gt;</c> and the decoded ones merged on top.
+        /// </remarks>
+        private bool SeedsByCopy => _accumulatorQualified != _mapQualified;
 
         /// <summary>
         /// Builds the member when <paramref name="type"/> is a supported map, and returns
@@ -100,46 +121,53 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 return null;
             }
 
-            if (named.TypeKind != TypeKind.Class && named.TypeKind != TypeKind.Struct)
-            {
-                return null;
-            }
+            ITypeSymbol keyType;
+            ITypeSymbol valueType;
+            string commitGeneric;
+            bool wellKnown = TryWellKnown(named, out keyType, out valueType, out commitGeneric);
 
-            if (named.IsAbstract)
+            if (!wellKnown)
             {
-                return null;
-            }
-
-            ITypeSymbol keyType = null;
-            ITypeSymbol valueType = null;
-            foreach (INamedTypeSymbol candidate in named.AllInterfaces)
-            {
-                if (
-                    !candidate.IsGenericType
-                    || candidate.ConstructedFrom.ToDisplayString()
-                        != "System.Collections.Generic.IDictionary<TKey, TValue>"
-                )
-                {
-                    continue;
-                }
-
-                if (keyType != null)
+                commitGeneric = null;
+                if (named.TypeKind != TypeKind.Class && named.TypeKind != TypeKind.Struct)
                 {
                     return null;
                 }
 
-                keyType = candidate.TypeArguments[0];
-                valueType = candidate.TypeArguments[1];
-            }
+                if (named.IsAbstract)
+                {
+                    return null;
+                }
 
-            if (keyType == null)
-            {
-                return null;
-            }
+                foreach (INamedTypeSymbol candidate in named.AllInterfaces)
+                {
+                    if (
+                        !candidate.IsGenericType
+                        || candidate.ConstructedFrom.ToDisplayString()
+                            != "System.Collections.Generic.IDictionary<TKey, TValue>"
+                    )
+                    {
+                        continue;
+                    }
 
-            if (!HasParameterlessConstructor(named) || !HasSettableIndexer(named, keyType))
-            {
-                return null;
+                    if (keyType != null)
+                    {
+                        return null;
+                    }
+
+                    keyType = candidate.TypeArguments[0];
+                    valueType = candidate.TypeArguments[1];
+                }
+
+                if (keyType == null)
+                {
+                    return null;
+                }
+
+                if (!HasParameterlessConstructor(named) || !HasSettableIndexer(named, keyType))
+                {
+                    return null;
+                }
             }
 
             string keyQualified = keyType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
@@ -169,6 +197,8 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 return null;
             }
 
+            string mapQualified = named.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+
             return new MapMember(
                 contractName,
                 name,
@@ -177,12 +207,74 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 value,
                 keyQualified,
                 valueQualified,
-                named.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+                mapQualified,
+                wellKnown
+                    ? DictionaryType + "<" + keyQualified + ", " + valueQualified + ">"
+                    : mapQualified,
+                commitGeneric,
                 overwriteList,
-                value.IsReference,
+                named.IsValueType,
                 keyIsString,
                 valueType.SpecialType == SpecialType.System_String
             );
+        }
+
+        /// <summary>
+        /// Recognizes the dictionary shapes that cannot be constructed and filled directly.
+        /// </summary>
+        /// <param name="named">The member's declared type.</param>
+        /// <param name="keyType">Receives the key type.</param>
+        /// <param name="valueType">Receives the value type.</param>
+        /// <param name="commitGeneric">Receives the type the finished dictionary is wrapped in.</param>
+        /// <returns><c>true</c> when the type is one of them.</returns>
+        /// <remarks>
+        /// <c>Dictionary&lt;K,V&gt;</c> is what protobuf-net produces for both interfaces, measured
+        /// against 3.2.56, and which type a round trip leaves behind is a decision rather than an
+        /// implementation detail. <c>ReadOnlyDictionary&lt;K,V&gt;</c> is the map analogue of
+        /// <c>ReadOnlyCollection&lt;T&gt;</c>: protobuf-net writes it and then refuses to read it
+        /// back ("No parameterless constructor found"), so accepting it is strictly more than the
+        /// oracle does with bytes it produced itself.
+        /// </remarks>
+        private static bool TryWellKnown(
+            INamedTypeSymbol named,
+            out ITypeSymbol keyType,
+            out ITypeSymbol valueType,
+            out string commitGeneric
+        )
+        {
+            keyType = null;
+            valueType = null;
+            commitGeneric = null;
+            if (!named.IsGenericType || named.TypeArguments.Length != 2)
+            {
+                return false;
+            }
+
+            INamedTypeSymbol definition = named.ConstructedFrom;
+            string qualified =
+                definition.ContainingNamespace == null
+                    ? definition.MetadataName
+                    : definition.ContainingNamespace.ToDisplayString()
+                        + "."
+                        + definition.MetadataName;
+
+            switch (qualified)
+            {
+                case "System.Collections.Generic.IDictionary`2":
+                case "System.Collections.Generic.IReadOnlyDictionary`2":
+                    break;
+
+                case "System.Collections.ObjectModel.ReadOnlyDictionary`2":
+                    commitGeneric = ReadOnlyDictionaryType;
+                    break;
+
+                default:
+                    return false;
+            }
+
+            keyType = named.TypeArguments[0];
+            valueType = named.TypeArguments[1];
+            return true;
         }
 
         private static bool HasParameterlessConstructor(INamedTypeSymbol type)
@@ -249,7 +341,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
         /// <inheritdoc />
         internal override void EmitMeasure(Writer writer)
         {
-            OpenLoop(writer);
+            int open = OpenLoop(writer);
             EmitEntrySize(writer);
             writer.Line(
                 "size += "
@@ -262,15 +354,14 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                     + EntrySize
                     + ");"
             );
-            Close(writer);
-            Close(writer);
+            CloseAll(writer, open);
             writer.Blank();
         }
 
         /// <inheritdoc />
         internal override void EmitWrite(Writer writer)
         {
-            OpenLoop(writer);
+            int open = OpenLoop(writer);
 
             // The payload is written first and its length back-filled, rather than measured up front
             // as the Measure pass does. A map VALUE may be any contract, hooks included -- the earlier
@@ -302,8 +393,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             writer.Line("return false;");
             Close(writer);
 
-            Close(writer);
-            Close(writer);
+            CloseAll(writer, open);
             writer.Blank();
         }
 
@@ -320,12 +410,29 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
         }
 
         /// <summary>
-        /// Emits the null guard and the <c>foreach</c> header, leaving two blocks open.
+        /// Emits the presence guard and the <c>foreach</c> header, and returns how many blocks the
+        /// caller has to close.
         /// </summary>
-        private void OpenLoop(Writer writer)
+        /// <remarks>
+        /// <para>
+        /// A struct dictionary is always present, so it gets no guard: <c>member != null</c> on a
+        /// value type is <c>CS0019</c>, a compiler error inside code the consumer never wrote.
+        /// </para>
+        /// <para>
+        /// Unlike a repeated element, a null map <b>value</b> is legal -- protobuf-net omits it and
+        /// the entry carries only its key -- so there is nothing to guard inside the loop.
+        /// </para>
+        /// </remarks>
+        private int OpenLoop(Writer writer)
         {
-            writer.Line("if (" + Access + " != null)" + Writer.Open);
-            writer.Indent();
+            int open = 0;
+            if (!_mapIsValueType)
+            {
+                writer.Line("if (" + Access + " != null)" + Writer.Open);
+                writer.Indent();
+                open++;
+            }
+
             writer.Line(
                 "foreach ("
                     + PairType
@@ -341,11 +448,14 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                     + Writer.Open
             );
             writer.Indent();
+            return open + 1;
+        }
 
-            if (_valueIsReference)
+        private static void CloseAll(Writer writer, int count)
+        {
+            for (int closed = 0; closed < count; closed++)
             {
-                // Unlike a repeated element, a null VALUE is legal -- protobuf-net omits it and the
-                // entry carries only its key. Nothing to guard.
+                Close(writer);
             }
         }
 
@@ -395,15 +505,27 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 return;
             }
 
-            writer.Line(_mapQualified + " " + Accumulator + " = default(" + _mapQualified + ");");
+            writer.Line(
+                _accumulatorQualified
+                    + " "
+                    + Accumulator
+                    + " = default("
+                    + _accumulatorQualified
+                    + ");"
+            );
         }
 
         /// <inheritdoc />
         internal override void EmitReadCases(Writer writer, string qualifiedContract)
         {
             string entry = "entry" + Tag;
-            string keyLocal = "key" + Tag;
-            string valueLocal = "value" + Tag;
+
+            // Not `key`/`value` + Tag: `value` + Tag is what Member.ReadLocal is called, so an
+            // immutable contract -- which holds every member in one of those until it can construct
+            // the instance -- collided with its own map member and failed the consumer's build with
+            // CS0136, naming a local nobody wrote.
+            string keyLocal = "entryKey" + Tag;
+            string valueLocal = "entryValue" + Tag;
             string decodedKey = "decodedKey" + Tag;
             string decodedValue = "decodedValue" + Tag;
 
@@ -575,15 +697,67 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             }
             else if (_overwrite || SkipConstructor)
             {
-                writer.Line(Accumulator + " = new " + _mapQualified + "();");
+                writer.Line(Accumulator + " = new " + _accumulatorQualified + "();");
+            }
+            else if (SeedsByCopy)
+            {
+                writer.Line(Accumulator + " = new " + _accumulatorQualified + "();");
+                EmitCopyFromMember(writer, Accumulator);
             }
             else
             {
-                writer.Line(Accumulator + " = read." + Name + " ?? new " + _mapQualified + "();");
+                writer.Line(Accumulator + " = " + ExistingOrFresh() + ";");
             }
 
             Close(writer);
             writer.Blank();
+        }
+
+        /// <summary>
+        /// Emits the merge of the member's current entries into <paramref name="accumulator"/>.
+        /// </summary>
+        /// <remarks>
+        /// Entry by entry through the indexer rather than through a copying constructor: the member
+        /// may be an <c>IReadOnlyDictionary&lt;K,V&gt;</c>, which no <c>Dictionary&lt;K,V&gt;</c>
+        /// constructor accepts on every target framework this package supports.
+        /// </remarks>
+        private void EmitCopyFromMember(Writer writer, string accumulator)
+        {
+            writer.Line("if (read." + Name + " != null)" + Writer.Open);
+            writer.Indent();
+            writer.Line(
+                "foreach ("
+                    + PairType
+                    + "<"
+                    + _keyQualified
+                    + ", "
+                    + _valueQualified
+                    + "> "
+                    + PairLocal
+                    + " in read."
+                    + Name
+                    + ")"
+                    + Writer.Open
+            );
+            writer.Indent();
+            writer.Line(accumulator + "[" + KeyAccess + "] = " + ValueAccess + ";");
+            Close(writer);
+            Close(writer);
+        }
+
+        /// <summary>
+        /// The dictionary entries are applied to: the constructor's own, or a fresh one.
+        /// </summary>
+        /// <remarks>
+        /// For a struct dictionary this is a <b>copy</b>, necessarily -- which is why the epilogue
+        /// assigns it back. <c>??</c> has no meaning on a value type (<c>CS0019</c>), and there is
+        /// no null state for it to test: a struct member is always present.
+        /// </remarks>
+        private string ExistingOrFresh()
+        {
+            return _mapIsValueType
+                ? "read." + Name
+                : "read." + Name + " ?? new " + _accumulatorQualified + "()";
         }
 
         /// <inheritdoc />
@@ -592,49 +766,73 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             writer.Line("if (" + SeenFlag + ")" + Writer.Open);
             writer.Indent();
 
-            if (Deferred)
+            string destination = ConstructAtEnd ? ReadLocal : "read." + Name;
+
+            if (!Deferred)
             {
-                string target = "target" + Tag;
-                writer.Line(
-                    _mapQualified
-                        + " "
-                        + target
-                        + " = "
-                        + (
-                            _overwrite || SkipConstructor
-                                ? "new " + _mapQualified + "()"
-                                : "read." + Name + " ?? new " + _mapQualified + "()"
-                        )
-                        + ";"
-                );
-                writer.Line(
-                    "foreach ("
-                        + PairType
-                        + "<"
-                        + _keyQualified
-                        + ", "
-                        + _valueQualified
-                        + "> "
-                        + PairLocal
-                        + " in "
-                        + Accumulator
-                        + ")"
-                        + Writer.Open
-                );
-                writer.Indent();
-                writer.Line(target + "[" + KeyAccess + "] = " + ValueAccess + ";");
+                writer.Line(destination + " = " + Commit(Accumulator) + ";");
                 Close(writer);
-                writer.Line((ConstructAtEnd ? ReadLocal : "read." + Name) + " = " + target + ";");
+                writer.Blank();
+                return;
             }
-            else
+
+            string target = "target" + Tag;
+            bool fresh = _overwrite || ConstructAtEnd || SkipConstructor;
+            writer.Line(
+                _accumulatorQualified
+                    + " "
+                    + target
+                    + " = "
+                    + (
+                        fresh || SeedsByCopy
+                            ? "new " + _accumulatorQualified + "()"
+                            : ExistingOrFresh()
+                    )
+                    + ";"
+            );
+
+            if (!fresh && SeedsByCopy)
             {
-                writer.Line(
-                    (ConstructAtEnd ? ReadLocal : "read." + Name) + " = " + Accumulator + ";"
-                );
+                EmitCopyFromMember(writer, target);
             }
+
+            writer.Line(
+                "foreach ("
+                    + PairType
+                    + "<"
+                    + _keyQualified
+                    + ", "
+                    + _valueQualified
+                    + "> "
+                    + PairLocal
+                    + " in "
+                    + Accumulator
+                    + ")"
+                    + Writer.Open
+            );
+            writer.Indent();
+            writer.Line(target + "[" + KeyAccess + "] = " + ValueAccess + ";");
+            Close(writer);
+            writer.Line(destination + " = " + Commit(target) + ";");
 
             Close(writer);
             writer.Blank();
+        }
+
+        /// <summary>The expression that turns a finished dictionary into the member's value.</summary>
+        private string Commit(string accumulator)
+        {
+            return _commitGeneric == null
+                ? accumulator
+                : "new "
+                    + _commitGeneric
+                    + "<"
+                    + _keyQualified
+                    + ", "
+                    + _valueQualified
+                    + ">("
+                    + accumulator
+                    + ")";
         }
     }
 }

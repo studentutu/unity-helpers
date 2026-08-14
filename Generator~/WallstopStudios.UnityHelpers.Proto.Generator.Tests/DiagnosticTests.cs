@@ -8,6 +8,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
     using System.Collections.Immutable;
     using System.IO;
     using System.Linq;
+    using System.Text;
     using Microsoft.CodeAnalysis;
     using Microsoft.CodeAnalysis.CSharp;
     using NUnit.Framework;
@@ -140,23 +141,27 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
         // implementation it could pick either, so it refuses at build time instead, which is the
         // same answer arriving somewhere it can be acted on.
         //
-        // The nested and jagged shapes are refusals worth stating rather than gaps. protobuf-net
-        // refuses every one of them too, at WRITE, on both 2.4.9 and 3.2.56 ("Nested or jagged
-        // lists, arrays and maps are not supported"), so there is no wire form to be compatible
-        // with -- measured, not assumed. `byte[][]` is the exception and is accepted above, because
-        // a byte[] is one length-delimited value rather than a repeated field.
+        // The nested and jagged shapes moved OFF this list in session 187 -- they are served by a
+        // wrapper message per inner collection now, and NestedCollectionTests pins their bytes.
+        // What is left here nests nothing.
+        //
+        // A rectangular array stays refused, and it is not the same question: `int[,]` has no
+        // per-row structure to wrap, so reconstructing one needs a shape header in the payload,
+        // which is a wire decision rather than a missing case.
         //
         // The last two are element-shape refusals: a nullable element (protobuf-net refuses a null
         // element, so Nullable<T>[] is a collection that can only hold values it cannot write), and
-        // a BCL type with no mapping.
+        // a BCL type with no mapping. The nested spellings of both are here too, because a wrapper
+        // must not launder an element its own member would have refused.
         [TestCase("Consumer.IOwnList<int>")]
-        [TestCase("System.Collections.Generic.List<System.Collections.Generic.List<int>>")]
-        [TestCase("System.Collections.Generic.List<int[]>")]
-        [TestCase("int[][]")]
-        [TestCase("int[][][]")]
+        [TestCase("System.Collections.Generic.List<Consumer.IOwnList<int>>")]
         [TestCase("int[,]")]
+        [TestCase("int[,][]")]
+        [TestCase("System.Collections.Generic.List<int[,]>")]
         [TestCase("int?[]")]
+        [TestCase("int?[][]")]
         [TestCase("System.DateTime")]
+        [TestCase("System.Collections.Generic.List<System.DateTime[]>")]
         public void AnUnsupportedMemberTypeIsAnError(string declaredType)
         {
             AssertDiagnostic(
@@ -192,6 +197,107 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
                       [WProtoMember(7)] public System.Collections.ObjectModel.Collection<int> Owned;
                       [WProtoMember(8)] public System.Collections.Generic.Dictionary<string, int> Map;
                       [WProtoMember(9)] public System.Collections.Generic.SortedDictionary<string, int> SortedMap;
+                  }"
+            );
+        }
+
+        [Test]
+        public void EveryNestedCollectionShapeIsAccepted()
+        {
+            // The list that AnUnsupportedMemberTypeIsAnError used to hold, inverted. Each of these
+            // becomes a wrapper message per inner collection; the bytes are pinned by
+            // NestedCollectionTests, and this only asserts that the build stops refusing them.
+            AssertNoDiagnostics(
+                @"[WProtoContract] public sealed partial class Nested
+                  {
+                      [WProtoMember(1)] public int[][] Rows;
+                      [WProtoMember(2)] public System.Collections.Generic.List<int[]> Batches;
+                      [WProtoMember(3)] public System.Collections.Generic.List<System.Collections.Generic.List<int>> Grid;
+                      [WProtoMember(4)] public int[][][] Cube;
+                      [WProtoMember(5)] public System.Collections.Generic.HashSet<int>[] Sets;
+                      [WProtoMember(6)] public System.Collections.Generic.List<System.Collections.Generic.Dictionary<string, int>> Tables;
+                      [WProtoMember(7)] public System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<int>> Lookup;
+                      [WProtoMember(8)] public System.Collections.Generic.Queue<System.Collections.Generic.Stack<string>> Pipelines;
+                  }"
+            );
+        }
+
+        [Test]
+        public void TheNestingBoundDoesNotDependOnWhichMemberIsDeclaredFirst()
+        {
+            // Wrappers are shared across a contract's members, so a shallow member declared first
+            // seeds the cache -- and reusing that entry deep inside a longer chain assembles
+            // something past the reader's limit without the bound being consulted. Both orders have
+            // to answer the same, or the diagnostic is a statement about declaration order.
+            const int shallow = 3;
+            const int deep = 66;
+
+            AssertDiagnostic("WPROTO032", "Deep", Chain(("Shallow", shallow), ("Deep", deep)));
+            AssertDiagnostic("WPROTO032", "Deep", Chain(("Deep", deep), ("Shallow", shallow)));
+        }
+
+        [Test]
+        public void ADepthRefusalDoesNotMakeAServiceableMemberLookUnsupported()
+        {
+            // The other half of the same cache. A failed lookup used to stay behind as a negative
+            // entry, so every wrapper above a depth refusal was poisoned -- and a shape this suite
+            // serializes elsewhere was reported as WPROTO003 purely because a deeper member was
+            // declared before it. The deep member must be the ONLY one named.
+            ImmutableArray<Diagnostic> diagnostics = Run(Chain(("Deep", 66), ("Shallow", 3)));
+
+            Assert.IsEmpty(
+                diagnostics.Where(d => d.Id == "WPROTO003"),
+                string.Join("; ", diagnostics.Select(d => d.Id + " " + d.GetMessage()))
+            );
+        }
+
+        /// <summary>
+        /// Builds a contract whose members are <c>List</c> chains of the given depths.
+        /// </summary>
+        /// <param name="members">Each member's name and how many <c>List</c> levels it has.</param>
+        /// <returns>The contract source.</returns>
+        private static string Chain(params (string Name, int Levels)[] members)
+        {
+            StringBuilder source = new StringBuilder(
+                "[WProtoContract] public sealed partial class Ordered\n{\n"
+            );
+
+            int tag = 0;
+            foreach ((string name, int levels) in members)
+            {
+                tag++;
+                source.Append("    [WProtoMember(").Append(tag).Append(")] public ");
+                source.Append(
+                    string.Concat(Enumerable.Repeat("System.Collections.Generic.List<", levels))
+                );
+                source.Append("int").Append(new string('>', levels));
+                source.Append(' ').Append(name).Append(";\n");
+            }
+
+            return source.Append('}').ToString();
+        }
+
+        [Test]
+        public void ACollectionNestedPastTheReadersDepthIsItsOwnError()
+        {
+            // WPROTO003 would be true and useless here: the shape IS supported, up to the depth the
+            // reader can read back. Sixty-six levels is one wrapper past the sixty-four
+            // WProtoReader.MaxNestingDepth allows, so a member this deep would be writable and
+            // unreadable -- which is the failure the build is refusing on behalf of.
+            const int levels = 66;
+            string declared =
+                string.Concat(Enumerable.Repeat("System.Collections.Generic.List<", levels))
+                + "int"
+                + new string('>', levels);
+
+            AssertDiagnostic(
+                "WPROTO032",
+                "Values",
+                @"[WProtoContract] public sealed partial class TooDeep
+                  {
+                      [WProtoMember(1)] public "
+                    + declared
+                    + @" Values;
                   }"
             );
         }

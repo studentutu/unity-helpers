@@ -1437,64 +1437,129 @@ function Get-WorkflowEventPathFilterBlock {
   return $pathsMatch.Groups['body'].Value
 }
 
+function Get-WorkflowContentWithoutComments {
+  param([Parameter(Mandatory)][string]$Path)
+
+  # Line-based, matching test-workflow-repository-guard.ps1: a `#` starts a comment in YAML except
+  # inside a quoted scalar, and no workflow here puts one of these script names inside a quoted
+  # scalar containing a `#`. Precision beyond that would need a YAML parser to answer a question
+  # about prose.
+  $strippedLines = foreach ($line in (Get-Content -LiteralPath $Path)) {
+    $line -replace '#.*$', ''
+  }
+  return [string]($strippedLines -join "`n")
+}
+
 function Run-DocumentationWorkflowContractTests {
   Write-Host ""
   Write-Host "Documentation workflow contracts:" -ForegroundColor Magenta
   Write-Host ""
 
+  # These contracts used to be written against two named jobs in validate-docs.yml. Those jobs are
+  # checks in scripts/run-repo-lint.js now, and every assertion below broke on a layout change while
+  # the thing each one protected was still true. They are restated against the REQUIREMENT -- the
+  # doc-link modes run, bounded, on any change that could affect them -- and locate the owner rather
+  # than naming it.
+  #
+  # One assertion is gone rather than moved: "preserves required link-check job names ... for
+  # branch-protection continuity". `main` carries no branch protection and no required status
+  # checks, so it was preserving names for a mechanism that does not exist.
   $repoRoot = Get-RepoRoot
-  $workflowPath = Join-Path $repoRoot '.github/workflows/validate-docs.yml'
-
-  if (-not (Test-Path $workflowPath)) {
-    Write-TestResult `
-      -TestName 'validate-docs workflow exists' `
-      -Passed $false `
-      -Message "Missing file: $workflowPath"
-    return
+  $workflowDir = Join-Path $repoRoot '.github/workflows'
+  $runnerPath = Join-Path $repoRoot 'scripts/run-repo-lint.js'
+  [string]$runnerContent = if (Test-Path -LiteralPath $runnerPath) {
+    Get-Content -LiteralPath $runnerPath -Raw
+  }
+  else {
+    ''
   }
 
-  $workflowContent = Get-Content -Path $workflowPath -Raw
-  $validateLinksBlock = [regex]::Match($workflowContent, '(?ms)^\s*validate-links:\s*.*?(?=^\s*validate-link-format:)')
-  $validateLinkFormatBlock = [regex]::Match($workflowContent, '(?ms)^\s*validate-link-format:\s*.*?(?=^\s*build-mkdocs-test:)')
-
-  $usesCanonicalDocLinkLinter = (
-    $validateLinksBlock.Success -and
-    $validateLinkFormatBlock.Success -and
-    $validateLinksBlock.Value.Contains('./scripts/lint-doc-links.ps1 -Mode Targets -VerboseOutput') -and
-    $validateLinkFormatBlock.Value.Contains('./scripts/lint-doc-links.ps1 -Mode Format -VerboseOutput')
+  # A workflow owns the doc-link checks if it invokes the linter directly or runs the registry.
+  #
+  # Comments are stripped first. They are where the reason for a move is written -- both
+  # validate-docs.yml and lint-doc-links.yml explain in prose that their link jobs became
+  # scripts/run-repo-lint.js checks -- and a workflow that only MENTIONS the runner is not running
+  # it. Matching the prose made every assertion below apply to workflows that own none of this.
+  # Same rule, and the same reason, as test-workflow-repository-guard.ps1.
+  $docLinkWorkflows = @(
+    Get-ChildItem -LiteralPath $workflowDir -Filter '*.yml' -File |
+      Sort-Object Name |
+      Where-Object {
+        $candidateText = Get-WorkflowContentWithoutComments -Path $_.FullName
+        # Anchored so `test-lint-doc-links.ps1` does not read as an invocation of the linter itself.
+        ($candidateText -match '(?<![\w-])lint-doc-links\.ps1') -or
+        $candidateText.Contains('run-repo-lint.js')
+      }
   )
 
-  $preservesRequiredCheckNames = (
-    $validateLinksBlock.Success -and
-    $validateLinkFormatBlock.Success -and
-    $validateLinksBlock.Value.Contains('name: Validate Internal Links') -and
-    $validateLinkFormatBlock.Value.Contains('name: Validate Link Format')
-  )
+  # Both halves of the link check must actually run: target existence proves linked files are there,
+  # format proves the link syntax is right. Losing either silently halves the check.
+  #
+  # The registry counts ONLY if some workflow invokes the runner. Seeding coverage from the registry
+  # unconditionally let an uninvoked file satisfy the contract while CI ran something else -- the
+  # modes would be present in a script nothing called.
+  $runnerIsInvoked = $false
+  [string]$docLinkSources = ''
+  foreach ($workflowFile in $docLinkWorkflows) {
+    $ownerText = Get-WorkflowContentWithoutComments -Path $workflowFile.FullName
+    $docLinkSources += $ownerText
+    if ($ownerText.Contains('run-repo-lint.js')) {
+      $runnerIsInvoked = $true
+    }
+  }
+  if ($runnerIsInvoked) {
+    $docLinkSources += $runnerContent
+  }
 
-  $hasBoundedLinkJobTimeouts = (
-    $validateLinksBlock.Success -and
-    $validateLinkFormatBlock.Success -and
-    $validateLinksBlock.Value.Contains('timeout-minutes: 5') -and
-    $validateLinkFormatBlock.Value.Contains('timeout-minutes: 5')
+  # `-Mode All` is the linter's default and enables both halves, so it satisfies this on its own;
+  # otherwise both explicit modes must appear. Spelling it out this way means the contract tracks
+  # the coverage rather than a particular command line.
+  #
+  # The lookbehind is load-bearing: `test-lint-doc-links.ps1` CONTAINS `lint-doc-links.ps1`, so an
+  # unanchored match let the linter's own self-test stand in for the linter. Deleting the real check
+  # from the registry then left this passing.
+  $linterCall = '(?<![\w-])lint-doc-links\.ps1'
+  $coversBothModes = (
+    $docLinkSources -match "$linterCall(?![^\r\n]*-Mode\s+(?:Targets|Format))" -or
+    (
+      $docLinkSources -match "$linterCall[^\r\n]*-Mode\s+Targets" -and
+      $docLinkSources -match "$linterCall[^\r\n]*-Mode\s+Format"
+    )
   )
+  $usesCanonicalDocLinkLinter = ($docLinkWorkflows.Count -gt 0 -and $coversBothModes)
 
-  [string[]]$requiredValidateDocsPathFilters = @(
+  # A link walk that hangs should fail its job, not hold a runner to the six-hour ceiling.
+  [string[]]$unboundedDocLinkJobs = @()
+  foreach ($workflowFile in $docLinkWorkflows) {
+    $workflowText = [string](Get-Content -LiteralPath $workflowFile.FullName -Raw)
+    if ($workflowText -notmatch '(?m)^\s+timeout-minutes:\s*\d+\s*$') {
+      $unboundedDocLinkJobs += $workflowFile.Name
+    }
+  }
+
+  # The checks must not be filtered away from their own sources. An unfiltered workflow runs on
+  # every change, which covers those sources by definition and is the stronger guarantee.
+  [string[]]$requiredDocLinkSources = @(
     'scripts/comment-stripping.ps1',
     'scripts/lint-doc-links.ps1',
     'scripts/run-doc-link-lint.js',
     'scripts/tests/test-lint-doc-links.ps1'
   )
-  [string[]]$missingValidateDocsPathFilters = @()
-  $validateDocsPathFilterBlocks = @{
-    push = Get-WorkflowEventPathFilterBlock -WorkflowContent $workflowContent -EventName 'push'
-    pull_request = Get-WorkflowEventPathFilterBlock -WorkflowContent $workflowContent -EventName 'pull_request'
-  }
-  foreach ($eventName in @('push', 'pull_request')) {
-    $pathFilterBlock = $validateDocsPathFilterBlocks[$eventName]
-    foreach ($requiredPathFilter in $requiredValidateDocsPathFilters) {
-      $pathFilterPattern = '- "' + $requiredPathFilter + '"'
-      if (-not $pathFilterBlock.Contains($pathFilterPattern)) {
-        $missingValidateDocsPathFilters += "${eventName}:$requiredPathFilter"
+  [string[]]$missingDocLinkPathFilters = @()
+  foreach ($workflowFile in $docLinkWorkflows) {
+    $workflowText = [string](Get-Content -LiteralPath $workflowFile.FullName -Raw)
+    if ($workflowText -notmatch '(?m)^\s+paths:\s*$') {
+      continue
+    }
+    foreach ($eventName in @('push', 'pull_request')) {
+      $pathFilterBlock = Get-WorkflowEventPathFilterBlock -WorkflowContent $workflowText -EventName $eventName
+      if ([string]::IsNullOrWhiteSpace($pathFilterBlock)) {
+        continue
+      }
+      foreach ($requiredPathFilter in $requiredDocLinkSources) {
+        if (-not $pathFilterBlock.Contains('- "' + $requiredPathFilter + '"')) {
+          $missingDocLinkPathFilters += "$($workflowFile.Name):${eventName}:$requiredPathFilter"
+        }
       }
     }
   }
@@ -1505,35 +1570,42 @@ function Run-DocumentationWorkflowContractTests {
     "grep -qE '\]\([a-zA-Z]'",
     "grep -oE '\]\([^)]+\)'"
   )
+  # Scoped to the workflows that own the doc-link checks, which is what this contract was always
+  # about: the linter must not be reimplemented inline beside itself. The wiki workflows use
+  # `find . -name "*.md"` legitimately to enumerate pages, and widening this to every workflow
+  # turned a real rule into a false positive on two files it was never written for.
   $slowInlineScannerHits = @()
-  foreach ($pattern in $slowInlineScannerPatterns) {
-    if ($workflowContent.Contains($pattern)) {
-      $slowInlineScannerHits += $pattern
+  foreach ($workflowFile in $docLinkWorkflows) {
+    $workflowText = [string](Get-Content -LiteralPath $workflowFile.FullName -Raw)
+    foreach ($pattern in $slowInlineScannerPatterns) {
+      if ($workflowText.Contains($pattern)) {
+        $slowInlineScannerHits += "$($workflowFile.Name):$pattern"
+      }
     }
   }
 
   Write-TestResult `
-    -TestName 'validate-docs preserves required link-check job names' `
-    -Passed $preservesRequiredCheckNames `
-    -Message 'Expected Validate Documentation to keep Validate Internal Links and Validate Link Format jobs for branch-protection continuity.'
+    -TestName 'doc link checks run somewhere' `
+    -Passed ($docLinkWorkflows.Count -gt 0) `
+    -Message 'No workflow invokes scripts/lint-doc-links.ps1 or scripts/run-repo-lint.js, so documentation links are unchecked.'
 
   Write-TestResult `
-    -TestName 'validate-docs delegates link checks to canonical linter' `
+    -TestName 'doc link checks cover both Targets and Format modes' `
     -Passed $usesCanonicalDocLinkLinter `
-    -Message 'Expected validate-docs.yml link jobs to invoke scripts/lint-doc-links.ps1 with distinct Targets and Format modes.'
+    -Message 'Expected the canonical linter to run with distinct -Mode Targets and -Mode Format.'
 
   Write-TestResult `
-    -TestName 'validate-docs bounds link-check job runtime' `
-    -Passed $hasBoundedLinkJobTimeouts `
-    -Message 'Expected validate-docs.yml link jobs to have timeout-minutes: 5.'
+    -TestName 'doc link check jobs bound their runtime' `
+    -Passed ($unboundedDocLinkJobs.Count -eq 0) `
+    -Message "Expected a timeout-minutes on workflows running doc link checks. Unbounded: $($unboundedDocLinkJobs -join ', ')"
 
   Write-TestResult `
-    -TestName 'validate-docs path filters include doc link linter sources' `
-    -Passed ($missingValidateDocsPathFilters.Count -eq 0) `
-    -Message "Expected push and pull_request path filters to include doc link linter sources. Missing: $($missingValidateDocsPathFilters -join ', ')"
+    -TestName 'doc link checks are not filtered away from their own sources' `
+    -Passed ($missingDocLinkPathFilters.Count -eq 0) `
+    -Message "Path-filtered workflows must list the doc link linter sources. Missing: $($missingDocLinkPathFilters -join ', ')"
 
   Write-TestResult `
-    -TestName 'validate-docs avoids duplicated slow inline markdown scanner' `
+    -TestName 'workflows avoid the duplicated slow inline markdown scanner' `
     -Passed ($slowInlineScannerHits.Count -eq 0) `
     -Message "Slow inline scanner patterns found: $($slowInlineScannerHits -join ', ')"
 }

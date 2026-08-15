@@ -2831,6 +2831,179 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
 
             yield return null;
         }
+
+        /// <summary>
+        /// Builds a clip whose four curves differ in exactly one binding field each, so a filter
+        /// that ignores one of the three is visible as a wrong answer rather than a missing one.
+        /// Every sprite is named for what selects it.
+        /// </summary>
+        private AnimationClip BuildBoundSpriteClip()
+        {
+            Texture2D texture = Track(new Texture2D(8, 8));
+            AnimationClip clip = Track(new AnimationClip());
+
+            void Bind(string path, Type type, string propertyName, params string[] spriteNames)
+            {
+                UnityEditor.ObjectReferenceKeyframe[] frames =
+                    new UnityEditor.ObjectReferenceKeyframe[spriteNames.Length];
+                for (int index = 0; index < spriteNames.Length; ++index)
+                {
+                    Sprite sprite = Track(
+                        Sprite.Create(texture, new Rect(0f, 0f, 4f, 4f), new Vector2(0.5f, 0.5f))
+                    );
+                    sprite.name = spriteNames[index];
+                    frames[index] = new UnityEditor.ObjectReferenceKeyframe
+                    {
+                        time = index,
+                        value = sprite,
+                    };
+                }
+
+                UnityEditor.AnimationUtility.SetObjectReferenceCurve(
+                    clip,
+                    UnityEditor.EditorCurveBinding.PPtrCurve(path, type, propertyName),
+                    frames
+                );
+            }
+
+            Bind(string.Empty, typeof(SpriteRenderer), "m_Sprite", "root0", "root1");
+            Bind("Child", typeof(SpriteRenderer), "m_Sprite", "child0");
+            Bind(string.Empty, typeof(Image), "m_Sprite", "image0");
+            Bind(string.Empty, typeof(SpriteRenderer), "m_Decoration", "deco0");
+
+            // Every assertion below reads as a filtering bug if the editor declined to store one of
+            // these curves, so the fixture states what it built.
+            Assert.AreEqual(
+                4,
+                UnityEditor.AnimationUtility.GetObjectReferenceCurveBindings(clip).Length,
+                "the editor did not store every object-reference curve this fixture set"
+            );
+            return clip;
+        }
+
+        private static string NamesOf(IEnumerable<Sprite> sprites)
+        {
+            List<string> names = sprites.Select(sprite => sprite.name).ToList();
+            names.Sort(StringComparer.Ordinal);
+            return string.Join(",", names);
+        }
+
+        [Test]
+        public void GetSpriteFramesFromClipKeepsTheBindingThatSuppliesEachSprite()
+        {
+            AnimationClip clip = BuildBoundSpriteClip();
+
+            Dictionary<string, UnityEditor.EditorCurveBinding> bindingsBySprite =
+                clip.GetSpriteFramesFromClip()
+                    .ToDictionary(frame => frame.sprite.name, frame => frame.binding);
+
+            Assert.AreEqual(5, bindingsBySprite.Count);
+            Assert.AreEqual(string.Empty, bindingsBySprite["root0"].path);
+            Assert.AreEqual(string.Empty, bindingsBySprite["root1"].path);
+            Assert.AreEqual("Child", bindingsBySprite["child0"].path);
+            Assert.AreEqual(typeof(SpriteRenderer), bindingsBySprite["root0"].type);
+            Assert.AreEqual(typeof(Image), bindingsBySprite["image0"].type);
+            Assert.AreEqual("m_Decoration", bindingsBySprite["deco0"].propertyName);
+        }
+
+        [Test]
+        public void GetSpriteFramesFromClipWalksOneBindingAtATimeInKeyframeOrder()
+        {
+            AnimationClip clip = BuildBoundSpriteClip();
+
+            List<(UnityEditor.EditorCurveBinding binding, Sprite sprite)> frames =
+                clip.GetSpriteFramesFromClip().ToList();
+
+            Assert.AreEqual(5, frames.Count);
+            Assert.AreEqual(5, clip.GetSpritesFromClip().Count());
+
+            // "Binding then keyframe order" is the documented contract, and a comparison over a
+            // sorted projection cannot see it -- an implementation that interleaved bindings would
+            // hold the same five sprites. Contiguity is what says the walk is per binding.
+            List<string> runs = new();
+            foreach ((UnityEditor.EditorCurveBinding binding, Sprite _) in frames)
+            {
+                string key = $"{binding.path}|{binding.propertyName}|{binding.type}";
+                if (
+                    runs.Count == 0
+                    || !string.Equals(runs[runs.Count - 1], key, StringComparison.Ordinal)
+                )
+                {
+                    runs.Add(key);
+                }
+            }
+
+            Assert.AreEqual(4, runs.Count);
+            Assert.AreEqual(
+                runs.Count,
+                runs.Distinct().Count(),
+                "one binding's frames are not contiguous, so the walk is not per binding"
+            );
+
+            List<string> rootFrames = frames
+                .Where(frame =>
+                    frame.binding.type == typeof(SpriteRenderer)
+                    && string.Equals(frame.binding.path, string.Empty, StringComparison.Ordinal)
+                    && string.Equals(
+                        frame.binding.propertyName,
+                        "m_Sprite",
+                        StringComparison.Ordinal
+                    )
+                )
+                .Select(frame => frame.sprite.name)
+                .ToList();
+
+            CollectionAssert.AreEqual(new[] { "root0", "root1" }, rootFrames);
+        }
+
+        [TestCase("", "m_Sprite", typeof(SpriteRenderer), "root0,root1")]
+        [TestCase("Child", "m_Sprite", typeof(SpriteRenderer), "child0")]
+        [TestCase(null, "m_Sprite", typeof(SpriteRenderer), "child0,root0,root1")]
+        [TestCase("", "m_Sprite", null, "image0,root0,root1")]
+        [TestCase("", null, typeof(SpriteRenderer), "deco0,root0,root1")]
+        [TestCase(null, null, null, "child0,deco0,image0,root0,root1")]
+        [TestCase("", "m_Sprite", typeof(Image), "image0")]
+        [TestCase("Missing", "m_Sprite", typeof(SpriteRenderer), "")]
+        [TestCase("", "m_Missing", typeof(SpriteRenderer), "")]
+        // A base of the binding's type matches NOTHING. Without these two rows an implementation
+        // written as `type.IsAssignableFrom(binding.type)` passes every row above, and the
+        // documented rule -- which exists so "which renderer" cannot be answered approximately --
+        // would be enforced nowhere.
+        [TestCase("", "m_Sprite", typeof(Renderer), "")]
+        [TestCase("", "m_Sprite", typeof(Graphic), "")]
+        public void GetSpritesFromClipFiltersOnEveryBindingField(
+            string path,
+            string propertyName,
+            Type type,
+            string expected
+        )
+        {
+            AnimationClip clip = BuildBoundSpriteClip();
+
+            Assert.AreEqual(expected, NamesOf(clip.GetSpritesFromClip(path, propertyName, type)));
+        }
+
+        [Test]
+        public void GetSpritesFromClipDefaultsToTheSpriteProperty()
+        {
+            AnimationClip clip = BuildBoundSpriteClip();
+
+            // The default exists so the common call is `clip.GetSpritesFromClip(path)`. It narrows
+            // the property and nothing else: the decoration curve on the same object is excluded,
+            // the Image's m_Sprite is not, because `type` defaults to "any".
+            Assert.AreEqual("image0,root0,root1", NamesOf(clip.GetSpritesFromClip(string.Empty)));
+            Assert.AreEqual("m_Sprite", UnityExtensions.SpriteBindingProperty);
+        }
+
+        [Test]
+        public void GetSpriteFramesFromClipHandlesNullClip()
+        {
+            AnimationClip clip = null;
+
+            Assert.IsEmpty(clip.GetSpriteFramesFromClip().ToList());
+            Assert.IsEmpty(clip.GetSpritesFromClip().ToList());
+            Assert.IsEmpty(clip.GetSpritesFromClip(string.Empty).ToList());
+        }
 #endif
     }
 }

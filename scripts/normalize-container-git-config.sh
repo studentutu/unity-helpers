@@ -61,4 +61,42 @@ if [ "$removed_directories" -gt 0 ]; then
     log "Removed $removed_directories non-absolute safe.directory entr(ies) copied from the host."
 fi
 
+# Point github.com at the cached-token helper, and at nothing else.
+#
+# Dev Containers' helper answers by raising a dialog on the OWNER'S DESKTOP, and `git push` /
+# `git fetch` invoke it on every operation -- so a container that authenticates through it
+# interrupts a human for work nobody is watching. `credential.helper` is multi-valued and git runs
+# EVERY value, so adding this script is not enough: an EMPTY value RESETS the accumulated list, and
+# writing the reset before the script is what discards the inherited /etc/gitconfig helper for this
+# host. Other hosts keep it untouched, because this is not a claim about them.
+#
+# The one deliberate prompt lives behind `scripts/github-token.sh --bootstrap`, which a human runs
+# once and which resets this list again to reach the Dev Containers helper directly.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOKEN_HELPER="!${SCRIPT_DIR}/github-token.sh"
+expected_github_helpers="$(printf '\n%s' "$TOKEN_HELPER")"
+
+# A URL-scoped entry matches that URL and its paths, NOT its siblings: registering github.com alone
+# leaves gist.github.com and an http:// remote reaching the Dev Containers helper, which is the
+# dialog this exists to remove.
+#
+# The list comes FROM the helper rather than being repeated here. A URL this file claims and that
+# script declines is a lockout rather than a gap -- the claim resets the inherited helper, so
+# nothing is left to answer it -- and keeping two copies is how the two disagree.
+while IFS= read -r github_url; do
+    [ -n "$github_url" ] || continue
+    helper_key="credential.${github_url}.helper"
+    current_github_helpers="$(git config --global --get-all "$helper_key" 2>/dev/null || true)"
+    if [ "$current_github_helpers" = "$expected_github_helpers" ]; then
+        continue
+    fi
+
+    git config --global --unset-all "$helper_key" 2>/dev/null || true
+    git config --global --add "$helper_key" '' 2>/dev/null || true
+    git config --global --add "$helper_key" "$TOKEN_HELPER" 2>/dev/null || true
+    log "$github_url credentials now come from the cache only (scripts/github-token.sh)."
+done <<EOF
+$(bash "${SCRIPT_DIR}/github-token.sh" --hosts)
+EOF
+
 log "Container git config normalized."

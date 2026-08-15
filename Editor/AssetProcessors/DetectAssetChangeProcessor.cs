@@ -399,10 +399,17 @@ namespace WallstopStudios.UnityHelpers.Editor.AssetProcessors
 
             if (deferProcessing)
             {
-                // Defer out of the asset-import phase: AssetDatabase.LoadAllAssetsAtPath
-                // and GetComponentsInChildren (used during callback resolution) trigger
-                // Unity's internal sprite/renderer lifecycle relays, which emit
-                // "SendMessage cannot be called..." warnings while the import is active.
+                // Defer out of the asset-import phase: work done inside OnPostprocessAllAssets
+                // runs while Unity's import guard is up, and reentering the AssetDatabase there
+                // is what the deferral exists to avoid.
+                //
+                // It does NOT make loading an asset safe, and reading it that way was wrong for
+                // three sessions (#280). Unity raises "SendMessage cannot be called during Awake,
+                // CheckConsistency, or OnValidate" around every OnValidate it runs, at any time --
+                // and loading an asset deserializes it, which runs the consumer's OnValidate right
+                // there inside the drain. A load whose answer is a Type predicate belongs on asset
+                // metadata (GetMainAssetTypeAtPath, AssetImporter.GetAtPath) instead, deferred or
+                // not.
                 AssetPostprocessorDeferral.Schedule(DrainPendingChangesAction);
                 return;
             }
@@ -1064,6 +1071,12 @@ namespace WallstopStudios.UnityHelpers.Editor.AssetProcessors
                 // Fallback for test assets: Unity's GetMainAssetTypeAtPath may return incorrect
                 // types when test classes are defined in files that don't match the class name.
                 // Actually load the asset and check its runtime type.
+                //
+                // This is the pattern the guard above exists to remove -- a load answering a type
+                // question -- and it is kept deliberately, because it is reachable only for paths
+                // under this package's own test-fixture folder and only while _includeTestAssets is
+                // set. No consumer asset can reach it, so it cannot run anyone's OnValidate but
+                // ours. It is not a template: production paths must use asset metadata.
                 if (
                     _includeTestAssets
                     && path.IndexOf(TestAssetFolderMarker, StringComparison.OrdinalIgnoreCase) >= 0
@@ -1083,6 +1096,30 @@ namespace WallstopStudios.UnityHelpers.Editor.AssetProcessors
         {
             // Scene files crash LoadAllAssetsAtPath (ReadObjectThreaded not allowed)
             if (IsScenePath(path))
+            {
+                return false;
+            }
+
+            // A prefab is never asked this question, because answering it costs the consumer a
+            // console warning on every import (#280). GetMainAssetTypeAtPath reports `GameObject`
+            // for a prefab, so a watcher on any other type falls through to here -- and
+            // LoadAllAssetsAtPath deserializes every component in the prefab, which runs each
+            // OnValidate. A consumer's OnValidate legitimately touches APIs that SendMessage, and
+            // Unity raises "SendMessage cannot be called during Awake, CheckConsistency, or
+            // OnValidate" around every one of them, at any time -- so deferring the drain does not
+            // help and never could. The load is also pure waste here: the whole decision is a Type
+            // predicate, and every loaded object is discarded.
+            //
+            // Watching a prefab by what it CONTAINS is not supported behavior (owner decision,
+            // #280). Note this is not what DetectAssetChangedOptions.SearchPrefabs does -- that
+            // option searches prefabs for instances of the HANDLER's own type, so a non-static
+            // handler can be invoked on them, and has no effect on which assets match a watcher.
+            //
+            // The cost of the guard, stated rather than discovered later: a ScriptableObject nested
+            // into a .prefab with AddObjectToAsset no longer matches a watcher on its type either.
+            // Nested sub-assets conventionally live in .asset files, which are unaffected, and
+            // there is no way to tell the two cases apart without the load that is the defect.
+            if (IsPrefabPath(path))
             {
                 return false;
             }
@@ -1660,6 +1697,12 @@ namespace WallstopStudios.UnityHelpers.Editor.AssetProcessors
                     assetPath.EndsWith(".unity", StringComparison.OrdinalIgnoreCase)
                     || assetPath.EndsWith(".scenetemplate", StringComparison.OrdinalIgnoreCase)
                 );
+        }
+
+        private static bool IsPrefabPath(string assetPath)
+        {
+            return assetPath != null
+                && assetPath.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase);
         }
     }
 }

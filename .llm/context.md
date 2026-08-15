@@ -76,7 +76,7 @@ See [create-csharp-file](./skills/create-csharp-file.md) for detailed C# rules.
 13. All code must follow [high-performance-csharp](./skills/high-performance-csharp.md) and [defensive-programming](./skills/defensive-programming.md) (never throw from public APIs; use `TryXxx` patterns; handle all inputs gracefully)
 14. For forbidden patterns and alternatives, see [forbidden-patterns reference](./references/forbidden-patterns.md)
 15. All editor mutation paths must follow the complete undo policy (see [editor-undo-complete](./skills/editor-undo-complete.md)); classify paths as Tier A/B/C and never claim full reversal for Tier C file/reimport side effects
-16. `AssetPostprocessor` callbacks MUST defer non-trivial work through `AssetPostprocessorDeferral.Schedule` to avoid `SendMessage cannot be called...` warnings during Unity's import phase (see [asset-postprocessor-safety](./skills/asset-postprocessor-safety.md))
+16. `AssetPostprocessor` callbacks MUST defer non-trivial work through `AssetPostprocessorDeferral.Schedule` to avoid `SendMessage cannot be called...` warnings during Unity's import phase — and deferral is **necessary, not sufficient**: a deferred `LoadAllAssetsAtPath` still deserializes the asset and still runs the consumer's `OnValidate`, so never answer a metadata question with a load (see [asset-postprocessor-safety](./skills/asset-postprocessor-safety.md))
 17. NEVER size an allocation from a number a payload states -- only from what it delivers. A length prefix is safe because the reader refuses one longer than the bytes it holds; a capacity is a bare claim, and six bytes can ask for 8 GB. Clamp it with `SerializationCapacityLimits.Clamp` where it is a growth hint, refuse it with `TryAccept` where it is semantic (see [untrusted-payload-limits](./skills/untrusted-payload-limits.md))
 
 ### Documentation Rules
@@ -250,22 +250,34 @@ Lint-error-code prefixes (`^[A-Z]{2,}\d{3}$` tokens like `UNH001`, `PWS002`) mus
   row reported "no token exists in the container" and handed the pull request back to the owner, and
   both were wrong. Opening a pull request or filing an issue is an agent step, not a hand-back.
 
-  In order of preference:
+  **There is exactly one way to get the credential, and it never asks the Dev Containers helper:**
 
-  1. **`$GITHUB_TOKEN` / `$GH_TOKEN`**, forwarded from the host by `remoteEnv` in
-     `.devcontainer/devcontainer.json`. Nothing to ask for; use it directly.
-  2. **The Dev Containers credential helper**, which is what `origin`'s HTTPS remote already uses:
+  ```bash
+  TOKEN="$(bash scripts/github-token.sh)"    # exit 3 and an actionable message when there is none
+  ```
 
-     ```bash
-     TOKEN=$(printf 'protocol=https\nhost=github.com\n\n' \
-       | GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null | sed -n 's/^password=//p')
-     ```
+  It reads `$GITHUB_TOKEN` / `$GH_TOKEN` when they are non-empty (in this container they are exported
+  and **empty**, which is why emptiness rather than definedness is the test) and otherwise a 0600
+  cache file. `git push` and `git fetch` read the same cache, because
+  `scripts/normalize-container-git-config.sh` installs the script as the **only** credential helper
+  for github.com in the container's `~/.gitconfig`.
 
-     `GIT_TERMINAL_PROMPT=0` is load-bearing. Without it, git falls back to its own terminal prompt
-     when the helper returns nothing and the command **hangs until it is killed** -- which is the
-     symptom that was misread as "no credential exists". The helper itself asks the host, so the
-     first call in a fresh host session can raise a dialog **on the owner's desktop**; it is answered
-     once and cached, and every later call is silent.
+  **NEVER run `git credential fill`, and never invoke the Dev Containers helper directly.** That
+  helper answers by raising a dialog **on the owner's desktop**, one per invocation — a session that
+  probes it, then pushes, then retries has interrupted a human three times for work nobody was
+  watching. The single deliberate prompt lives behind `npm run github:token:bootstrap`, which **a
+  human** runs once per container; `npm run github:token:store` takes a pasted token on stdin with no
+  dialog at all. If the script exits 3, report that and ask — do not go looking for another way to
+  ask the desktop.
+
+  With the cache populated nothing prompts at all. With it **empty**, git falls back to the editor's
+  own `GIT_ASKPASS` dialog, which a helper cannot suppress — so an exit 3 is a request for a human,
+  not an invitation to retry the operation until something answers.
+
+  When it does prompt: **hang versus immediate answer is the only discriminator**, never empty
+  output. A blocked helper is a dialog nobody has answered yet, and reading its truncated empty read
+  as "no credential exists" is how three sessions concluded the container had none and handed a
+  finished branch back without pushing it.
 
   Never echo the token, never write it to a file in the working tree, and pass it to a subprocess
   through the environment rather than on a command line.

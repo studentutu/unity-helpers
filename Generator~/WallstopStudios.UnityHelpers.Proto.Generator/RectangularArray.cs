@@ -523,10 +523,17 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
         /// because <c>long</c> is not wide enough to hold three <c>int</c> dimensions and C#
         /// arithmetic wraps silently -- and a wrapped product is one an attacker picks.
         /// </para>
+        /// <para>
+        /// The largest axis is folded beside the product because the product stops bounding the axes
+        /// the moment one of them is zero: <c>[int.MaxValue, 0]</c> multiplies to zero, equals an
+        /// empty run, and reaches <c>new int[2147483647, 0]</c>.
+        /// </para>
         /// </remarks>
         private void EmitShapeCheck(Writer writer)
         {
-            string product = "(long)" + Dimension(0);
+            string firstDimension = Dimension(0);
+            string product = "(long)" + firstDimension;
+            string largest = firstDimension;
             for (int axis = 1; axis < _rank; axis++)
             {
                 product =
@@ -536,9 +543,17 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                     + ", "
                     + Dimension(axis)
                     + ")";
+                largest =
+                    NestedCollections.Proto
+                    + ".WProtoRectangular.LargerDimension("
+                    + largest
+                    + ", "
+                    + Dimension(axis)
+                    + ")";
             }
 
             writer.Line("long declaredElements = " + product + ";");
+            writer.Line("int largestDimension = " + largest + ";");
             writer.Line(
                 "if (!"
                     + NestedCollections.Proto
@@ -548,7 +563,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                     + DimensionCount
                     + ", declaredElements, "
                     + Inner.ReadLocal
-                    + ".Length))"
+                    + ".Length, largestDimension))"
                     + Writer.Open
             );
             writer.Indent();

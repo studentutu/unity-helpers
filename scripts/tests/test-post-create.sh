@@ -98,7 +98,7 @@ git_index_mode() {
     local rel_path
     rel_path="$(relative_path "$file_path")"
 
-    git -C "$REPO_ROOT" ls-files -s -- "$rel_path" 2>/dev/null | sed -E 's/^([0-9]+).*/\1/' | head -n 1
+    git -C "$REPO_ROOT" ls-files -s -- "$rel_path" 2>/dev/null | sed -E 's/^([0-9]+).*/\1/' | head -n 1 || true
 }
 
 permission_diagnostics() {
@@ -715,9 +715,9 @@ fi
 echo -e "${BLUE}Checking command ordering...${NC}"
 
 # Only check non-comment lines (skip lines starting with optional whitespace + #)
-CHOWN_LINE=$(grep -n 'sudo chown' "$POST_CREATE" | grep -vE '^[[:space:]]*[0-9]*:[[:space:]]*#' | head -1 | cut -d: -f1)
-DOTNET_LINE=$(grep -n 'dotnet tool restore' "$POST_CREATE" | grep -vE '^[[:space:]]*[0-9]*:[[:space:]]*#' | head -1 | cut -d: -f1)
-NPM_LINE=$(grep -nE 'npm ci|npm i ' "$POST_CREATE" | grep -vE '^[[:space:]]*[0-9]*:[[:space:]]*#' | head -1 | cut -d: -f1)
+CHOWN_LINE=$(grep -n 'sudo chown' "$POST_CREATE" | grep -vE '^[[:space:]]*[0-9]*:[[:space:]]*#' | head -1 | cut -d: -f1 || true)
+DOTNET_LINE=$(grep -n 'dotnet tool restore' "$POST_CREATE" | grep -vE '^[[:space:]]*[0-9]*:[[:space:]]*#' | head -1 | cut -d: -f1 || true)
+NPM_LINE=$(grep -nE 'npm ci|npm i ' "$POST_CREATE" | grep -vE '^[[:space:]]*[0-9]*:[[:space:]]*#' | head -1 | cut -d: -f1 || true)
 
 if [[ -n "$CHOWN_LINE" && -n "$DOTNET_LINE" ]]; then
     if [[ "$CHOWN_LINE" -lt "$DOTNET_LINE" ]]; then
@@ -727,8 +727,15 @@ if [[ -n "$CHOWN_LINE" && -n "$DOTNET_LINE" ]]; then
             "chown on line $CHOWN_LINE, dotnet on line $DOTNET_LINE"
     fi
 else
+    # Each marker is reported by name. Before these lookups were guarded against a SIGPIPE from the
+    # short-circuiting `head`, a missing marker made the command substitution non-zero and `set -e`
+    # killed the whole suite with no message; guarding it without these branches would have traded
+    # that for a silently skipped ordering assertion, which is worse than either.
     if [[ -z "$CHOWN_LINE" ]]; then
         fail "chown command exists in post-create.sh" "No sudo chown found"
+    fi
+    if [[ -z "$DOTNET_LINE" ]]; then
+        fail "dotnet tool restore exists in post-create.sh" "No dotnet tool restore found"
     fi
 fi
 
@@ -739,6 +746,8 @@ if [[ -n "$CHOWN_LINE" && -n "$NPM_LINE" ]]; then
         fail "chown runs before npm install" \
             "chown on line $CHOWN_LINE, npm on line $NPM_LINE"
     fi
+elif [[ -z "$NPM_LINE" ]]; then
+    fail "npm install exists in post-create.sh" "No npm ci / npm i found"
 fi
 
 # ── Test 9: Script handles workspace folder detection ────────────────────────

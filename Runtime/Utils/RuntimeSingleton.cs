@@ -23,6 +23,10 @@ namespace WallstopStudios.UnityHelpers.Utils
     /// <remarks>
     /// Access the global instance via <see cref="Instance"/>; if no active instance exists,
     /// a new <see cref="GameObject"/> named "&lt;Type&gt;-Singleton" is created and the component is added.
+    /// Annotate the type with
+    /// <see cref="WallstopStudios.UnityHelpers.Core.Attributes.SingletonCreationAttribute"/> and
+    /// <see cref="SingletonCreationPolicy.NeverCreate"/> to keep that from happening, which is what a
+    /// singleton holding authored <c>[SerializeField]</c> state wants.
     ///
     /// Lifecycle:
     /// - On first access, searches for an active instance; otherwise creates one.
@@ -47,9 +51,25 @@ namespace WallstopStudios.UnityHelpers.Utils
 
         public static long InitializeCount => Interlocked.Read(ref _initializeCount);
 
+        /// <summary>
+        /// Gets what <see cref="Instance"/> does when no instance exists, taken from the
+        /// <see cref="SingletonCreationAttribute"/> on <typeparamref name="T"/> and
+        /// <see cref="SingletonCreationPolicy.CreateOnDemand"/> when there is none.
+        /// </summary>
+        public static SingletonCreationPolicy CreationPolicy => _creationPolicy;
+
         protected static long _initializeCount;
 
         protected internal static T _instance;
+
+        private static readonly SingletonCreationPolicy _creationPolicy = ResolveCreationPolicy();
+
+        // -1 rather than 0, because frame 0 is a real frame.
+        private static int _creationRefusedFrame = -1;
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        private static bool _creationRefusedWarningLogged;
+#endif
 
         static RuntimeSingleton()
         {
@@ -59,6 +79,26 @@ namespace WallstopStudios.UnityHelpers.Utils
                 () => _instance,
                 () => Resources.FindObjectsOfTypeAll<T>()
             );
+        }
+
+        private static SingletonCreationPolicy ResolveCreationPolicy()
+        {
+            if (
+                !ReflectionHelpers.TryGetAttributeSafe(
+                    typeof(T),
+                    out SingletonCreationAttribute attribute,
+                    inherit: true
+                )
+            )
+            {
+                return SingletonCreationPolicy.CreateOnDemand;
+            }
+
+            // An unrecognized value is treated as the default rather than as a refusal: a policy this
+            // build does not know about must not silently stop a singleton from existing.
+            return attribute.Policy == SingletonCreationPolicy.NeverCreate
+                ? SingletonCreationPolicy.NeverCreate
+                : SingletonCreationPolicy.CreateOnDemand;
         }
 
         /// <summary>
@@ -71,7 +111,8 @@ namespace WallstopStudios.UnityHelpers.Utils
         protected virtual bool LogErrorOnDestruction => true;
 
         /// <summary>
-        /// Gets the global instance, creating one if needed.
+        /// Gets the global instance, creating one if needed. Returns <c>null</c> when none exists and
+        /// <see cref="CreationPolicy"/> is <see cref="SingletonCreationPolicy.NeverCreate"/>.
         /// </summary>
         /// <example>
         /// <code>
@@ -96,6 +137,25 @@ namespace WallstopStudios.UnityHelpers.Utils
 
                 UnityMainThreadGuard.EnsureMainThread();
 
+                // An empty search is remembered for the rest of the FRAME, and only that. Without it
+                // a NeverCreate singleton with nothing in the scene pays a full FindAnyObjectByType
+                // on every access, forever -- which is exactly what the `if (X.Instance != null)`
+                // guard this type's documentation recommends does, once per call site per frame.
+                // CreateOnDemand never had the problem: it creates one and caches it.
+                //
+                // A frame is the bound rather than "until something calls ClearInstance" because
+                // every stronger claim is wrong somewhere. "Nothing can appear without Awake
+                // assigning the cache" is false in the editor, where Unity does not run Awake at all
+                // (measured: AddComponent produced a live instance a sticky refusal then hid), and
+                // false for a subclass whose Awake override forgets base.Awake(). Scoping to the
+                // frame removes the invariant instead of weakening it: the worst case is one search
+                // per frame, which is what a single guarded call site already cost.
+                int frame = Time.frameCount;
+                if (_creationRefusedFrame == frame)
+                {
+                    return null;
+                }
+
                 _instance = FindAnyObjectByType<T>(FindObjectsInactive.Exclude);
                 if (_instance != null)
                 {
@@ -103,6 +163,13 @@ namespace WallstopStudios.UnityHelpers.Utils
                 }
 
                 Type type = typeof(T);
+                if (_creationPolicy == SingletonCreationPolicy.NeverCreate)
+                {
+                    _creationRefusedFrame = frame;
+                    WarnCreationRefused(type);
+                    return null;
+                }
+
                 GameObject instance = new($"{type.Name}-Singleton", type);
                 if (_instance == null)
                 {
@@ -122,6 +189,12 @@ namespace WallstopStudios.UnityHelpers.Utils
         /// instance on the next <see cref="Instance"/> access. Automatic clearing on domain reload is
         /// handled by <see cref="RuntimeSingletonRegistry"/> because Unity disallows
         /// <c>[RuntimeInitializeOnLoadMethod]</c> on methods in generic classes.
+        ///
+        /// <b>There is no fresh instance for a <see cref="SingletonCreationPolicy.NeverCreate"/>
+        /// singleton.</b> This destroys every live instance, including one authored in a scene, and
+        /// such a type will not build a replacement -- <see cref="Instance"/> returns <c>null</c>
+        /// until something else creates one. Clearing those is for tests and for editor tooling that
+        /// is about to reload the scene, not for ordinary runtime resets.
         /// </remarks>
         public static void ClearInstance()
         {
@@ -153,6 +226,31 @@ namespace WallstopStudios.UnityHelpers.Utils
 
             Interlocked.Exchange(ref _initializeCount, 0);
             _instance = null;
+            // An explicit clear is exactly the moment a remembered refusal should end: the next
+            // access is a fresh question, and a test that expects the warning twice would otherwise
+            // never see it a second time.
+            _creationRefusedFrame = -1;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            _creationRefusedWarningLogged = false;
+#endif
+        }
+
+        private static void WarnCreationRefused(Type type)
+        {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (_creationRefusedWarningLogged)
+            {
+                return;
+            }
+
+            _creationRefusedWarningLogged = true;
+            Debug.LogWarning(
+                $"RuntimeSingleton could not locate an active instance of {type.FullName}, and "
+                    + $"{nameof(SingletonCreationPolicy)}.{nameof(SingletonCreationPolicy.NeverCreate)} forbids creating one. Returning null."
+            );
+#else
+            _ = type;
+#endif
         }
 
         protected virtual void Awake()

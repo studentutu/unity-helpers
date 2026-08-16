@@ -84,6 +84,60 @@ namespace WallstopStudios.UnityHelpers.Editor.Tags
 
                 AutoLoadSingletonEntry[] autoLoadEntries = BuildAutoLoadSingletonEntries();
 
+                // Both attribute sets, because TypeCache reports only types carrying the attribute
+                // DIRECTLY while the runtime resolves SingletonCreationAttribute with inherit: true.
+                // An annotated abstract base with a concrete [AutoLoadSingleton] subclass is the
+                // contradiction below, and enumerating either set alone cannot see it: the base is
+                // skipped as abstract and the subclass carries no SingletonCreationAttribute of its
+                // own.
+                HashSet<Type> singletonCandidates = new();
+                foreach (
+                    Type annotated in TypeCache.GetTypesWithAttribute<SingletonCreationAttribute>()
+                )
+                {
+                    singletonCandidates.Add(annotated);
+                }
+
+                foreach (
+                    Type annotated in TypeCache.GetTypesWithAttribute<AutoLoadSingletonAttribute>()
+                )
+                {
+                    singletonCandidates.Add(annotated);
+                }
+
+                foreach (Type annotated in singletonCandidates)
+                {
+                    if (
+                        annotated == null
+                        || annotated.IsAbstract
+                        || annotated.ContainsGenericParameters
+                    )
+                    {
+                        continue;
+                    }
+
+                    _ = ReflectionHelpers.TryGetAttributeSafe(
+                        annotated,
+                        out SingletonCreationAttribute creation,
+                        inherit: true
+                    );
+                    _ = ReflectionHelpers.TryGetAttributeSafe(
+                        annotated,
+                        out AutoLoadSingletonAttribute autoLoad,
+                        inherit: false
+                    );
+
+                    string problem = DescribeSingletonCreationProblem(
+                        annotated,
+                        creation,
+                        autoLoad
+                    );
+                    if (problem != null)
+                    {
+                        Debug.LogWarning(problem);
+                    }
+                }
+
                 // Get or create the cache asset
                 AttributeMetadataCache cache = GetOrCreateCache(out bool metadataChanged);
 
@@ -311,6 +365,59 @@ namespace WallstopStudios.UnityHelpers.Editor.Tags
 
             entries.Sort((left, right) => string.CompareOrdinal(left.typeName, right.typeName));
             return entries.ToArray();
+        }
+
+        /// <summary>
+        /// Reports a <see cref="SingletonCreationAttribute"/> that cannot do what its author meant,
+        /// or <c>null</c> when the annotation is sound.
+        /// </summary>
+        /// <remarks>
+        /// The attributes arrive as arguments rather than being read off <paramref name="type"/> so a
+        /// test can drive every branch without annotating a deliberately wrong type -- which
+        /// <see cref="TypeCache"/> would then find on every editor load, and this method would then
+        /// complain about forever. It is the technique <c>RuntimeMismatchSingleton</c> already uses
+        /// for the auto-loader's own mismatch rules.
+        /// </remarks>
+        /// <param name="type">The annotated type.</param>
+        /// <param name="creation">Its <see cref="SingletonCreationAttribute"/>, or <c>null</c>.</param>
+        /// <param name="autoLoad">Its <see cref="AutoLoadSingletonAttribute"/>, or <c>null</c>.</param>
+        /// <returns>A message naming the problem, or <c>null</c>.</returns>
+        internal static string DescribeSingletonCreationProblem(
+            Type type,
+            SingletonCreationAttribute creation,
+            AutoLoadSingletonAttribute autoLoad
+        )
+        {
+            if (type == null || creation == null)
+            {
+                return null;
+            }
+
+            if (
+                !IsSubclassOfRawGeneric(
+                    type,
+                    typeof(WallstopStudios.UnityHelpers.Utils.RuntimeSingleton<>)
+                )
+            )
+            {
+                return $"AttributeMetadataCacheGenerator: {type.FullName} is marked with [{nameof(SingletonCreationAttribute)}] but does not derive from RuntimeSingleton<>, so the attribute has no effect. ScriptableObjectSingleton<> never creates an asset at runtime and needs no policy.";
+            }
+
+            if (creation.Policy != SingletonCreationPolicy.NeverCreate || autoLoad == null)
+            {
+                return null;
+            }
+
+            // AfterSceneLoad is the one phase where an authored instance already exists, so
+            // auto-loading a NeverCreate singleton there binds the static cache to it. Every earlier
+            // phase runs before any GameObject exists, so the lookup can only find nothing and the
+            // pair is a contradiction rather than a choice.
+            if (autoLoad.LoadType == RuntimeInitializeLoadType.AfterSceneLoad)
+            {
+                return null;
+            }
+
+            return $"AttributeMetadataCacheGenerator: {type.FullName} is marked [{nameof(AutoLoadSingletonAttribute)}({nameof(RuntimeInitializeLoadType)}.{autoLoad.LoadType})] and [{nameof(SingletonCreationAttribute)}({nameof(SingletonCreationPolicy)}.{nameof(SingletonCreationPolicy.NeverCreate)})]. That phase runs before any scene has loaded, so the auto-load can only find nothing. Use {nameof(RuntimeInitializeLoadType)}.{nameof(RuntimeInitializeLoadType.AfterSceneLoad)} or drop one of the two attributes.";
         }
 
         private static SingletonAutoLoadKind? ResolveSingletonKind(Type type)

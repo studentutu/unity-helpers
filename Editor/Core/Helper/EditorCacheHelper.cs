@@ -232,10 +232,10 @@ namespace WallstopStudios.UnityHelpers.Editor.Core.Helper
         /// <returns>A 1x1 texture filled with the color represented by the key.</returns>
         public static Texture2D GetOrCreateTexture(int colorKey)
         {
-            float r = ((colorKey >> 24) & 0xFF) / 255f;
-            float g = ((colorKey >> 16) & 0xFF) / 255f;
-            float b = ((colorKey >> 8) & 0xFF) / 255f;
-            float a = (colorKey & 0xFF) / 255f;
+            float r = ColorQuantization.ToNormalized((byte)((colorKey >> 24) & 0xFF));
+            float g = ColorQuantization.ToNormalized((byte)((colorKey >> 16) & 0xFF));
+            float b = ColorQuantization.ToNormalized((byte)((colorKey >> 8) & 0xFF));
+            float a = ColorQuantization.ToNormalized((byte)(colorKey & 0xFF));
             Color color = new(r, g, b, a);
             return GetSolidTexture(color);
         }
@@ -609,22 +609,34 @@ namespace WallstopStudios.UnityHelpers.Editor.Core.Helper
         public static int GetColorHashCode(Color color)
         {
             return Objects.HashCode(
-                Mathf.RoundToInt(color.r * 255f),
-                Mathf.RoundToInt(color.g * 255f),
-                Mathf.RoundToInt(color.b * 255f),
-                Mathf.RoundToInt(color.a * 255f)
+                ColorQuantization.ToByte(color.r),
+                ColorQuantization.ToByte(color.g),
+                ColorQuantization.ToByte(color.b),
+                ColorQuantization.ToByte(color.a)
             );
         }
 
         /// <summary>
-        /// Comparer for Unity Color values that uses approximate equality.
+        /// Comparer for Unity Color values that treats two colors as one key when they quantize to
+        /// the same 8-bit channels.
         /// </summary>
+        /// <remarks>
+        /// Deliberately not <see cref="AreColorsEqual"/>. That compares floats, while
+        /// <see cref="GetColorHashCode"/> quantizes, so two colors either side of a channel boundary
+        /// compared equal and hashed apart - which is a broken equality contract, and lets one cache
+        /// hold two entries for a key it considers single. Quantizing both sides also states what a
+        /// texture cache actually means by equal: a solid texture stores 8 bits per channel, so
+        /// colors sharing a quantized channel share a texture.
+        /// </remarks>
         public sealed class ColorComparer : IEqualityComparer<Color>
         {
             /// <inheritdoc />
             public bool Equals(Color x, Color y)
             {
-                return AreColorsEqual(x, y);
+                return ColorQuantization.ToByte(x.r) == ColorQuantization.ToByte(y.r)
+                    && ColorQuantization.ToByte(x.g) == ColorQuantization.ToByte(y.g)
+                    && ColorQuantization.ToByte(x.b) == ColorQuantization.ToByte(y.b)
+                    && ColorQuantization.ToByte(x.a) == ColorQuantization.ToByte(y.a);
             }
 
             /// <inheritdoc />

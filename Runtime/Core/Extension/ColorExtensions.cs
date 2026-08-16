@@ -57,20 +57,23 @@ namespace WallstopStudios.UnityHelpers.Core.Extension
         /// Thread Safety: Thread-safe, no shared state.
         /// Performance: O(1) - simple arithmetic and string formatting.
         /// Allocations: Allocates one string for the result.
-        /// Edge Cases: Color component values outside [0,1] are clamped to valid range.
+        /// Edge Cases: Color component values outside [0,1] are clamped to valid range, and NaN encodes to 00.
+        /// Each channel is rounded to the nearest of the 256 representable values via
+        /// <see cref="ColorQuantization.ToByte(float)"/>, so the result matches Unity's own
+        /// <see cref="ColorUtility.ToHtmlStringRGBA(Color)"/> and the <see cref="Color32"/> the same color casts to.
         /// </remarks>
         public static string ToHex(this Color color, bool includeAlpha = true)
         {
-            int r = (int)(Mathf.Clamp01(color.r) * 255f);
-            int g = (int)(Mathf.Clamp01(color.g) * 255f);
-            int b = (int)(Mathf.Clamp01(color.b) * 255f);
+            byte r = ColorQuantization.ToByte(color.r);
+            byte g = ColorQuantization.ToByte(color.g);
+            byte b = ColorQuantization.ToByte(color.b);
 
             if (!includeAlpha)
             {
                 return $"#{r:X2}{g:X2}{b:X2}";
             }
 
-            int a = (int)(Mathf.Clamp01(color.a) * 255f);
+            byte a = ColorQuantization.ToByte(color.a);
             return $"#{r:X2}{g:X2}{b:X2}{a:X2}";
         }
 
@@ -438,9 +441,9 @@ namespace WallstopStudios.UnityHelpers.Core.Extension
                 }
                 FastVector3Int dominant = largest.Value.Key;
                 return new Color(
-                    (dominant.x * bucketSize) / 255f,
-                    (dominant.y * bucketSize) / 255f,
-                    (dominant.z * bucketSize) / 255f,
+                    BucketToChannel(dominant.x, bucketSize),
+                    BucketToChannel(dominant.y, bucketSize),
+                    BucketToChannel(dominant.z, bucketSize),
                     1f
                 );
             }
@@ -662,6 +665,16 @@ namespace WallstopStudios.UnityHelpers.Core.Extension
             float b = 0f;
             float a = 0f;
 
+            // Kept alongside the weighted sums for the case where every surviving pixel weighs
+            // nothing. Luma is zero for black, so a wholly black sprite drove totalWeight to zero,
+            // skipped the division, and returned the accumulators untouched - Color.clear, from
+            // opaque input.
+            int count = 0;
+            float plainR = 0f;
+            float plainG = 0f;
+            float plainB = 0f;
+            float plainA = 0f;
+
             switch (pixels)
             {
                 case IReadOnlyList<Color> colorList:
@@ -680,6 +693,11 @@ namespace WallstopStudios.UnityHelpers.Core.Extension
                         b += pixel.b * weight;
                         a += pixel.a * weight;
                         totalWeight += weight;
+                        plainR += pixel.r;
+                        plainG += pixel.g;
+                        plainB += pixel.b;
+                        plainA += pixel.a;
+                        ++count;
                     }
 
                     break;
@@ -698,6 +716,11 @@ namespace WallstopStudios.UnityHelpers.Core.Extension
                         b += pixel.b * weight;
                         a += pixel.a * weight;
                         totalWeight += weight;
+                        plainR += pixel.r;
+                        plainG += pixel.g;
+                        plainB += pixel.b;
+                        plainA += pixel.a;
+                        ++count;
                     }
 
                     break;
@@ -717,6 +740,11 @@ namespace WallstopStudios.UnityHelpers.Core.Extension
                         b += pixel.b * weight;
                         a += pixel.a * weight;
                         totalWeight += weight;
+                        plainR += pixel.r;
+                        plainG += pixel.g;
+                        plainB += pixel.b;
+                        plainA += pixel.a;
+                        ++count;
                     }
 
                     break;
@@ -729,9 +757,15 @@ namespace WallstopStudios.UnityHelpers.Core.Extension
                 g /= totalWeight;
                 b /= totalWeight;
                 a /= totalWeight;
+                return new Color(r, g, b, a);
             }
 
-            return new Color(r, g, b, a);
+            if (count > 0)
+            {
+                return new Color(plainR / count, plainG / count, plainB / count, plainA / count);
+            }
+
+            return Color.clear;
         }
 
         // Find dominant color using simple clustering
@@ -832,11 +866,18 @@ namespace WallstopStudios.UnityHelpers.Core.Extension
 
             FastVector3Int dominantBucket = largest.Value.Key;
             return new Color(
-                dominantBucket.x * bucketSize / 255f,
-                dominantBucket.y * bucketSize / 255f,
-                dominantBucket.z * bucketSize / 255f,
+                BucketToChannel(dominantBucket.x, bucketSize),
+                BucketToChannel(dominantBucket.y, bucketSize),
+                BucketToChannel(dominantBucket.z, bucketSize),
                 1f
             );
+        }
+
+        // The topmost bucket represents channel 256, which is not a channel. Without the clamp a
+        // dominant white returns 1.0039 and the caller's "color" is outside the range it declares.
+        private static float BucketToChannel(int bucket, int bucketSize)
+        {
+            return ColorQuantization.ToNormalized((byte)Mathf.Min(bucket * bucketSize, 255));
         }
 
         // Helper struct for LAB color space

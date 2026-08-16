@@ -51,8 +51,8 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
         public void ToHexFormatsCorrectly()
         {
             Color color = new(0.1f, 0.2f, 0.3f, 0.4f);
-            Assert.AreEqual("#19334C66", color.ToHex());
-            Assert.AreEqual("#19334C", color.ToHex(includeAlpha: false));
+            Assert.AreEqual("#1A334C66", color.ToHex());
+            Assert.AreEqual("#1A334C", color.ToHex(includeAlpha: false));
         }
 
         [Test]
@@ -61,6 +61,52 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
             Color color = new(1.5f, -0.25f, 2f, -1f);
             Assert.AreEqual("#FF00FF00", color.ToHex());
             Assert.AreEqual("#FF00FF", color.ToHex(includeAlpha: false));
+        }
+
+        /// <remarks>
+        /// A project that quantizes the same color two different ways has no single answer for what
+        /// color it is. Unity's own conversion is the one every other consumer of the color sees, so
+        /// this asserts agreement rather than merely asserting that we round.
+        /// </remarks>
+        [Test]
+        public void ToHexAgreesWithUnityColorUtility()
+        {
+            IRandom random = PRNG.Instance;
+            for (int i = 0; i < 4_096; ++i)
+            {
+                Color color = new(
+                    random.NextFloat(),
+                    random.NextFloat(),
+                    random.NextFloat(),
+                    random.NextFloat()
+                );
+                Assert.AreEqual($"#{ColorUtility.ToHtmlStringRGBA(color)}", color.ToHex());
+                Assert.AreEqual(
+                    $"#{ColorUtility.ToHtmlStringRGB(color)}",
+                    color.ToHex(includeAlpha: false)
+                );
+            }
+        }
+
+        [Test]
+        public void ToHexRoundTripsEveryChannelValue()
+        {
+            for (int channel = 0; channel <= byte.MaxValue; ++channel)
+            {
+                Color32 original = new((byte)channel, (byte)channel, (byte)channel, (byte)channel);
+                string hex = ((Color)original).ToHex();
+                Assert.IsTrue(
+                    ColorUtility.TryParseHtmlString(hex, out Color parsed),
+                    $"{hex} was not parseable."
+                );
+                Color32 roundTripped = parsed;
+                Assert.AreEqual(
+                    original.r,
+                    roundTripped.r,
+                    $"Channel {channel} did not round-trip."
+                );
+                Assert.AreEqual(original.a, roundTripped.a, $"Alpha {channel} did not round-trip.");
+            }
         }
 
         [Test]
@@ -247,6 +293,74 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
             Assert.Less(circularDistance, 0.05f, $"Hue {hue} should wrap near zero");
             Assert.Greater(saturation, 0.9f);
             Assert.Greater(value, 0.9f);
+        }
+
+        /// <remarks>
+        /// The bucket a saturated channel lands in represents channel 256, which is not a channel,
+        /// so the decode used to hand back 1.0039 for a dominant white - a "color" outside the range
+        /// its own type declares.
+        /// </remarks>
+        [Test]
+        public void GetAverageColorDominantStaysInsideTheUnitRange()
+        {
+            foreach (float channel in new[] { 1f, 0.99f, 0.75f, 0.5f, 0f })
+            {
+                Color input = new(channel, channel, channel, 1f);
+                Color[] pixels = { input, input };
+
+                Color result = pixels.GetAverageColor(ColorAveragingMethod.Dominant);
+
+                Assert.LessOrEqual(result.r, 1f, $"{channel} overshot on red.");
+                Assert.LessOrEqual(result.g, 1f, $"{channel} overshot on green.");
+                Assert.LessOrEqual(result.b, 1f, $"{channel} overshot on blue.");
+                Assert.GreaterOrEqual(result.r, 0f, $"{channel} undershot on red.");
+            }
+        }
+
+        /// <remarks>
+        /// Weighted scales each pixel by its own perceived luma, so a wholly black selection weighed
+        /// nothing: the total weight was zero, the division was skipped, and the untouched
+        /// accumulators came back as Color.clear - fully transparent, from opaque input. An empty
+        /// selection still reports clear, which is the documented default for no pixels at all.
+        /// </remarks>
+        [Test]
+        public void GetAverageColorWeightedKeepsAlphaWhenEveryPixelWeighsNothing()
+        {
+            Color[] black = { Color.black, Color.black };
+            Color result = black.GetAverageColor(ColorAveragingMethod.Weighted);
+            Assert.AreEqual(1f, result.a, 1e-5f, "Opaque black averaged to a transparent color.");
+            AssertColorsApproximatelyEqual(Color.black, result, 1e-5f);
+
+            Color[] mixedAlpha = { new(0f, 0f, 0f, 0.5f), new(0f, 0f, 0f, 1f) };
+            Color averaged = mixedAlpha.GetAverageColor(ColorAveragingMethod.Weighted);
+            Assert.AreEqual(0.75f, averaged.a, 1e-5f, "Zero-weight pixels lost their alpha mean.");
+
+            Assert.AreEqual(
+                Color.clear,
+                Array.Empty<Color>().GetAverageColor(ColorAveragingMethod.Weighted)
+            );
+        }
+
+        /// <remarks>
+        /// Pins the cases the zero-weight fallback must not disturb: wherever any pixel carries
+        /// luma, the weighted mean is unchanged.
+        /// </remarks>
+        [Test]
+        public void GetAverageColorWeightedIsUnchangedWhereAnyPixelCarriesLuma()
+        {
+            Color[] redAndBlack = { Color.red, Color.black };
+            AssertColorsApproximatelyEqual(
+                Color.red,
+                redAndBlack.GetAverageColor(ColorAveragingMethod.Weighted),
+                1e-5f
+            );
+
+            Color[] blackAndWhite = { Color.black, Color.white };
+            AssertColorsApproximatelyEqual(
+                Color.white,
+                blackAndWhite.GetAverageColor(ColorAveragingMethod.Weighted),
+                1e-5f
+            );
         }
 
         [Test]

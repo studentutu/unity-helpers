@@ -865,7 +865,9 @@
         "surrogated",
         "unported",
         "descheduled",
-        "protoc"
+        "protoc",
+        "quantizers",
+        "luma"
       ]
     }
   ],

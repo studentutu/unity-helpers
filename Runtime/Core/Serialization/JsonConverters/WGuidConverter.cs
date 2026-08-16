@@ -32,7 +32,7 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.JsonConverters
                     return WGuid.Empty;
                 }
 
-                if (WGuid.TryParse(value, out WGuid parsed))
+                if (TryReadText(value, out WGuid parsed))
                 {
                     return parsed;
                 }
@@ -62,6 +62,25 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.JsonConverters
             writer.WriteStringValue(value.ToString());
         }
 
+        /// <summary>
+        /// The single place a GUID's text becomes a <see cref="WGuid"/>, because this converter
+        /// accepts it in two shapes and they must agree.
+        /// </summary>
+        /// <remarks>
+        /// <see cref="WGuid.TryParse(string)"/> alone is not enough: <see cref="WGuid.Empty"/> is
+        /// what an unset id writes and it is not a version-4 GUID, so parsing rejects the very text
+        /// this converter produced.
+        /// </remarks>
+        private static bool TryReadText(string value, out WGuid result)
+        {
+            if (WGuid.TryParse(value, out result))
+            {
+                return true;
+            }
+
+            return Guid.TryParse(value, out Guid raw) && WGuid.TryCreate(raw, out result);
+        }
+
         private static WGuid ReadFromObject(ref Utf8JsonReader reader)
         {
             long low = 0L;
@@ -76,7 +95,7 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.JsonConverters
                 {
                     if (!string.IsNullOrEmpty(guidString))
                     {
-                        if (WGuid.TryParse(guidString, out WGuid parsed))
+                        if (TryReadText(guidString, out WGuid parsed))
                         {
                             return parsed;
                         }
@@ -97,7 +116,17 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.JsonConverters
                             buffer.Slice(8, 8),
                             unchecked((ulong)high)
                         );
-                        return new WGuid(new Guid(buffer));
+                        // A payload states the two halves; the constructor validates them and
+                        // throws FormatException, which is not the answer a converter owes a reader.
+                        if (WGuid.TryCreate(new Guid(buffer), out WGuid fromHalves))
+                        {
+                            return fromHalves;
+                        }
+
+                        throw new JsonException(
+                            $"{WGuid.LowFieldName}/{WGuid.HighFieldName} on {nameof(WGuid)} do not "
+                                + "form a version 4 GUID."
+                        );
                     }
 
                     return WGuid.Empty;

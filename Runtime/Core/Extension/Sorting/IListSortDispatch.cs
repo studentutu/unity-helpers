@@ -206,6 +206,7 @@ namespace WallstopStudios.UnityHelpers.Core.Extension
 
             comparer ??= Comparer<T>.Default;
 
+            // Deliberately re-read: the comparer is caller code and can shorten the list.
             T previous = list[0];
             for (int i = 1; i < list.Count; ++i)
             {

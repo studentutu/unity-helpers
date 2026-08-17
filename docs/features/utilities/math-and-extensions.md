@@ -629,6 +629,67 @@ end up disagreeing about which pixels are transparent.
 
 All three clamp: values outside `[0, 1]` saturate and `NaN` encodes to `0`.
 
+### Readable Text on Any Background
+
+`ColorContrast` answers "can this be read against that?" the way
+[WCAG](https://www.w3.org/TR/WCAG21/#contrast-minimum) defines it.
+
+```csharp
+using WallstopStudios.UnityHelpers.Core.Helper;
+
+Color label = ColorContrast.ReadableTextColor(buttonColor);   // black or white, whichever wins
+float ratio = ColorContrast.ContrastRatio(buttonColor, label);
+bool readable = ratio >= ColorContrast.MinimumReadableRatio;  // 4.5:1, WCAG AA body text
+```
+
+The tempting shortcut — threshold the familiar `0.299r + 0.587g + 0.114b` luma — measures perceived
+brightness, and brightness is not contrast. Contrast is a ratio between two colors' _relative
+luminance_, computed on linearized channels with different weights. The two disagree most on saturated
+greens and cyans, which is exactly where a button palette lives: on `rgb(0, 0.937, 0)` the luma rule
+picks white at **1.58:1** where black gives **13.32:1**.
+
+`ReadableTextColor` has no threshold to tune. It computes both candidate ratios and returns the winner.
+Every channel is bounded before it is linearized, so an HDR or NaN color yields a luminance in `[0, 1]`
+and a ratio in `[1, 21]` rather than nonsense.
+
+### Resampling a Texture
+
+`TextureResampling` is the matching single rule for scaling: where a destination pixel samples the
+source, and how colors of different opacity are allowed to mix. `TextureScale`, the Image Blur tool
+and the sprite sheet extractor's previews all go through it.
+
+```csharp
+using WallstopStudios.UnityHelpers.Core.Helper;
+
+float ratio = (float)sourceWidth / destinationWidth;
+
+// Bilinear: a coordinate in source pixel centers. Integer part picks the first of two
+// pixels to blend; fractional part is the weight toward the second.
+float coordinate = TextureResampling.BilinearSourceCoordinate(x, ratio, sourceWidth - 1);
+
+// Nearest neighbor: the single source pixel a destination pixel's center falls inside.
+int index = TextureResampling.NearestSourceIndex(x, ratio, sourceWidth - 1);
+```
+
+A destination pixel covers a range of the source, and its sample belongs in the middle of that range.
+Mapping index straight onto index instead shifts the image half a destination texel toward the
+origin, so an upscale never reaches the source's last pixel and a symmetric image stops downscaling
+symmetrically.
+
+```csharp
+// Blend premultiplied, so an invisible pixel cannot tint a visible one.
+Color blended = /* your filter over TextureResampling.Premultiply(...) values */;
+Color straight = /* the same filter over the original colors */;
+Color result = TextureResampling.Unpremultiply(blended, straight);
+```
+
+Interpolating straight color gives a fully transparent texel's RGB the same weight as a visible one,
+which is why a red sprite beside a transparent green background acquires a yellow edge. Premultiplying
+weights each color by its own opacity. It is exactly the identity on an opaque image, so only images
+that are wrong today change. `Unpremultiply` takes the straight-color result as a fallback because an
+all-transparent neighborhood cannot have its alpha divided back out; that keeps a fully transparent
+image's RGB intact instead of flattening it to black.
+
 <a id="collections"></a>
 
 ## Collections

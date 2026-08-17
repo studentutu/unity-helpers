@@ -833,14 +833,22 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
             int dictionaryCount = _dictionary.Count;
             int arrayLength = _keys.Length;
 
-            // Fast path: if counts match and all keys exist, just update values in place
+            // Fast path: if counts match, all array keys are unique under this dictionary's comparer, and
+            // all keys still exist, just update values in place. Uniqueness has to be checked because
+            // duplicate keys in the array can make the counts match by coincidence (array holds
+            // {"Alpha", "alpha"} under an ignore-case comparer with a count of 2 after "Beta" is added,
+            // and the array should have become {"Alpha", "Beta"}).
             if (dictionaryCount == arrayLength)
             {
+                using PooledResource<SortedSet<TKey>> fastPathSeenResource = SetBuffers<TKey>
+                    .GetSortedSetPool(_dictionary.Comparer)
+                    .Get(out SortedSet<TKey> fastPathSeenKeys);
+
                 bool allKeysMatch = true;
                 for (int i = 0; i < arrayLength; i++)
                 {
                     TKey key = _keys[i];
-                    if (key == null || !_dictionary.ContainsKey(key))
+                    if (key == null || !_dictionary.ContainsKey(key) || !fastPathSeenKeys.Add(key))
                     {
                         allKeysMatch = false;
                         break;
@@ -867,9 +875,11 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
             using PooledResource<List<TValue>> valuesResource = Buffers<TValue>.List.Get(
                 out List<TValue> newValues
             );
-            using PooledResource<HashSet<TKey>> seenResource = Buffers<TKey>.HashSet.Get(
-                out HashSet<TKey> seenKeys
-            );
+            // A SortedSet rather than a HashSet: this dictionary orders keys with an IComparer, and no
+            // hash set can agree with a comparer that calls two unequal-hashing keys the same.
+            using PooledResource<SortedSet<TKey>> seenResource = SetBuffers<TKey>
+                .GetSortedSetPool(_dictionary.Comparer)
+                .Get(out SortedSet<TKey> seenKeys);
 
             // First pass: keep existing keys that still exist in the dictionary, in their original order
             for (int i = 0; i < arrayLength; i++)

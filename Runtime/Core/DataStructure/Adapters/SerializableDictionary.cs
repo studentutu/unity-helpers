@@ -1,8 +1,9 @@
 // MIT License - Copyright (c) 2025 wallstop
 // Full license text: https://github.com/wallstop/unity-helpers/blob/main/LICENSE
-
-// Portions of this file are adapted from JDSherbert's Unity-Serializable-Dictionary (MIT License):
-// https://github.com/JDSherbert/Unity-Serializable-Dictionary
+//
+// Portions of this file are adapted from Unity-Serializable-Dictionary by JDSherbert, MIT License,
+// https://github.com/JDSherbert/Unity-Serializable-Dictionary. The design of those portions is the
+// original author's. See docs/project/third-party-notices.md.
 
 namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
 {
@@ -91,6 +92,27 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
             /// ]]></code>
             /// </example>
             public Dictionary() { }
+
+            /// <summary>
+            /// Creates an empty runtime dictionary keyed by the given comparer.
+            /// </summary>
+            /// <param name="comparer">The comparer that decides which keys are the same.</param>
+            /// <remarks>
+            /// This type shadows <see cref="System.Collections.Generic.Dictionary{TKey, TValue}"/>
+            /// inside every subclass, so without this overload the documented way to seed a comparer --
+            /// <c>base(new Dictionary&lt;string, T&gt;(StringComparer.OrdinalIgnoreCase))</c> -- did not
+            /// compile there at all.
+            /// </remarks>
+            /// <example>
+            /// <code><![CDATA[
+            /// public AbilityDictionary()
+            ///     : base(new Dictionary<string, AbilityDefinition>(StringComparer.OrdinalIgnoreCase))
+            /// {
+            /// }
+            /// ]]></code>
+            /// </example>
+            public Dictionary(IEqualityComparer<TKey> comparer)
+                : base(comparer) { }
 
             /// <summary>
             /// Creates a runtime dictionary pre-populated with entries from another dictionary.
@@ -662,8 +684,9 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
             // (e.g., array has {3, 3} with dictCount=2 after adding key 4, but the array should become {3, 4}).
             if (dictCount == arrayLength)
             {
-                using PooledResource<HashSet<TKey>> fastPathSeenResource =
-                    Buffers<TKey>.HashSet.Get(out HashSet<TKey> fastPathSeenKeys);
+                using PooledResource<HashSet<TKey>> fastPathSeenResource = SetBuffers<TKey>
+                    .GetHashSetPool(_dictionary.Comparer)
+                    .Get(out HashSet<TKey> fastPathSeenKeys);
 
                 bool allEntriesMatchAndUnique = true;
                 for (int i = 0; i < arrayLength; i++)
@@ -701,9 +724,9 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
             using PooledResource<List<TValue>> valuesResource = Buffers<TValue>.List.Get(
                 out List<TValue> newValues
             );
-            using PooledResource<HashSet<TKey>> seenResource = Buffers<TKey>.HashSet.Get(
-                out HashSet<TKey> seenKeys
-            );
+            using PooledResource<HashSet<TKey>> seenResource = SetBuffers<TKey>
+                .GetHashSetPool(_dictionary.Comparer)
+                .Get(out HashSet<TKey> seenKeys);
 
             // First pass: keep existing keys that still exist in the dictionary, in their original order
             for (int i = 0; i < arrayLength; i++)

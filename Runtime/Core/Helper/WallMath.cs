@@ -4,6 +4,7 @@
 namespace WallstopStudios.UnityHelpers.Core.Helper
 {
     using System;
+    using System.Runtime.CompilerServices;
     using UnityEngine;
 
     /// <summary>
@@ -16,14 +17,24 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
     public static class WallMath
     {
         /// <summary>
-        /// Ensures a double value is strictly less than the specified maximum by decrementing
-        /// its bit representation if necessary. Borrowed from Java's ThreadLocalRandom.
+        /// Returns <paramref name="value"/> if it is already below <paramref name="max"/>, and
+        /// otherwise the largest representable value below it.
         /// </summary>
         /// <param name="max">The exclusive upper bound</param>
         /// <param name="value">The value to bound</param>
         /// <returns>A value strictly less than max</returns>
         /// <remarks>
-        /// Reference: http://grepcode.com/file/repository.grepcode.com/java/root/jdk/openjdk/8-b132/java/util/concurrent/ThreadLocalRandom.java#356
+        /// <para>
+        /// Scaling a unit random draw by a bound can round up to the bound itself, which breaks the
+        /// half-open interval every caller assumes. Stepping down one representable value is the
+        /// smallest correction that restores it.
+        /// </para>
+        /// <para>
+        /// The step relies on IEEE-754 laying out same-signed values in the same order as their bit
+        /// patterns, so the next value down is one integer step away. This is what
+        /// <c>Math.BitDecrement</c> does; it is reimplemented here because Unity's profile does not
+        /// carry that method, and the two agree on every <see cref="float"/>.
+        /// </para>
         /// </remarks>
         public static double BoundedDouble(double max, double value)
         {
@@ -72,6 +83,14 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
             return PreviousFloat(value);
         }
 
+        /// <summary>
+        /// The largest <see cref="double"/> below <paramref name="value"/>.
+        /// </summary>
+        /// <remarks>
+        /// Positive values step down in bit space and negative values step up, because the sign bit
+        /// reverses the ordering. Zero is its own case: the value below it is the first negative
+        /// subnormal, whose bit pattern is not adjacent to zero's.
+        /// </remarks>
         private static double PreviousDouble(double value)
         {
             if (double.IsNaN(value))
@@ -99,6 +118,10 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
             return BitConverter.Int64BitsToDouble(bits);
         }
 
+        /// <summary>
+        /// The largest <see cref="float"/> below <paramref name="value"/>. The <see cref="double"/>
+        /// overload's remark explains the cases.
+        /// </summary>
         private static float PreviousFloat(float value)
         {
             if (float.IsNaN(value))
@@ -146,15 +169,21 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                 return 0f;
             }
 
-            // Tests expect modulo 1 to map to 0 for any input
-            if (Mathf.Approximately(max, 1f))
+            float remainder = value % max;
+            if (remainder != 0f && remainder < 0f != max < 0f)
             {
-                return 0f;
+                remainder += max;
+                if (remainder == max)
+                {
+                    // A remainder below half an ulp of max rounds onto max when added, which is
+                    // outside the half-open range. The second division this replaced folded it to 0.
+                    remainder = 0f;
+                }
             }
 
-            value %= max;
-            value += max;
-            return value % max;
+            // A remainder of negative zero compares equal to zero but is a different value; the two
+            // divisions this replaced always produced positive zero.
+            return remainder == 0f ? 0f : remainder;
         }
 
         /// <example>
@@ -183,15 +212,19 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                 return 0d;
             }
 
-            // Tests expect modulo 1 to map to 0 for any input
-            if (Math.Abs(max - 1d) <= 1e-12d)
+            double remainder = value % max;
+            if (remainder != 0d && remainder < 0d != max < 0d)
             {
-                return 0d;
+                remainder += max;
+                if (remainder == max)
+                {
+                    // See the float overload: rounding onto the boundary folds to 0.
+                    remainder = 0d;
+                }
             }
 
-            value %= max;
-            value += max;
-            return value % max;
+            // See the float overload: negative zero is normalized to keep the old result exactly.
+            return remainder == 0d ? 0d : remainder;
         }
 
         /// <example>
@@ -207,11 +240,24 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
         /// <param name="value">The value to compute modulo for</param>
         /// <param name="max">The modulo divisor (must be positive)</param>
         /// <returns>A value in the range [0, max)</returns>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static int PositiveMod(this int value, int max)
         {
-            value %= max;
-            value += max;
-            return value % max;
+            if (0 <= value && value < max)
+            {
+                return value;
+            }
+
+            // Floored modulo: the result takes the sign of the divisor, which is what a negative
+            // maximum has always returned here. Adding only across a sign difference cannot overflow,
+            // where adding unconditionally did once the maximum passed 2^30.
+            int remainder = value % max;
+            if (remainder != 0 && remainder < 0 != max < 0)
+            {
+                remainder += max;
+            }
+
+            return remainder;
         }
 
         /// <example>
@@ -227,11 +273,22 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
         /// <param name="value">The value to compute modulo for</param>
         /// <param name="max">The modulo divisor (must be positive)</param>
         /// <returns>A value in the range [0, max)</returns>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static long PositiveMod(this long value, long max)
         {
-            value %= max;
-            value += max;
-            return value % max;
+            if (0 <= value && value < max)
+            {
+                return value;
+            }
+
+            // See the int overload: floored modulo, and the conditional add cannot overflow.
+            long remainder = value % max;
+            if (remainder != 0 && remainder < 0 != max < 0)
+            {
+                remainder += max;
+            }
+
+            return remainder;
         }
 
         /// <summary>
@@ -264,12 +321,15 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
         /// <returns>The wrapped result in the range [0, max)</returns>
         public static int WrappedAdd(ref int value, int increment, int max)
         {
-            value += increment;
-            if (value >= 0 && value < max)
+            // Widened because the sum is what wraps: adding a large increment near int.MaxValue
+            // overflows to a negative number that is not congruent to the real sum.
+            long sum = (long)value + increment;
+            if (0 <= sum && sum < max)
             {
-                return value;
+                return value = (int)sum;
             }
-            return value = value.PositiveMod(max);
+
+            return value = (int)sum.PositiveMod(max);
         }
 
         /// <summary>
@@ -294,6 +354,140 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
         public static int WrappedIncrement(ref int value, int max)
         {
             return WrappedAdd(ref value, 1, max);
+        }
+
+        /// <example>
+        /// <code>
+        /// long index = 4;
+        /// index = index.WrappedAdd(2, 5); // 1
+        /// </code>
+        /// </example>
+        /// <summary>
+        /// Adds an increment to a value and wraps the sum into [0, max).
+        /// This is a non-mutating version that returns the result without modifying the input.
+        /// </summary>
+        /// <param name="value">The base value</param>
+        /// <param name="increment">The amount to add (can be negative)</param>
+        /// <param name="max">The wrap-around boundary</param>
+        /// <returns>The wrapped result in the range [0, max)</returns>
+        public static long WrappedAdd(this long value, long increment, long max)
+        {
+            WrappedAdd(ref value, increment, max);
+            return value;
+        }
+
+        /// <summary>
+        /// Adds an increment to a value and wraps the sum into [0, max).
+        /// This mutates the value parameter in place.
+        /// </summary>
+        /// <param name="value">The base value (modified in place)</param>
+        /// <param name="increment">The amount to add (can be negative)</param>
+        /// <param name="max">The wrap-around boundary</param>
+        /// <returns>The wrapped result in the range [0, max)</returns>
+        /// <remarks>
+        /// A sum that overflows <see cref="long"/> cannot be widened the way the <see cref="int"/>
+        /// overload widens its own, so it is folded through the maximum before it is added.
+        /// </remarks>
+        public static long WrappedAdd(ref long value, long increment, long max)
+        {
+            long start = value.PositiveMod(max);
+            long step = increment.PositiveMod(max);
+            long sum = start + step;
+            if (sum < 0 || sum >= max)
+            {
+                sum -= max;
+            }
+
+            return value = sum;
+        }
+
+        /// <summary>
+        /// Increments a value by 1 and wraps around if it reaches the maximum.
+        /// This is a non-mutating version that returns the result without modifying the input.
+        /// </summary>
+        /// <param name="value">The value to increment</param>
+        /// <param name="max">The wrap-around boundary</param>
+        /// <returns>The incremented value, wrapped to [0, max)</returns>
+        public static long WrappedIncrement(this long value, long max)
+        {
+            return value.WrappedAdd(1L, max);
+        }
+
+        /// <summary>
+        /// Increments a value by 1 and wraps around if it reaches the maximum.
+        /// This mutates the value parameter in place.
+        /// </summary>
+        /// <param name="value">The value to increment (modified in place)</param>
+        /// <param name="max">The wrap-around boundary</param>
+        /// <returns>The incremented value, wrapped to [0, max)</returns>
+        public static long WrappedIncrement(ref long value, long max)
+        {
+            return WrappedAdd(ref value, 1L, max);
+        }
+
+        /// <example>
+        /// <code>
+        /// float heading = 350f;
+        /// heading = heading.WrappedAdd(20f, 360f); // 10
+        /// </code>
+        /// </example>
+        /// <summary>
+        /// Adds an increment to a value and wraps the sum into [0, max), which is what an angle or a
+        /// normalized phase wants.
+        /// </summary>
+        /// <param name="value">The base value</param>
+        /// <param name="increment">The amount to add (can be negative)</param>
+        /// <param name="max">The wrap-around boundary</param>
+        /// <returns>The wrapped result in the range [0, max), or NaN if the sum is not finite</returns>
+        public static float WrappedAdd(this float value, float increment, float max)
+        {
+            WrappedAdd(ref value, increment, max);
+            return value;
+        }
+
+        /// <summary>
+        /// Adds an increment to a value and wraps the sum into [0, max).
+        /// This mutates the value parameter in place.
+        /// </summary>
+        /// <param name="value">The base value (modified in place)</param>
+        /// <param name="increment">The amount to add (can be negative)</param>
+        /// <param name="max">The wrap-around boundary</param>
+        /// <returns>The wrapped result in the range [0, max), or NaN if the sum is not finite</returns>
+        public static float WrappedAdd(ref float value, float increment, float max)
+        {
+            return value = (value + increment).PositiveMod(max);
+        }
+
+        /// <example>
+        /// <code>
+        /// double phase = 0.9;
+        /// phase = phase.WrappedAdd(0.2, 1.0); // 0.1
+        /// </code>
+        /// </example>
+        /// <summary>
+        /// Adds an increment to a value and wraps the sum into [0, max).
+        /// </summary>
+        /// <param name="value">The base value</param>
+        /// <param name="increment">The amount to add (can be negative)</param>
+        /// <param name="max">The wrap-around boundary</param>
+        /// <returns>The wrapped result in the range [0, max), or NaN if the sum is not finite</returns>
+        public static double WrappedAdd(this double value, double increment, double max)
+        {
+            WrappedAdd(ref value, increment, max);
+            return value;
+        }
+
+        /// <summary>
+        /// Adds an increment to a value and wraps the sum into [0, max).
+        /// This mutates the value parameter in place.
+        /// </summary>
+        /// <param name="value">The base value (modified in place)</param>
+        /// <param name="increment">The amount to add (can be negative)</param>
+        /// <param name="max">The wrap-around boundary</param>
+        /// <returns>The wrapped result in the range [0, max), or NaN if the sum is not finite</returns>
+        public static double WrappedAdd(ref double value, double increment, double max)
+        {
+            return value = (value + increment).PositiveMod(max);
         }
 
         /// <summary>

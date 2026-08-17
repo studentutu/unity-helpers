@@ -22,11 +22,66 @@ Unity Helpers ships several custom sorting algorithms for `IList<T>` that cover 
 | Power Sort Plus             | Yes     | Enhanced run-priority merges inspired by Wild & Nebel                      | [PowerSort paper](https://arxiv.org/abs/1805.04154)                                                       |
 | Glide Sort                  | Yes     | Stable galloping merges from the Rust glidesort research                   | [sort-research-rs](https://github.com/Voultapher/sort-research-rs)                                        |
 | Flux Sort                   | No      | Dual-pivot quicksort tuned for modern CPUs                                 | [sort-research-rs](https://github.com/Voultapher/sort-research-rs)                                        |
+| Yam Sort                    | Yes     | Sequential or reverse-sequential data, where it approaches O(n)            | [YamSort by Gary Gende](https://github.com/gendeg/YamSort)                                                |
 | Insertion Sort              | Yes     | Tiny or nearly sorted collections where O(n²) is acceptable                | [Wikipedia - Insertion sort](https://en.wikipedia.org/wiki/Insertion_sort)                                |
 
 > **What does “stable” mean?** Stable sorting algorithms preserve the relative order of elements that compare as equal. This matters when items carry secondary keys (e.g., sorting people by last name but keeping first-name order deterministic). Unstable algorithms can reshuffle equal entries, which is usually fine for numeric keys but can break deterministic pipelines.
 >
 > **Heads up:** The original Ghost Sort repository was formerly hosted on GitHub under `wstaffordp/ghostsort`, but it currently returns 404. The Unity Helpers implementation remains based on that source; we will relink if/when an official mirror returns.
+
+## Where the Time Actually Goes
+
+Every algorithm here sorts a `T[]`, never an `IList<T>` directly. Reaching an element through the
+`IList<T>` indexer is an interface call, and a sort makes O(n log n) of them; copying a list into a
+pooled array and copying it back is 2n moves and then the whole sort runs on direct array indexing.
+Pass a `T[]` and it is sorted in place with no copy at all.
+
+Measured on .NET 9 with a struct comparer, sorting `int`, best of nine runs — the same source before
+and after the change:
+
+| Algorithm | Shape         |       n | `T[]` before | `T[]` after | `List<T>` before | `List<T>` after |
+| --------- | ------------- | ------: | -----------: | ----------: | ---------------: | --------------: |
+| Grail     | shuffled      | 100,000 |     13.32 ms | **5.29 ms** |          6.28 ms |         5.39 ms |
+| Tim       | shuffled      | 100,000 |     11.85 ms | **4.55 ms** |          5.66 ms |         4.65 ms |
+| Grail     | nearly sorted | 100,000 |      5.65 ms | **1.42 ms** |          2.14 ms |         1.51 ms |
+| Grail     | reversed      | 100,000 |      5.84 ms | **1.07 ms** |          1.98 ms |         1.13 ms |
+| Tim       | reversed      | 100,000 |      0.38 ms | **0.06 ms** |          0.08 ms |         0.11 ms |
+
+The one shape that pays rather than gains is a `List<T>` an adaptive sort would finish in O(n)
+anyway: there the copy is most of the work, and it costs tens of microseconds on 100,000 elements.
+These are desktop CLR numbers, where the JIT can speculatively devirtualize `List<T>`; a Unity player
+cannot, so the run the Unity benchmark below produces is the one that describes a build.
+
+### Why a `List<T>` is copied rather than sorted where it lies
+
+Copying looks like the wasteful option and is not. Sorting a `List<T>` in place was measured against
+copying it, using a struct accessor so the in-place path paid no interface dispatch at all — the best
+case an in-place sort can have:
+
+| Shape         |       n | Sorted in place | Copied, sorted, copied back | Array sorted directly |
+| ------------- | ------: | --------------: | --------------------------: | --------------------: |
+| shuffled      | 100,000 |        398.3 ms |                **258.5 ms** |              258.7 ms |
+| nearly sorted | 100,000 |         72.0 ms |                 **47.9 ms** |               47.7 ms |
+| reversed      | 100,000 |        788.2 ms |                **517.4 ms** |              531.0 ms |
+
+A sort makes O(n log n) element accesses and a copy is O(n) contiguous bytes, so paying a slightly
+dearer access n log n times to save 2n copies loses at every size and shape measured. The right-hand
+columns are the same to within noise, which is the point: **the copy costs nothing measurable, and
+the array accesses inside the sort are what the whole exercise is buying.**
+
+Both directions of that copy are bulk operations. `CopyTo` is on `ICollection<T>`, so reading is one
+`Array.Copy` for any list that implements it sensibly. Writing back is one `Array.Copy` for a
+`List<T>` (`AddRange` takes its `ICollection<T>` fast path for an `ArraySegment<T>`), which is 4.4x
+to 13x faster than assigning through the indexer:
+
+|         n | Indexer loop | `Clear` + `AddRange` |
+| --------: | -----------: | -------------------: |
+|   100,000 |     0.065 ms |         **0.005 ms** |
+| 1,000,000 |     0.723 ms |         **0.164 ms** |
+
+So: a `T[]` is sorted where it lies, a `List<T>` moves in and out in two bulk copies, and any other
+`IList<T>` reads in bulk and writes back through its indexer, because that is all the interface
+offers.
 
 ## Dataset Scenarios
 

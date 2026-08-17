@@ -21,6 +21,82 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
         private const int TestIterations = 10_000;
         private const float Epsilon = 0.0001f;
 
+        // The contract is not "smaller than max", it is "the next representable value below it".
+        // Anything looser passes for an implementation that gives away far more range than it must.
+        private static readonly double[] BoundedDoubleMaxima =
+        {
+            1d,
+            10d,
+            0.1d,
+            double.MaxValue,
+            double.Epsilon,
+            2.2250738585072014E-308,
+            -1d,
+            -0.1d,
+        };
+
+        private static readonly float[] BoundedFloatMaxima =
+        {
+            1f,
+            10f,
+            0.1f,
+            float.MaxValue,
+            float.Epsilon,
+            1.17549435E-38f,
+            -1f,
+            -0.1f,
+        };
+
+        [Test]
+        public void BoundedDoubleAtMaxReturnsTheNextRepresentableValueDown()
+        {
+            foreach (double max in BoundedDoubleMaxima)
+            {
+                long bits = BitConverter.DoubleToInt64Bits(max);
+                double expected = BitConverter.Int64BitsToDouble(max > 0d ? bits - 1L : bits + 1L);
+
+                double result = WallMath.BoundedDouble(max, max);
+
+                Assert.AreEqual(
+                    expected,
+                    result,
+                    $"BoundedDouble({max:R}) gave away more range than one representable step."
+                );
+                Assert.Less(result, max);
+            }
+        }
+
+        [Test]
+        public void BoundedDoubleAtZeroReturnsTheFirstNegativeSubnormal()
+        {
+            Assert.AreEqual(-double.Epsilon, WallMath.BoundedDouble(0d, 0d));
+        }
+
+        [Test]
+        public void BoundedFloatAtMaxReturnsTheNextRepresentableValueDown()
+        {
+            foreach (float max in BoundedFloatMaxima)
+            {
+                int bits = BitConverter.SingleToInt32Bits(max);
+                float expected = BitConverter.Int32BitsToSingle(max > 0f ? bits - 1 : bits + 1);
+
+                float result = WallMath.BoundedFloat(max, max);
+
+                Assert.AreEqual(
+                    expected,
+                    result,
+                    $"BoundedFloat({max:R}) gave away more range than one representable step."
+                );
+                Assert.Less(result, max);
+            }
+        }
+
+        [Test]
+        public void BoundedFloatAtZeroReturnsTheFirstNegativeSubnormal()
+        {
+            Assert.AreEqual(-float.Epsilon, WallMath.BoundedFloat(0f, 0f));
+        }
+
         [Test]
         public void BoundedDoubleValueLessThanMax()
         {
@@ -210,6 +286,145 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
             Assert.AreEqual(5, 5.PositiveMod(10));
             Assert.AreEqual(0, 10.PositiveMod(10));
             Assert.AreEqual(1, 11.PositiveMod(10));
+        }
+
+        /// <remarks>
+        /// The contract is a result in [0, max). Adding max to the remainder before taking it again
+        /// overflows once max is above 2^30, and the function then returned a negative number -- the
+        /// one thing its name promises it never does.
+        /// </remarks>
+        [Test]
+        public void PositiveModStaysInRangeForLargeMaxima()
+        {
+            (int Value, int Max)[] cases =
+            {
+                (1_499_999_999, 1_500_000_000),
+                (1_400_000_000, 1_500_000_000),
+                (int.MaxValue - 1, int.MaxValue),
+                (int.MaxValue, int.MaxValue),
+                (int.MinValue, int.MaxValue),
+                (-1, 2_000_000_000),
+            };
+
+            foreach ((int value, int max) in cases)
+            {
+                int result = value.PositiveMod(max);
+                Assert.That(
+                    result,
+                    Is.InRange(0, max - 1),
+                    $"PositiveMod({value}, {max}) left the range it promises."
+                );
+            }
+        }
+
+        [Test]
+        public void PositiveModLongStaysInRangeForLargeMaxima()
+        {
+            (long Value, long Max)[] cases =
+            {
+                (long.MaxValue - 1, long.MaxValue),
+                (long.MaxValue, long.MaxValue),
+                (long.MinValue, long.MaxValue),
+                ((1L << 62) - 1L, 1L << 62),
+                (-1L, (1L << 62) + 1L),
+            };
+
+            foreach ((long value, long max) in cases)
+            {
+                long result = value.PositiveMod(max);
+                Assert.That(
+                    result,
+                    Is.InRange(0L, max - 1L),
+                    $"PositiveMod({value}, {max}) left the range it promises."
+                );
+            }
+        }
+
+        /// <remarks>
+        /// A value already inside the range is its own remainder, exactly. Taking it out and back
+        /// through the maximum rounded it.
+        /// </remarks>
+        [Test]
+        public void PositiveModLeavesAnInRangeFloatExactlyAsItWas()
+        {
+            foreach (float value in new[] { 0.21524368f, 0.010507582f, 359.99997f, 1e-30f })
+            {
+                float max = value < 1f ? 0.5f : 360f;
+                Assert.That(value.PositiveMod(max), Is.EqualTo(value));
+            }
+
+            foreach (double value in new[] { 2.967071348320225d, 111.57282778600822d })
+            {
+                Assert.That(value.PositiveMod(360d), Is.EqualTo(value));
+            }
+        }
+
+        /// <remarks>
+        /// A remainder smaller than half an ulp of the maximum rounds onto the maximum when the
+        /// maximum is added to it, which is outside the half-open range the method promises.
+        /// </remarks>
+        [Test]
+        public void PositiveModNeverReturnsTheMaximumItself()
+        {
+            foreach (float max in new[] { 360f, 2f, 0.5f, 1e6f, 16777216f })
+            {
+                // A quarter of an ulp below zero: too small to survive being added to max.
+                float oneUlpBelowMax = BitConverter.Int32BitsToSingle(
+                    BitConverter.SingleToInt32Bits(max) - 1
+                );
+                float value = (oneUlpBelowMax - max) / 4f;
+
+                float result = value.PositiveMod(max);
+
+                Assert.That(result, Is.GreaterThanOrEqualTo(0f), $"max {max}");
+                Assert.That(
+                    result,
+                    Is.LessThan(max),
+                    $"PositiveMod({value:R}, {max:R}) returned the maximum itself."
+                );
+            }
+        }
+
+        [Test]
+        public void WrappedAddLongWrapsTheRealSumWhenItOverflows()
+        {
+            Assert.That(long.MaxValue.WrappedAdd(5L, 10L), Is.InRange(0L, 9L));
+            Assert.That(long.MinValue.WrappedAdd(-5L, 10L), Is.InRange(0L, 9L));
+            Assert.That(
+                long.MaxValue.WrappedAdd(long.MaxValue, 1L << 40),
+                Is.InRange(0L, (1L << 40) - 1L)
+            );
+            Assert.That(4L.WrappedAdd(2L, 5L), Is.EqualTo(1L));
+            Assert.That(0L.WrappedAdd(-1L, 5L), Is.EqualTo(4L));
+            Assert.That(3L.WrappedIncrement(4L), Is.EqualTo(0L));
+        }
+
+        [Test]
+        public void WrappedAddFloatingPointWrapsIntoRange()
+        {
+            Assert.AreEqual(10f, 350f.WrappedAdd(20f, 360f), Epsilon);
+            Assert.AreEqual(350f, 10f.WrappedAdd(-20f, 360f), Epsilon);
+            Assert.AreEqual(0.1d, 0.9d.WrappedAdd(0.2d, 1.0d), 1e-9d);
+            Assert.AreEqual(0.9d, 0.1d.WrappedAdd(-0.2d, 1.0d), 1e-9d);
+
+            for (float angle = -720f; angle <= 720f; angle += 7.5f)
+            {
+                float wrapped = angle.WrappedAdd(13.25f, 360f);
+                Assert.That(wrapped, Is.GreaterThanOrEqualTo(0f));
+                Assert.That(wrapped, Is.LessThan(360f));
+            }
+        }
+
+        /// <remarks>
+        /// The sum is what wraps, so it has to be computed where it fits: adding the increment first
+        /// overflowed and wrapped to a number that is not congruent to the real sum.
+        /// </remarks>
+        [Test]
+        public void WrappedAddWrapsTheRealSumWhenItOverflows()
+        {
+            Assert.That(int.MaxValue.WrappedAdd(5, 10), Is.EqualTo(2));
+            Assert.That(int.MinValue.WrappedAdd(-5, 10), Is.EqualTo(7));
+            Assert.That((int.MaxValue - 3).WrappedAdd(10, 7), Is.InRange(0, 6));
         }
 
         [Test]
@@ -1177,15 +1392,20 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
         [Test]
         public void PositiveModFloatWithOne()
         {
-            Assert.AreEqual(0f, 5.5f.PositiveMod(1f), Epsilon);
-            Assert.AreEqual(0f, (-5.5f).PositiveMod(1f), Epsilon);
+            // 5.5 mod 1 is 0.5, not 0. A maximum of 1 is the normalized-phase case, and it used to
+            // return 0 for every input -- which this file's own documented example contradicted.
+            Assert.AreEqual(0.5f, 5.5f.PositiveMod(1f), Epsilon);
+            Assert.AreEqual(0.5f, (-5.5f).PositiveMod(1f), Epsilon);
+            Assert.AreEqual(0f, 5f.PositiveMod(1f), Epsilon);
         }
 
         [Test]
         public void PositiveModDoubleWithOne()
         {
-            Assert.AreEqual(0.0, 5.5.PositiveMod(1.0), Epsilon);
-            Assert.AreEqual(0.0, (-5.5).PositiveMod(1.0), Epsilon);
+            // -5.5 mod 1 is 0.5 under floored modulo, the same as 5.5 mod 1.
+            Assert.AreEqual(0.5, 5.5.PositiveMod(1.0), Epsilon);
+            Assert.AreEqual(0.5, (-5.5).PositiveMod(1.0), Epsilon);
+            Assert.AreEqual(0.0, 5.0.PositiveMod(1.0), Epsilon);
         }
 
         [Test]

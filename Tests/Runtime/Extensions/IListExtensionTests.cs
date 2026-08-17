@@ -9,6 +9,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
     using System.Linq;
     using NUnit.Framework;
     using UnityEngine;
+    using WallstopStudios.UnityHelpers.Core.DataStructure.Adapters;
     using WallstopStudios.UnityHelpers.Core.Extension;
     using WallstopStudios.UnityHelpers.Core.Random;
     using WallstopStudios.UnityHelpers.Tests.Core;
@@ -147,8 +148,30 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
                     "FluxSort",
                     (IntSortAlgorithm)((list, comparer) => list.FluxSort(comparer))
                 ).SetName("SortingAlgorithmsMatchArraySortFluxSort");
+                yield return new TestCaseData(
+                    "YamSort",
+                    (IntSortAlgorithm)((list, comparer) => list.YamSort(comparer))
+                ).SetName("SortingAlgorithmsMatchArraySortYamSort");
             }
         }
+
+        private static readonly int[] StabilityCounts = { 7, 64, 120, 513 };
+
+        // A stable sort only reorders equal elements when it moves a block of them, and the shapes
+        // that make it do so are descending: run detection that reverses a descending run must
+        // refuse to take equal neighbors into it. An ascending shape alone proves nothing.
+        private static readonly (string Name, Func<int, int, int> KeyOf)[] StabilityShapes =
+        {
+            ("ascending duplicates", static (i, _) => i / 3),
+            ("descending duplicates", static (i, count) => (count - i) / 3),
+            ("descending pairs", static (i, count) => (count - i) / 2),
+            (
+                "strict descent then equals",
+                static (i, count) => (count - i) % 5 == 0 ? count - i : 0
+            ),
+            ("all equal", static (_, _) => 0),
+            ("sawtooth duplicates", static (i, count) => (i % Math.Max(1, count / 4)) / 2),
+        };
 
         private static IEnumerable<TestCaseData> StableSortingAlgorithmCases
         {
@@ -185,6 +208,10 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
                 yield return new TestCaseData(
                     "GlideSort",
                     (TupleSortAlgorithm)((list, comparer) => list.GlideSort(comparer))
+                );
+                yield return new TestCaseData(
+                    "YamSort",
+                    (TupleSortAlgorithm)((list, comparer) => list.YamSort(comparer))
                 );
             }
         }
@@ -422,29 +449,72 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
             Assert.That(viaEnum, Is.EqualTo(expected));
         }
 
+        /// <remarks>
+        /// The sorts run over an array and write the result back, and the write-back has a bulk path
+        /// for the list types that offer one. A container that takes that path has to come out sorted,
+        /// the same length, and holding the same elements.
+        /// </remarks>
+        [TestCaseSource(nameof(SortingAlgorithmCases))]
+        public void SortingAlgorithmsWriteBackToEveryContainerShape(
+            string algorithmName,
+            IntSortAlgorithm algorithm
+        )
+        {
+            int[] source = Enumerable.Range(0, 257).Select(i => (i * 37) % 101).ToArray();
+            int[] expected = source.OrderBy(value => value).ToArray();
+
+            int[] array = source.ToArray();
+            algorithm(array, new IntComparer());
+            Assert.That(array, Is.EqualTo(expected), $"{algorithmName} over T[]");
+
+            List<int> list = new(source);
+            algorithm(list, new IntComparer());
+            Assert.That(list, Is.EqualTo(expected), $"{algorithmName} over List<T>");
+
+            SerializableList<int> serializable = new();
+            serializable.AddRange(source);
+            algorithm(serializable, new IntComparer());
+            Assert.That(serializable.Count, Is.EqualTo(expected.Length));
+            Assert.That(
+                serializable.ToArray(),
+                Is.EqualTo(expected),
+                $"{algorithmName} over SerializableList<T>"
+            );
+        }
+
         [TestCaseSource(nameof(StableSortingAlgorithmCases))]
         public void StableSortingAlgorithmsPreserveOrder(
             string algorithmName,
             TupleSortAlgorithm algorithm
         )
         {
-            ValueTuple<int, int>[] input = Enumerable
-                .Range(0, 120)
-                .Select(i => ValueTuple.Create(i / 3, i))
-                .ToArray();
-            ValueTuple<int, int>[] actual = input.ToArray();
-
-            algorithm(actual, new StableTupleComparer());
-
-            for (int i = 1; i < actual.Length; ++i)
+            foreach ((string shapeName, Func<int, int, int> keyOf) in StabilityShapes)
             {
-                if (actual[i - 1].Item1 == actual[i].Item1)
+                foreach (int count in StabilityCounts)
                 {
-                    Assert.That(
-                        actual[i - 1].Item2,
-                        Is.LessThan(actual[i].Item2),
-                        $"{algorithmName} broke stability at index {i}"
-                    );
+                    ValueTuple<int, int>[] actual = Enumerable
+                        .Range(0, count)
+                        .Select(i => ValueTuple.Create(keyOf(i, count), i))
+                        .ToArray();
+
+                    algorithm(actual, new StableTupleComparer());
+
+                    for (int i = 1; i < actual.Length; ++i)
+                    {
+                        Assert.That(
+                            actual[i - 1].Item1,
+                            Is.LessThanOrEqualTo(actual[i].Item1),
+                            $"{algorithmName} left {shapeName} (n={count}) unsorted at index {i}"
+                        );
+                        if (actual[i - 1].Item1 == actual[i].Item1)
+                        {
+                            Assert.That(
+                                actual[i - 1].Item2,
+                                Is.LessThan(actual[i].Item2),
+                                $"{algorithmName} broke stability on {shapeName} (n={count}) at index {i}"
+                            );
+                        }
+                    }
                 }
             }
         }

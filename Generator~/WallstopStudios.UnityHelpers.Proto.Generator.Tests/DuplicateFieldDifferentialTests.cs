@@ -180,32 +180,114 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
         }
 
         [Test]
-        public void TheFirstOccurrenceStillReplacesTheConstructorsSubMessage()
+        public void TheFirstOccurrenceMergesIntoTheConstructorsSubMessage()
         {
-            // A DIVERGENCE, pinned rather than fixed. protobuf-net merges the first occurrence into
-            // whatever the constructor left on the member -- measured, {A=9} seeded plus `12 02 10
-            // 02` reads back as {A=9, B=2} -- while this package replaces it, exactly as it did
-            // before duplicate fields merged at all. Nothing on the wire distinguishes the two
-            // readings, and changing it would alter what every existing payload decodes to for a
-            // member whose contract seeds one.
+            // protobuf defines reading a sub-message field as MergeFrom, so the FIRST occurrence
+            // merges into whatever the contract's constructor left on the member. Decoding into a
+            // fresh instance instead drops the seed, on a payload that says nothing about it.
             const string once = "12021002";
 
             SeededHolder oracle = OracleDecode<SeededHolder>(once);
             SeededHolder ours = Decode<SeededHolder>(once);
 
-            Assert.AreEqual(9, oracle.Child.A, "protobuf-net keeps the constructor's member");
-            Assert.AreEqual(0, ours.Child.A, "this package replaces it");
+            Assert.AreEqual(9, oracle.Child.A);
             Assert.AreEqual(2, oracle.Child.B);
-            Assert.AreEqual(2, ours.Child.B);
+            Assert.AreEqual(oracle.Child.A, ours.Child.A, once);
+            Assert.AreEqual(oracle.Child.B, ours.Child.B, once);
 
-            // The divergence stops at the seed: once the payload says anything about the member, the
-            // two agree again.
+            // A payload that DOES mention the member overrides the seed rather than combining with
+            // it -- merge is per member, not per value.
             const string twice = "12021002" + "12020801";
             Assert.AreEqual(
                 OracleDecode<SeededHolder>(twice).Child.A,
                 Decode<SeededHolder>(twice).Child.A,
                 twice
             );
+
+            // And a payload that never mentions the field at all leaves the seed entirely alone.
+            Assert.AreEqual(9, Decode<SeededHolder>("0807").Child.A);
+            Assert.AreEqual(0, Decode<SeededHolder>("0807").Child.B);
+        }
+
+        [Test]
+        public void EverySeededMemberShapeAgreesWithTheOracle()
+        {
+            // One payload per shape, each setting the member the seed does NOT set, so "merged" and
+            // "replaced" produce different answers for all four.
+            const string reference = "0A021002";
+            const string structural = "12021002";
+            const string nullable = "1A021002";
+            const string surrogate = "2205150000" + "0040";
+
+            Assert.AreEqual(
+                OracleDecode<SeededShapes>(reference).Reference.A,
+                Decode<SeededShapes>(reference).Reference.A,
+                reference
+            );
+            Assert.AreEqual(
+                OracleDecode<SeededShapes>(structural).Where.X,
+                Decode<SeededShapes>(structural).Where.X,
+                structural
+            );
+            Assert.AreEqual(
+                OracleDecode<SeededShapes>(nullable).Maybe.Value.X,
+                Decode<SeededShapes>(nullable).Maybe.Value.X,
+                nullable
+            );
+            Assert.AreEqual(
+                OracleDecode<SeededShapes>(surrogate).Vector.x,
+                Decode<SeededShapes>(surrogate).Vector.x,
+                surrogate
+            );
+
+            // The member each payload DID set arrives whatever the seeding rule is.
+            Assert.AreEqual(2, Decode<SeededShapes>(reference).Reference.B);
+            Assert.AreEqual(2, Decode<SeededShapes>(structural).Where.Y);
+            Assert.AreEqual(2, Decode<SeededShapes>(nullable).Maybe.Value.Y);
+            Assert.AreEqual(2f, Decode<SeededShapes>(surrogate).Vector.y);
+        }
+
+        [Test]
+        public void ASkipConstructorContractIgnoresTheSeedItsInitializerLeft()
+        {
+            // protobuf-net allocates this one uninitialized, so its member has no seed at all. This
+            // package's generated read constructor necessarily runs field initializers, so the seed
+            // exists and must be ignored anyway -- the rule a repeated member already follows.
+            const string once = "0A021002";
+
+            SeededSkipHolder oracle = OracleDecode<SeededSkipHolder>(once);
+            SeededSkipHolder ours = Decode<SeededSkipHolder>(once);
+
+            Assert.AreEqual(0, oracle.Child.A);
+            Assert.AreEqual(oracle.Child.A, ours.Child.A, once);
+            Assert.AreEqual(oracle.Child.B, ours.Child.B, once);
+
+            // The same rule for a repeated member, which is where the flag was already being
+            // ignored: a contract declaring SkipConstructor and no constructor of its own kept the
+            // initializer and appended to it, where the oracle's uninitialized instance has none.
+            const string values = "10011002";
+            CollectionAssert.AreEqual(
+                OracleDecode<SeededSkipHolder>(values).Values,
+                Decode<SeededSkipHolder>(values).Values,
+                values
+            );
+            CollectionAssert.AreEqual(new[] { 1, 2 }, Decode<SeededSkipHolder>(values).Values);
+        }
+
+        [Test]
+        public void AGenericMemberMergesIntoItsConstructorsSeed()
+        {
+            // The generic path reaches the same merge through WProtoGeneric<T>, whose closure is the
+            // only thing that knows the member is a message at all.
+            const string once = "0A021002";
+
+            SeededBox<SeededChild> oracle = OracleDecode<SeededBox<SeededChild>>(once);
+            SeededBox<SeededChild> ours = Decode<SeededBox<SeededChild>>(once);
+
+            Assert.AreEqual(9, oracle.Value.A);
+            Assert.AreEqual(2, oracle.Value.B);
+            Assert.AreEqual(oracle.Value.A, ours.Value.A, once);
+            Assert.AreEqual(oracle.Value.B, ours.Value.B, once);
         }
 
         [Test]
@@ -232,6 +314,112 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
                 1,
                 HookedContract.AfterDeserializationRuns - before,
                 "a merged member must not run its lifecycle hooks once per occurrence"
+            );
+        }
+
+        [Test]
+        public void ADuplicatedSubMessageMergesThroughAGenericMember()
+        {
+            // The same merge one level of indirection away: the member's type is the contract's own
+            // type parameter, so whether it is a sub-message at all is a property of the closure and
+            // not of the emitted code. A reference closure first.
+            const string twice = "0A020801" + "0A021002";
+
+            Box<DuplicateChild> oracle = OracleDecode<Box<DuplicateChild>>(twice);
+            Box<DuplicateChild> ours = Decode<Box<DuplicateChild>>(twice);
+
+            Assert.AreEqual(1, oracle.Value.A);
+            Assert.AreEqual(2, oracle.Value.B);
+            Assert.AreEqual(oracle.Value.A, ours.Value.A, twice);
+            Assert.AreEqual(oracle.Value.B, ours.Value.B, twice);
+        }
+
+        [Test]
+        public void ADuplicatedStructSubMessageMergesThroughAGenericMember()
+        {
+            // The struct closure, where "merge into the existing instance" has no obvious meaning
+            // and protobuf-net merges anyway -- the same answer its non-generic counterpart gives.
+            const string twice = "0A020801" + "0A021002";
+
+            Box<Outer.Point> oracle = OracleDecode<Box<Outer.Point>>(twice);
+            Box<Outer.Point> ours = Decode<Box<Outer.Point>>(twice);
+
+            Assert.AreEqual(1, oracle.Value.X);
+            Assert.AreEqual(2, oracle.Value.Y);
+            Assert.AreEqual(oracle.Value.X, ours.Value.X, twice);
+            Assert.AreEqual(oracle.Value.Y, ours.Value.Y, twice);
+        }
+
+        [Test]
+        public void ADuplicatedGenericScalarIsStillLastWins()
+        {
+            // The discriminator the branch has to get right. A string closure is length-delimited
+            // too, so a reader that decided to merge from the WIRE type rather than from whether the
+            // closure is message-shaped would concatenate two strings into one.
+            const string texts = "0A0161" + "0A0162";
+            Assert.AreEqual("b", OracleDecode<Box<string>>(texts).Value);
+            Assert.AreEqual("b", Decode<Box<string>>(texts).Value, texts);
+
+            const string numbers = "0801" + "0802";
+            Assert.AreEqual(2, OracleDecode<Box<int>>(numbers).Value);
+            Assert.AreEqual(2, Decode<Box<int>>(numbers).Value, numbers);
+        }
+
+        [Test]
+        public void AMergedGenericSubMessageRunsItsAfterDeserializationHookOnce()
+        {
+            // The generic path accumulates and decodes once for the same reason the emitted one
+            // does: two occurrences are one value, so they are one decode and one hook.
+            int before = HookedContract.AfterDeserializationRuns;
+
+            Box<HookedContract> decoded = Decode<Box<HookedContract>>("0A020801" + "0A020802");
+
+            Assert.AreEqual(2, decoded.Value.Value);
+            Assert.AreEqual(
+                1,
+                HookedContract.AfterDeserializationRuns - before,
+                "a merged generic member must not run its lifecycle hooks once per occurrence"
+            );
+        }
+
+        [Test]
+        public void ATruncatedLaterOccurrenceOfAGenericSubMessageIsRefused()
+        {
+            // Accumulating must not turn a truncated payload into a partial value here either.
+            foreach (string hex in new[] { "0A020801" + "0A02", "0A020801" + "0A0210" })
+            {
+                Assert.IsFalse(OracleAccepts<Box<DuplicateChild>>(hex), hex);
+
+                WProtoReader reader = new WProtoReader(Parse(hex));
+                Assert.IsFalse(
+                    WProtoFormatterProvider
+                        .Get<Box<DuplicateChild>>()
+                        .TryRead(ref reader, out Box<DuplicateChild> _),
+                    hex
+                );
+            }
+        }
+
+        [Test]
+        public void ASkipConstructorContractMergesIntoASeedItsParentBuilt()
+        {
+            // SkipConstructor decides how an instance is CREATED. A parent whose constructor already
+            // built one hands over an instance the oracle built the same way, so its members are
+            // real seeds -- suppressing them there is data loss, not a match.
+            const string nested = "0A040A021002";
+
+            SkipSeedParent oracle = OracleDecode<SkipSeedParent>(nested);
+            SkipSeedParent ours = Decode<SkipSeedParent>(nested);
+
+            Assert.AreEqual(oracle.Child.Child.A, ours.Child.Child.A, nested);
+            Assert.AreEqual(oracle.Child.Child.B, ours.Child.Child.B, nested);
+
+            // The same question for a repeated member of that nested instance.
+            const string values = "0A0410011002";
+            CollectionAssert.AreEqual(
+                OracleDecode<SkipSeedParent>(values).Child.Values,
+                Decode<SkipSeedParent>(values).Child.Values,
+                values
             );
         }
 

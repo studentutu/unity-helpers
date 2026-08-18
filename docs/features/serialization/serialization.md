@@ -1027,10 +1027,15 @@ Five behaviors are worth knowing, because two of them are the opposite of the ru
 
 - **A null sub-message is omitted; a present-but-empty one is written** as a key and a zero length —
   the same distinction an empty `string` draws.
-- **A sub-message field carried more than once merges**, as protobuf requires and protobuf-net does:
-  `12 02 08 01` followed by `12 02 10 02` sets both members rather than only the second. The merge is
-  recursive, and a `struct` sub-message merges the same way a reference one does. A non-repeated
-  **scalar** carried twice is still last-wins.
+- **A sub-message field merges into what the member already holds**, as protobuf requires and
+  protobuf-net does. Two occurrences combine — `12 02 08 01` followed by `12 02 10 02` sets both
+  members rather than only the second — and so does the **first** occurrence and whatever your
+  constructor gave the member: a member seeded to `{A = 9}` plus a payload setting only `B` reads
+  back as `{A = 9, B = 2}`. The merge is recursive, reaches a `struct` sub-message, a `Nullable<T>`
+  one and one behind a surrogate, and a non-repeated **scalar** carried twice is still last-wins.
+  A contract declaring `SkipConstructor` has no seed to merge into **when the formatter created the
+  instance itself** — protobuf-net's is never constructed, so its members hold nothing. One a
+  parent's constructor supplied is a real instance the oracle holds too, and its members do merge.
 - **A struct sub-message is always written**, even when every member equals its default. protobuf-net
   does the same, and matching it is what keeps saved data readable.
 - **Every lifecycle hook still runs exactly once per serialization**, however deep the value sits, so
@@ -1327,6 +1332,13 @@ in no source could not have been reached at runtime either.
 If you need a closure that no code names directly, name it — a `static` field of that type is
 enough.
 
+**A member typed as the parameter follows the closure's rules, not the field's.** The merge that a
+sub-message field gets when a payload carries it twice applies here too, and only when the closure is
+message-shaped: `Box<Child>` merges the two occurrences, while `Box<string>` — length-delimited on
+the wire in exactly the same way — stays last-wins, because concatenating two strings is not a merge.
+The decision is `WProtoGeneric<T>.IsMessage`, asked at run time because the closure is the only thing
+that knows the answer.
+
 A contract **nested inside** a generic type is still refused (`WPROTO009`): it is not itself generic,
 so there is no construction of it to discover, and its formatter would be emitted and never
 registered. Move it out, or make it generic itself.
@@ -1394,9 +1406,12 @@ survive IL2CPP, so the generator emits a private constructor into your type's `p
 instead. The consequence is that C# field initializers and base constructors still run, where under
 protobuf-net they do not — the object is more initialized, never less.
 
-The flag is **inert on a type that declares no constructor of its own**. There is nothing to skip
-there, and emitting a constructor would delete the implicit parameterless one and stop `new Yours()`
-from compiling in your own code.
+**No constructor is emitted into a type that declares none of its own.** There is nothing to skip
+there, and emitting one would delete the implicit parameterless constructor and stop `new Yours()`
+from compiling in your own code. The flag still governs seeding on such a type: a member of an
+instance the formatter created keeps nothing from its field initializers, because the instance
+protobuf-net reads into has none — while a member of an instance handed in by a parent's constructor
+seeds normally, since that one exists on both sides.
 
 ### Resolving a formatter
 

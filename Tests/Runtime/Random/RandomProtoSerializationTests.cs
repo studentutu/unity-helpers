@@ -4,6 +4,8 @@
 namespace WallstopStudios.UnityHelpers.Tests.Runtime.Random
 {
     using System;
+    using System.Collections.Generic;
+    using System.IO;
     using NUnit.Framework;
     using WallstopStudios.UnityHelpers.Core.Random;
     using Serializer = WallstopStudios.UnityHelpers.Core.Serialization.Serializer;
@@ -557,6 +559,157 @@ namespace WallstopStudios.UnityHelpers.Tests.Runtime.Random
             // Third roundtrip
             PcgRandom deserialized3 = SerializeDeserialize(deserialized2);
             Assert.AreEqual(deserialized2.InternalState, deserialized3.InternalState);
+        }
+
+        /// <summary>
+        /// Every generator, built the ordinary way, so one case cannot quietly drop out.
+        /// </summary>
+        private static IEnumerable<TestCaseData> EveryGenerator()
+        {
+            Guid seed = Guid.Parse("12345678-1234-1234-1234-123456789012");
+            yield return Named("Restored", "DotNetRandom", new DotNetRandom(seed));
+            yield return Named("Restored", "PcgRandom", new PcgRandom(seed));
+            yield return Named("Restored", "XorShiftRandom", new XorShiftRandom(12345));
+            yield return Named("Restored", "WyRandom", new WyRandom(seed));
+            yield return Named("Restored", "XoroShiroRandom", new XoroShiroRandom(seed));
+            yield return Named("Restored", "SystemRandom", new SystemRandom(12345));
+            yield return Named(
+                "Restored",
+                "LinearCongruentialGenerator",
+                new LinearCongruentialGenerator(12345)
+            );
+            yield return Named("Restored", "SquirrelRandom", new SquirrelRandom(12345));
+            yield return Named("Restored", "RomuDuo", new RomuDuo(seed));
+            yield return Named("Restored", "SplitMix64", new SplitMix64(seed));
+            yield return Named("Restored", "IllusionFlow", new IllusionFlow(seed));
+            yield return Named("Restored", "FlurryBurstRandom", new FlurryBurstRandom(seed));
+            yield return Named("Restored", "PhotonSpinRandom", new PhotonSpinRandom(seed));
+            yield return Named("Restored", "StormDropRandom", new StormDropRandom(12345u));
+            yield return Named("Restored", "BlastCircuitRandom", new BlastCircuitRandom(seed));
+            yield return Named("Restored", "WaveSplatRandom", new WaveSplatRandom(0xC0FFEEUL));
+            yield return Named("Restored", "WDoomRandom", new WDoomRandom(seedIndex: 7));
+        }
+
+        /// <summary>
+        /// Every generator a caller can seed so that its ENTIRE serialized state is its type's
+        /// default, which is the one state protobuf writes nothing about.
+        /// </summary>
+        /// <remarks>
+        /// Seed zero is the most ordinary seed there is, so this is not a corner reachable only
+        /// by a crafted payload -- <c>new SquirrelRandom(0)</c> is a line a game writes.
+        /// </remarks>
+        private static IEnumerable<TestCaseData> EveryAllDefaultGenerator()
+        {
+            yield return Named(
+                "AllDefault",
+                "BlastCircuitRandom",
+                new BlastCircuitRandom(0UL, 0UL, 0UL, 0UL)
+            );
+            yield return Named(
+                "AllDefault",
+                "FlurryBurstRandom",
+                new FlurryBurstRandom(default(RandomState))
+            );
+            yield return Named(
+                "AllDefault",
+                "LinearCongruentialGenerator",
+                new LinearCongruentialGenerator(0)
+            );
+            yield return Named("AllDefault", "SplitMix64", new SplitMix64(0UL));
+            yield return Named("AllDefault", "SquirrelRandom", new SquirrelRandom(0));
+            yield return Named("AllDefault", "WaveSplatRandom", new WaveSplatRandom(0UL));
+            yield return Named("AllDefault", "WDoomRandom", new WDoomRandom(seedIndex: 0));
+            yield return Named("AllDefault", "WyRandom", new WyRandom(0UL));
+        }
+
+        /// <summary>Names one case, uniquely across both sources.</summary>
+        /// <remarks>
+        /// <c>SetName</c> replaces the WHOLE test name, so the suite has to be part of it or the
+        /// two sources both produce a case called <c>WyRandom</c> and a failure report cannot say
+        /// which one it came from. The overload that keeps the method name is absent from the
+        /// NUnit that Unity 2021.3 ships.
+        /// </remarks>
+        private static TestCaseData Named(string suite, string name, IRandom random)
+        {
+            return new TestCaseData(random).SetName(suite + "-" + name);
+        }
+
+        private static IRandom ProtobufNetRoundTrip(IRandom random)
+        {
+            using MemoryStream written = new();
+            ProtoBuf.Serializer.Serialize(written, (AbstractRandom)random);
+            using MemoryStream read = new(written.ToArray());
+            return ProtoBuf.Serializer.Deserialize<AbstractRandom>(read);
+        }
+
+        [TestCaseSource(nameof(EveryGenerator))]
+        public void ARestoredGeneratorCanStillProduceAGuid(IRandom random)
+        {
+            // The guid buffer is not on the wire, so a reader that allocates the instance without
+            // running a constructor -- which is what SkipConstructor asks protobuf-net for -- left
+            // it null, and the first NextGuid on a loaded save threw. Both readers are asked,
+            // because only one of them allocates that way.
+            foreach (IRandom restored in new[] { RoundTrip(random), ProtobufNetRoundTrip(random) })
+            {
+                Guid first = restored.NextGuid();
+                Guid second = restored.NextGuid();
+                Assert.AreNotEqual(Guid.Empty, first);
+                Assert.AreNotEqual(first, second);
+            }
+        }
+
+        [TestCaseSource(nameof(EveryAllDefaultGenerator))]
+        public void AnAllDefaultStateRestoresTheStreamItSaved(IRandom random)
+        {
+            // protobuf omits a member equal to its type's default, so this generator's payload is
+            // the include wrapper and nothing else. A constructor that seeds from Guid.NewGuid()
+            // keeps the invented value, which is a different stream on every load of the same
+            // bytes -- identical saves, a different game.
+            byte[] payload = Serializer.ProtoSerialize<IRandom>(random);
+            Assert.LessOrEqual(payload.Length, 3, "expected a payload naming no member");
+
+            // Every restored generator is taken from the saved state, so they must be built
+            // before the draw below advances the original past it.
+            IRandom viaWallstopProto = Serializer.ProtoDeserialize<IRandom>(payload);
+            IRandom viaWallstopProtoAgain = Serializer.ProtoDeserialize<IRandom>(payload);
+            IRandom viaProtobufNet = ProtobufNetRoundTrip(random);
+
+            uint[] expected = Draw(random);
+            CollectionAssert.AreEqual(expected, Draw(viaWallstopProto));
+            CollectionAssert.AreEqual(expected, Draw(viaWallstopProtoAgain));
+            CollectionAssert.AreEqual(expected, Draw(viaProtobufNet));
+        }
+
+        [Test]
+        public void APcgIncrementRestoredAsZeroStillAdvances()
+        {
+            // PCG multiplies and then adds its increment, so a zero increment leaves the state
+            // where it was and every draw is the same value. Every constructor stores an odd one,
+            // so only a payload can deliver zero -- and it must not produce a dead generator.
+            PcgRandom zeroed = new(0UL, 0UL);
+            IRandom restored = Serializer.ProtoDeserialize<IRandom>(
+                Serializer.ProtoSerialize<IRandom>(zeroed)
+            );
+
+            uint[] drawn = Draw(restored);
+            CollectionAssert.AreEqual(Draw(zeroed), drawn);
+            Assert.Greater(new HashSet<uint>(drawn).Count, 1, "a dead stream repeats one value");
+        }
+
+        private static IRandom RoundTrip(IRandom random)
+        {
+            return Serializer.ProtoDeserialize<IRandom>(Serializer.ProtoSerialize<IRandom>(random));
+        }
+
+        private static uint[] Draw(IRandom random)
+        {
+            uint[] drawn = new uint[32];
+            for (int i = 0; i < drawn.Length; ++i)
+            {
+                drawn[i] = random.NextUint();
+            }
+
+            return drawn;
         }
     }
 }

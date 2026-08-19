@@ -225,13 +225,9 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 SemanticModel model = compilation.GetSemanticModel(tree);
                 foreach (SyntaxNode node in tree.GetRoot().DescendantNodes())
                 {
-                    if (!(node is TypeSyntax type))
-                    {
-                        continue;
-                    }
-
+                    INamedTypeSymbol named = ConstructedTypeAt(model, node, out Location where);
                     if (
-                        !(Resolve(model, type) is INamedTypeSymbol named)
+                        named == null
                         || !named.IsGenericType
                         || named.IsUnboundGenericType
                         || IsOpen(named)
@@ -259,7 +255,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                         || TypeNaming.ReportIfUnnameable(
                             named,
                             compilation,
-                            type.GetLocation(),
+                            where,
                             report,
                             announced
                         )
@@ -424,10 +420,31 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 return null;
             }
 
+            // Measured against protobuf-net 2.4.9 and 3.2.56, both the same: an immutable contract
+            // is CONSTRUCTED, read into, and then its readonly members assigned by reflection -- so
+            // every member the payload does not overwrite keeps what the author's constructor gave
+            // it, a sub-message merges into it, a repeated member appends to it and a map merges by
+            // key. Holding every value in a local that starts at `default` loses all of that in
+            // silence. The seed instance costs one construction per read, so it is built only where
+            // construction is possible and could actually set something.
+            // Measured, and it is the exclusion that matters most: a contract declaring
+            // SkipConstructor is allocated UNINITIALIZED by protobuf-net whether or not it is
+            // immutable, so no constructor runs and there is no seed at all -- a sub-message
+            // replaces, and an absent scalar comes back at its type's default rather than at what
+            // the constructor would have set. `PcgRandom` is exactly this shape, and seeding it
+            // would run `Guid.NewGuid()` on every read to produce an answer the oracle disagrees
+            // with.
+            bool seedsFromInstance =
+                constructAtEnd
+                && !Shape.SkipsConstructor(contract)
+                && CanConstructParameterlessly(contract)
+                && ConstructionCouldSeedAMember(contract);
+
             foreach (Member member in members)
             {
                 member.Deferred = constructAtEnd || 0 < includes.Count;
                 member.ConstructAtEnd = constructAtEnd;
+                member.SeedsFromInstance = seedsFromInstance;
             }
 
             Hooks hooks = CollectHooks(context, contract);
@@ -477,6 +494,8 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             {
                 member.SkipConstructor = declaredSkipConstructor;
             }
+
+            ReportInitializersSkipConstructorDiscards(context, contract);
 
             // Not asked of a contract that builds itself. The diagnostic exists because the formatter
             // normally calls `new T()` to have something to read into; a contract with a member that
@@ -602,6 +621,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 includes,
                 hooks,
                 constructAtEnd,
+                seedsFromInstance,
                 skipConstructor,
                 EncodedTypeParameters(contract),
                 nested
@@ -763,6 +783,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             List<Include> includes,
             Hooks hooks,
             bool constructAtEnd,
+            bool seedsFromInstance,
             bool skipConstructor,
             List<string> encodedTypeParameters,
             NestedCollections nested
@@ -830,6 +851,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 includes,
                 hooks,
                 constructAtEnd,
+                seedsFromInstance,
                 skipConstructor,
                 mergeable,
                 guardedSeeding
@@ -950,6 +972,224 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 if (!constructor.IsImplicitlyDeclared)
                 {
                     return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Warns about each field whose value exists only because a constructor ran, on a contract
+        /// that asks for one never to run.
+        /// </summary>
+        /// <param name="context">The generator context, for reporting.</param>
+        /// <param name="contract">The contract being emitted.</param>
+        /// <remarks>
+        /// The shape that shipped for five releases. <c>AbstractRandom._guidBytes</c> is a scratch
+        /// buffer, not a <c>[WProtoMember]</c>, and its only guarantee was its field initializer --
+        /// so every one of twelve generators restored through protobuf-net threw from
+        /// <c>NextGuid()</c>. Invisible through this package's own API, because the constructor
+        /// WallstopProto emits for <c>SkipConstructor</c> does run initializers and protobuf-net's
+        /// uninitialized allocation runs none.
+        ///
+        /// Asked of <see cref="Shape.SkipsConstructor"/> rather than of the flag the emitter ends up
+        /// with: an immutable contract makes this generator ignore <c>SkipConstructor</c>, and
+        /// protobuf-net honours it regardless.
+        /// </remarks>
+        private static void ReportInitializersSkipConstructorDiscards(
+            GeneratorExecutionContext context,
+            INamedTypeSymbol contract
+        )
+        {
+            if (!Shape.SkipsConstructor(contract) || contract.IsValueType)
+            {
+                return;
+            }
+
+            // The BASE CHAIN, not just the contract. An uninitialized allocation zeroes the whole
+            // object, inherited fields included, so a base's declaration initializer is dropped
+            // exactly as the contract's own is. That is the shape this diagnostic was written for
+            // and the one it originally missed: `AbstractRandom._guidBytes` is declared on the base
+            // while `SkipConstructor` sits on each of the twelve concrete generators, so a check
+            // that asks only the contract would never have reported the defect it exists to catch.
+            for (
+                INamedTypeSymbol declaring = contract;
+                declaring != null && declaring.SpecialType != SpecialType.System_Object;
+                declaring = declaring.BaseType
+            )
+            {
+                ReportDroppedInitializers(context, contract, declaring);
+            }
+        }
+
+        /// <summary>
+        /// Reports each field of <paramref name="declaring"/> whose value exists only because a
+        /// constructor ran, against the contract that asked for one never to.
+        /// </summary>
+        /// <param name="context">The generator context, for reporting.</param>
+        /// <param name="contract">The contract declaring <c>SkipConstructor</c>.</param>
+        /// <param name="declaring">The contract itself, or one of its base types.</param>
+        private static void ReportDroppedInitializers(
+            GeneratorExecutionContext context,
+            INamedTypeSymbol contract,
+            INamedTypeSymbol declaring
+        )
+        {
+            foreach (ISymbol member in declaring.GetMembers())
+            {
+                if (
+                    member.IsStatic
+                    || member is not IFieldSymbol field
+                    || field.IsConst
+                    || HasAttribute(member, MemberAttribute)
+                )
+                {
+                    continue;
+                }
+
+                // An auto-property's backing field carries the initializer and is what the
+                // uninitialized allocation leaves at its default, so the property it belongs to is
+                // what the developer has to be pointed at. Its own attributes are the ones that
+                // matter, including the [WProtoMember] that would put it on the wire.
+                ISymbol declared = field.AssociatedSymbol ?? field;
+                if (declared != field && HasAttribute(declared, MemberAttribute))
+                {
+                    continue;
+                }
+
+                // The property's references, not the backing field's: an auto-property's backing
+                // field is implicitly declared and has none, so asking it reports every such
+                // property as clean.
+                bool initialized = false;
+                foreach (SyntaxReference reference in declared.DeclaringSyntaxReferences)
+                {
+                    SyntaxNode syntax = reference.GetSyntax();
+                    if (
+                        (
+                            syntax is VariableDeclaratorSyntax declarator
+                            && declarator.Initializer != null
+                        )
+                        || (
+                            syntax is PropertyDeclarationSyntax property
+                            && property.Initializer != null
+                        )
+                    )
+                    {
+                        initialized = true;
+                        break;
+                    }
+                }
+
+                if (!initialized)
+                {
+                    continue;
+                }
+
+                context.ReportDiagnostic(
+                    Diagnostic.Create(
+                        WProtoDiagnostics.SkipConstructorDropsAnInitializer,
+                        declared.Locations.FirstOrDefault(),
+                        contract.Name,
+                        SymbolEqualityComparer.Default.Equals(declaring, contract)
+                            ? declared.Name
+                            : declaring.Name + "." + declared.Name
+                    )
+                );
+            }
+        }
+
+        /// <summary>
+        /// Reports whether <c>new T()</c> compiles inside the emitted formatter, given the
+        /// constructors this generator is about to add.
+        /// </summary>
+        /// <param name="contract">The contract being emitted.</param>
+        /// <remarks>
+        /// A struct always has one and it cannot be taken away. A class's IMPLICIT parameterless
+        /// constructor does not survive the read constructor emitted alongside this -- declaring any
+        /// constructor removes it -- which is why one is emitted back in its place; see
+        /// <see cref="EmitConstructor"/>. What cannot be recovered is a class whose author declared
+        /// only parameterized constructors: adding a parameterless one there would invent a public
+        /// API and let a caller past invariants the author's constructor enforces.
+        /// </remarks>
+        private static bool CanConstructParameterlessly(INamedTypeSymbol contract)
+        {
+            return contract.IsValueType
+                || !DeclaresAConstructor(contract)
+                || HasAccessibleParameterlessConstructor(contract);
+        }
+
+        /// <summary>
+        /// Reports whether <c>new T()</c> could leave any serialized member at something other than
+        /// its type's default.
+        /// </summary>
+        /// <param name="contract">The contract being emitted.</param>
+        /// <remarks>
+        /// The whole cost of seeding an immutable contract is one construction per read, so it is
+        /// paid only where it can change an answer. Two syntactic things can set a member before the
+        /// read loop starts: an initializer on the member itself, and the body of a parameterless
+        /// constructor. A constructor that chains to another (<c>: this(...)</c>) counts as a body,
+        /// because the constructor it chains to is one.
+        /// </remarks>
+        private static bool ConstructionCouldSeedAMember(INamedTypeSymbol contract)
+        {
+            foreach (ISymbol member in contract.GetMembers())
+            {
+                if (member is IMethodSymbol candidate)
+                {
+                    if (
+                        candidate.MethodKind != MethodKind.Constructor
+                        || candidate.IsStatic
+                        || candidate.Parameters.Length != 0
+                        || candidate.IsImplicitlyDeclared
+                    )
+                    {
+                        continue;
+                    }
+
+                    foreach (SyntaxReference reference in candidate.DeclaringSyntaxReferences)
+                    {
+                        if (
+                            reference.GetSyntax() is ConstructorDeclarationSyntax declaration
+                            && (
+                                declaration.Initializer != null
+                                || declaration.ExpressionBody != null
+                                || (
+                                    declaration.Body != null
+                                    && 0 < declaration.Body.Statements.Count
+                                )
+                            )
+                        )
+                        {
+                            return true;
+                        }
+                    }
+
+                    continue;
+                }
+
+                if (member.IsStatic || (!(member is IFieldSymbol) && !(member is IPropertySymbol)))
+                {
+                    continue;
+                }
+
+                foreach (SyntaxReference reference in member.DeclaringSyntaxReferences)
+                {
+                    SyntaxNode syntax = reference.GetSyntax();
+                    if (
+                        syntax is VariableDeclaratorSyntax declarator
+                        && declarator.Initializer != null
+                    )
+                    {
+                        return true;
+                    }
+
+                    if (
+                        syntax is PropertyDeclarationSyntax property
+                        && property.Initializer != null
+                    )
+                    {
+                        return true;
+                    }
                 }
             }
 
@@ -1215,6 +1455,20 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             List<Member> members
         )
         {
+            // Declaring ANY constructor removes the implicit parameterless one, so a contract whose
+            // author declared none loses `new Theirs()` -- in the consumer's own source, from an
+            // attribute that says nothing about constructors. protobuf-net loses the type entirely
+            // at the same moment ("No parameterless constructor found"), which is the whole of the
+            // WALLSTOP_PROTO-off build. Emitting the one the compiler would have is what keeps both.
+            if (!contract.IsValueType && !DeclaresAConstructor(contract))
+            {
+                writer.Line(
+                    "/// <summary>The parameterless constructor this type would have had.</summary>"
+                );
+                writer.Line("public " + contract.Name + "() { }");
+                writer.Blank();
+            }
+
             writer.Line(
                 "/// <summary>Generated WallstopProto constructor. Do not edit or call.</summary>"
             );
@@ -1359,6 +1613,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             List<Include> includes,
             Hooks hooks,
             bool constructAtEnd,
+            bool seedsFromInstance,
             bool skipConstructor,
             bool mergeable,
             bool guardedSeeding
@@ -1442,9 +1697,17 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             }
             else if (constructAtEnd)
             {
-                // Deliberately not created here: a readonly member can only be assigned by a
-                // constructor, so there is nothing to assign onto until the last value is in hand.
-                writer.Line(qualified + " read = default(" + qualified + ");");
+                // Nothing is assigned onto this -- a readonly member can only be assigned by a
+                // constructor, and the one at the end of the read overwrites it. It exists so every
+                // member's read local can START at what the author's constructor left there, which
+                // is what protobuf-net reads into and what a merge, an append and a map union all
+                // combine with. Where construction could not set anything, `default` says so and
+                // costs nothing.
+                writer.Line(
+                    seedsFromInstance
+                        ? qualified + " read = new " + qualified + "();"
+                        : qualified + " read = default(" + qualified + ");"
+                );
             }
             else if (contract.IsValueType)
             {
@@ -1770,6 +2033,51 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
         /// the semantic model resolves anywhere in this compilation, deduplicated. A construction
         /// that appears in no source cannot be reached at runtime either.
         /// </remarks>
+        /// <summary>
+        /// Resolves the closed generic a node constructs, whether it is spelled as a type or built
+        /// by a tuple literal.
+        /// </summary>
+        /// <param name="model">The semantic model for the node's tree.</param>
+        /// <param name="node">The node to resolve.</param>
+        /// <param name="location">Receives the node's location, for diagnostics.</param>
+        /// <remarks>
+        /// A <c>TypeSyntax</c> scan alone misses the most ordinary way a tuple ever appears.
+        /// <c>Serializer.ProtoSerialize((7, 1.5f))</c> names no type at all -- the argument is a
+        /// <c>TupleExpressionSyntax</c> and the closure is inferred -- so a consumer who writes only
+        /// that call got no registration and fell through to the reflective path in a player, which
+        /// is the failure the ValueTuple marshal exists to close.
+        ///
+        /// The underlying type is returned rather than the tuple type, so <c>(int Count, float Weight)</c>
+        /// and <c>(int, float)</c> are one closure and the registrar writes <c>ValueTuple&lt;int, float&gt;</c>
+        /// rather than a name carrying element labels.
+        /// </remarks>
+        private static INamedTypeSymbol ConstructedTypeAt(
+            SemanticModel model,
+            SyntaxNode node,
+            out Location location
+        )
+        {
+            if (node is TypeSyntax type)
+            {
+                location = type.GetLocation();
+                return Resolve(model, type) as INamedTypeSymbol;
+            }
+
+            if (node is TupleExpressionSyntax tuple)
+            {
+                location = tuple.GetLocation();
+                if (!(model.GetTypeInfo(tuple).Type is INamedTypeSymbol named))
+                {
+                    return null;
+                }
+
+                return named.IsTupleType ? named.TupleUnderlyingType ?? named : named;
+            }
+
+            location = Location.None;
+            return null;
+        }
+
         private static IEnumerable<string> ClosedConstructions(
             Compilation compilation,
             INamedTypeSymbol contract,
@@ -1784,16 +2092,8 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 SemanticModel model = compilation.GetSemanticModel(tree);
                 foreach (SyntaxNode node in tree.GetRoot().DescendantNodes())
                 {
-                    if (!(node is TypeSyntax type))
-                    {
-                        continue;
-                    }
-
-                    if (
-                        !(Resolve(model, type) is INamedTypeSymbol named)
-                        || !named.IsGenericType
-                        || named.IsUnboundGenericType
-                    )
+                    INamedTypeSymbol named = ConstructedTypeAt(model, node, out Location where);
+                    if (named == null || !named.IsGenericType || named.IsUnboundGenericType)
                     {
                         continue;
                     }
@@ -1817,13 +2117,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                     // `Box<SomeFixture.PrivatePayload>` is a name the registrar cannot write, and
                     // emitting it fails the build of the assembly that declared the private type.
                     if (
-                        !TypeNaming.ReportIfUnnameable(
-                            named,
-                            compilation,
-                            type.GetLocation(),
-                            report,
-                            announced
-                        )
+                        !TypeNaming.ReportIfUnnameable(named, compilation, where, report, announced)
                     )
                     {
                         found.Add(named.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));

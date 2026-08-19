@@ -13,6 +13,7 @@ Unity Helpers provides serializable wrappers for types that Unity can't serializ
 - [SerializableHashSet & SerializableSortedSet](#serializablehashset--serializablesortedset)
 - [SerializableType](#serializabletype)
 - [SerializableNullable](#serializablenullable)
+- [SerializableValueTuple](#serializablevaluetuple)
 - [Best Practices](#best-practices)
 - [Examples](#examples)
 
@@ -808,6 +809,131 @@ public SerializableNullable<Color> customColor;  // null = use preset
 ```
 
 ---
+
+---
+
+## SerializableValueTuple
+
+Unity-friendly stand-in for `ValueTuple`, in two- and three-component forms.
+
+### Why SerializableValueTuple?
+
+- **Problem:** Unity does not serialize `(int, float)` — and it fails _silently_. There is no
+  `SerializedProperty` for the field at all, so a tuple inside a `SerializableDictionary` or a
+  `List<T>` loses whatever you authored with nothing to report it. `[Serializable]` on the type is
+  not the obstacle (`ValueTuple<,>` already carries it); Unity declines every type out of the
+  framework assemblies.
+- **And it is worse in a player.** `Serializer.ProtoSerialize((7, 1.5f))` and
+  `Serializer.JsonStringify((7, 1.5f))` both work in the editor and both throw
+  `ExecutionEngineException` on an IL2CPP standalone build — protobuf-net's
+  `StructValueChecker<ValueTuple<int, float>>` and System.Text.Json's
+  `ObjectDefaultConverter<ValueTuple<int, float>>` are instantiated reflectively, so no AOT code is
+  generated for them. Measured on Unity 2021.3. A tuple therefore looks serializable right up until
+  you ship.
+- **Solution:** `SerializableValueTuple<T1, T2>` and `SerializableValueTuple<T1, T2, T3>` — the same
+  components under a name Unity will serialize, with implicit conversions in both directions so
+  `(T1, T2)` stays the spelling everywhere else.
+
+---
+
+### Basic Usage
+
+```csharp
+using UnityEngine;
+using WallstopStudios.UnityHelpers.Core.DataStructure.Adapters;
+
+public class LootTable : MonoBehaviour
+{
+    // Authored in the Inspector, and it survives a domain reload.
+    public SerializableDictionary<string, SerializableValueTuple<int, float>> drops = new();
+
+    public void Grant(string id)
+    {
+        (int count, float weight) = drops[id];
+        Debug.Log($"{count} at {weight}");
+    }
+}
+```
+
+---
+
+### Interchangeable with `ValueTuple`
+
+The field names and numbers are `ValueTuple`'s own, so payloads written with either read back through
+the other — an existing save migrates without a rewrite:
+
+```csharp
+byte[] written = Serializer.ProtoSerialize((7, 1.5f));
+SerializableValueTuple<int, float> read =
+    Serializer.ProtoDeserialize<SerializableValueTuple<int, float>>(written);   // (7, 1.5)
+```
+
+Verified byte-identical for protobuf (`0807150000C03F` either way) and character-identical for JSON
+(`{"Item1":7,"Item2":1.5}`).
+
+Both directions work in a player for protobuf, so an existing save migrates either way.
+
+---
+
+### Tuples serialize on IL2CPP
+
+You do not have to adopt the stand-in to fix protobuf. The package ships
+
+```csharp
+[assembly: WProtoRootMarshal(typeof(ValueTuple<,>), typeof(ValueTupleMarshalFormatter<,>))]
+[assembly: WProtoRootMarshal(typeof(ValueTuple<, ,>), typeof(ValueTupleMarshalFormatter<, ,>))]
+```
+
+so the generator emits an ahead-of-time formatter for every closed `ValueTuple` your build actually
+uses, and `Serializer.ProtoSerialize((7, 1.5f))` goes through it instead of protobuf-net's
+reflection. The bytes are `SerializableValueTuple`'s by construction, so the tuple and the stand-in
+cannot drift apart. **Protobuf only** — see the JSON caveat above.
+
+The stand-in is still what you need for a **serialized field**, because that is Unity's own
+serializer rather than ours.
+
+#### Turning it off
+
+Define **`WALLSTOP_DISABLE_VALUE_TUPLE_SERIALIZATION`** in _Player Settings → Scripting Define
+Symbols_ to remove both. It is on by default because a tuple that throws only in a player is the
+worst failure this package has to offer, but it is not free: the generator emits one formatter per
+closed `ValueTuple` your build uses, and a tuple is a common local aggregate rather than a
+deliberate container. On this package alone that is 41 registrations, 11 of them closing over types
+that can never serialize (`Type`, `ConstructorInfo`, …). Those decline at run time, but under IL2CPP
+each closure is still compiled code.
+
+It also silences a second cost. Because the registration is automatic, a tuple that closes over a
+type the generated registrar cannot name — a `private` nested type, say — produces a `WPROTO028`
+warning asking you to widen it, for a formatter you never asked for. Two such warnings exist in this
+package's own tests.
+
+Turning it off does **not** affect `SerializableValueTuple` — the stand-in keeps its own converter
+and its generated formatter either way. Only the automatic support for the raw framework tuple goes.
+
+---
+
+### Conversions
+
+```csharp
+SerializableValueTuple<int, float> pair = (7, 1.5f);   // implicit, from the framework tuple
+(int, float) back = pair;                              // implicit, to it
+(int count, float weight) = pair;                      // Deconstruct
+
+pair == new SerializableValueTuple<int, float>(7, 1.5f);   // true
+pair.Equals((7, 1.5f));                                    // true
+pair.ToString();                                           // "(7, 1.5)"
+```
+
+`Equals` and `GetHashCode` use `EqualityComparer<T>.Default`, so a `null` component is safe rather
+than a throw.
+
+---
+
+### Higher arities
+
+Only two and three components ship. They cover the gameplay cases — `(item, count)`, `(min, max)`,
+`(x, y, z)` — and each additional arity is public API to maintain forever. If you need more, a
+`[Serializable]` struct with named fields is clearer at that size anyway.
 
 ## Best Practices
 

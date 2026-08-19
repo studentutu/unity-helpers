@@ -976,6 +976,22 @@ registrar would be `CS0122` in your own build, so it is skipped instead; the war
 the skip is otherwise invisible until that type is serialized in a shipped player. Widen the offending
 type to `internal`, or register the formatter yourself from code that can name it.
 
+`WPROTO033` warns when a contract declaring `SkipConstructor` has a field that is initialized where
+it is declared and is not a `[WProtoMember]` — **including one inherited from a base type**, because
+an uninitialized allocation zeroes the whole object rather than just the contract's own half. `SkipConstructor` asks protobuf-net to allocate the
+instance **uninitialized**: no constructor runs, so no field initializer runs either, and a field the
+wire does not carry cannot be restored — it arrives at its type's default on every deserialized
+instance. A scratch buffer is the usual case, and the usual fix is to allocate it where it is used
+rather than where it is declared. Putting it on the wire works too. A
+`[WProtoAfterDeserialization]` hook does **not**, on its own: protobuf-net does not invoke
+`[ProtoAfterDeserialization]` on a `SkipConstructor` contract. Suppress `WPROTO033` at the
+declaration when the default really is a valid value.
+
+An inherited field is reported against every contract that declares `SkipConstructor` under it, and
+names the declaring type — `Machinery._scratch` rather than `_scratch` — so the one field is
+findable from each. That multiplicity is not noise: each of those contracts really does hand back an
+instance whose buffer is `null`, and allocating it where it is used fixes all of them at once.
+
 `WPROTO031` warns when two assemblies declare different roots for the same type. It reports both
 roots and both assemblies, including conflicts that exist entirely between referenced packages.
 Generated registrars run in Unity's unordered startup phase, so leaving the conflict unresolved
@@ -1365,7 +1381,33 @@ The generated constructor takes a `WProtoConstruct` marker as its first paramete
 collide with one you wrote yourself — a two-field type very plausibly has its own `(int, int)`
 constructor, and both continue to exist.
 
-Two consequences worth knowing:
+Declaring that constructor would normally remove the parameterless one C# gives a type that declares
+none, so the generator emits that back as well — `new Coordinate()` keeps compiling in your own code,
+and protobuf-net, which refuses a type it cannot construct, keeps reading it.
+
+Your constructor still seeds the value. A member the payload does not carry comes back holding
+whatever your parameterless constructor left on it, a sub-message merges into it, a collection appends
+to it and a map merges by key — the same rules an assignable contract follows:
+
+```csharp
+[WProtoContract]
+public sealed partial class Loadout
+{
+    [WProtoMember(1)] public readonly List<int> Slots;
+
+    public Loadout() => Slots = new List<int> { 1 };
+}
+
+// A payload carrying only slot 7 reads back as { 1, 7 }, and one carrying nothing as { 1 }.
+```
+
+Reading such a contract therefore **runs your parameterless constructor**, once, before the read
+loop — the same thing protobuf-net does, and the reason the two agree. The generator only does it
+when construction could set something: a contract whose parameterless constructor has an empty body
+and whose members have no initializers is provably all-default, so it is built once at the end of the
+read and not before.
+
+Three consequences worth knowing:
 
 - **A `[WProtoBeforeDeserialization]` hook runs after construction**, because for a type whose members
   _are_ its construction there is no earlier moment. Nothing is assigned after it, since nothing can
@@ -1373,6 +1415,10 @@ Two consequences worth knowing:
 - **Immutable members and `[WProtoInclude]` cannot be combined** (`WPROTO015`). One needs the instance
   built once the last member is read; the other replaces the instance when an include tag arrives.
   The generator refuses rather than picking.
+- **A contract with only parameterized constructors is not seeded.** There is no way to build one to
+  take a seed from without inventing a public constructor you did not write, and protobuf-net refuses
+  such a type outright, so every member starts at its type's default. `SkipConstructor` likewise
+  removes the seed, because it asks for an instance no constructor ever touched.
 
 #### Reading without running your constructor
 

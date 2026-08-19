@@ -38,6 +38,15 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.JsonConverters
             JsonSerializerOptions options
         )
         {
+            // Asked before the reflective path below, which is the whole AOT story: the generator
+            // has already constructed this closure's converter where the closure was written, and
+            // MakeGenericType is the one call IL2CPP cannot compile. The reflective path stays for
+            // a closure no build named -- the editor, Mono, and anything constructed at run time.
+            if (WJsonConverterRegistry.TryGet(typeToConvert, out JsonConverter generated))
+            {
+                return generated;
+            }
+
             Type elementType = typeToConvert.GetGenericArguments()[0];
             Type genericDef = typeToConvert.GetGenericTypeDefinition();
 
@@ -56,7 +65,7 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.JsonConverters
             return (JsonConverter)Activator.CreateInstance(converterType);
         }
 
-        private sealed class SerializableHashSetConverter<T> : JsonConverter<SerializableHashSet<T>>
+        public sealed class SerializableHashSetConverter<T> : JsonConverter<SerializableHashSet<T>>
         {
             private const string ItemsPropertyName =
                 SerializableHashSetSerializedPropertyNames.Items;
@@ -75,7 +84,11 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.JsonConverters
                 // Handle array format (legacy/fallback)
                 if (reader.TokenType == JsonTokenType.StartArray)
                 {
-                    T[] items = JsonSerializer.Deserialize<T[]>(ref reader, options);
+                    T[] items = WJsonArray.ReadArray<T>(
+                        ref reader,
+                        options,
+                        "SerializableHashSet<T>"
+                    );
                     SerializableHashSet<T> set = new();
                     if (items != null)
                     {
@@ -118,7 +131,11 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.JsonConverters
                         )
                     )
                     {
-                        itemsArray = JsonSerializer.Deserialize<T[]>(ref reader, options);
+                        itemsArray = WJsonArray.ReadArray<T>(
+                            ref reader,
+                            options,
+                            "SerializableHashSet<T>"
+                        );
                     }
                     else
                     {
@@ -153,7 +170,7 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.JsonConverters
 
                 writer.WriteStartObject();
                 writer.WritePropertyName(ItemsPropertyName);
-                JsonSerializer.Serialize(writer, value.SerializedItems, options);
+                WJsonArray.Write(writer, value.SerializedItems, options);
                 writer.WriteEndObject();
             }
 
@@ -169,7 +186,7 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.JsonConverters
             }
         }
 
-        private sealed class SerializableSortedSetConverter<T>
+        public sealed class SerializableSortedSetConverter<T>
             : JsonConverter<SerializableSortedSet<T>>
             where T : IComparable<T>
         {
@@ -190,7 +207,11 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.JsonConverters
                 // Handle array format (legacy/fallback)
                 if (reader.TokenType == JsonTokenType.StartArray)
                 {
-                    T[] items = JsonSerializer.Deserialize<T[]>(ref reader, options);
+                    T[] items = WJsonArray.ReadArray<T>(
+                        ref reader,
+                        options,
+                        "SerializableSortedSet<T>"
+                    );
                     SerializableSortedSet<T> set = new();
                     if (items != null)
                     {
@@ -233,7 +254,11 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.JsonConverters
                         )
                     )
                     {
-                        itemsArray = JsonSerializer.Deserialize<T[]>(ref reader, options);
+                        itemsArray = WJsonArray.ReadArray<T>(
+                            ref reader,
+                            options,
+                            "SerializableSortedSet<T>"
+                        );
                     }
                     else
                     {
@@ -268,7 +293,7 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.JsonConverters
 
                 writer.WriteStartObject();
                 writer.WritePropertyName(ItemsPropertyName);
-                JsonSerializer.Serialize(writer, value.SerializedItems, options);
+                WJsonArray.Write(writer, value.SerializedItems, options);
                 writer.WriteEndObject();
             }
 

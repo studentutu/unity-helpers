@@ -170,6 +170,144 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
         }
 
         [Test]
+        public void ALifecycleHookOnASubtypeIsAWarning()
+        {
+            // Measured against both oracles, and they answer differently, which is the whole reason
+            // this is a diagnostic instead of a behaviour change: protobuf-net 3.2.56 runs only the
+            // root's callbacks, 2.4.9 runs every level outermost-first, and this generator runs
+            // every level innermost-first. The hook is therefore dead code in any build the
+            // protobuf-net 3 fallback serves, and nothing said so.
+            ImmutableArray<Diagnostic> diagnostics = Run(
+                @"[WProtoContract] [WProtoInclude(100, typeof(Leaf))] public partial class Root { [WProtoMember(1)] public int A; }
+                  [WProtoContract] public partial class Leaf : Root { [WProtoMember(1)] public int B; [WProtoAfterDeserialization] private void Rebuild() { } }"
+            );
+            Diagnostic match = diagnostics.Single(diagnostic => diagnostic.Id == "WPROTO034");
+
+            Assert.AreEqual(DiagnosticSeverity.Warning, match.Severity);
+
+            // Names the hook, the subtype that declares it, and the root it belongs on -- the last
+            // of those is the fix, and a message without it is a complaint rather than an answer.
+            Assert.IsTrue(match.GetMessage().Contains("Rebuild"), match.GetMessage());
+            Assert.IsTrue(match.GetMessage().Contains("Leaf"), match.GetMessage());
+            Assert.IsTrue(match.GetMessage().Contains("Root"), match.GetMessage());
+        }
+
+        [Test]
+        public void OnlyAHookNoReaderAgreesOnWarns()
+        {
+            // Every placement all three readers do agree on, each of which a coarser rule would
+            // report. The root of a chain is the one moment they share; a contract with no chain at
+            // all is trivially its own root.
+            string[] clean =
+            {
+                @"[WProtoContract] [WProtoInclude(100, typeof(Leaf))] public partial class Root { [WProtoMember(1)] public int A; [WProtoAfterDeserialization] private void Rebuild() { } }
+                  [WProtoContract] public partial class Leaf : Root { [WProtoMember(1)] public int B; }",
+                @"[WProtoContract] public partial class Alone { [WProtoMember(1)] public int A; [WProtoAfterDeserialization] private void Rebuild() { } }",
+                // A contract whose base is not a contract owns its own wire shape, so it IS the root.
+                @"public abstract class Machinery { }
+                  [WProtoContract] public partial class Engine : Machinery { [WProtoMember(1)] public int A; [WProtoBeforeSerialization] private void Flush() { } }",
+            };
+
+            foreach (string source in clean)
+            {
+                Assert.IsEmpty(
+                    Run(source).Where(diagnostic => diagnostic.Id == "WPROTO034"),
+                    source
+                );
+            }
+
+            // All four hooks, not only the one the package happened to ship.
+            foreach (
+                string hook in new[]
+                {
+                    "WProtoBeforeSerialization",
+                    "WProtoAfterSerialization",
+                    "WProtoBeforeDeserialization",
+                    "WProtoAfterDeserialization",
+                }
+            )
+            {
+                Assert.AreEqual(
+                    1,
+                    Run(
+                            @"[WProtoContract] [WProtoInclude(100, typeof(Leaf))] public partial class Root { [WProtoMember(1)] public int A; }
+                              [WProtoContract] public partial class Leaf : Root { [WProtoMember(1)] public int B; ["
+                                + hook
+                                + @"] private void Hooked() { } }"
+                        )
+                        .Count(diagnostic => diagnostic.Id == "WPROTO034"),
+                    hook
+                );
+            }
+        }
+
+        [Test]
+        public void AJsonConverterDeclarationThatCannotBeClosedIsAWarning()
+        {
+            // Every way the pair cannot work, because the registration the generator would emit is
+            // code the developer never wrote: a compile error there names a generated file.
+            string[] unusable =
+            {
+                // Not generic. A single closure needs no generation; add it to Converters instead.
+                @"[assembly: global::WallstopStudios.UnityHelpers.Core.Serialization.JsonConverters.WJsonConverter(typeof(Consumer.Plain), typeof(Consumer.PlainConverter))]
+                  public sealed class Plain { }
+                  public sealed class PlainConverter : global::System.Text.Json.Serialization.JsonConverter<Plain> { public override Plain Read(ref global::System.Text.Json.Utf8JsonReader r, System.Type t, global::System.Text.Json.JsonSerializerOptions o) => null; public override void Write(global::System.Text.Json.Utf8JsonWriter w, Plain v, global::System.Text.Json.JsonSerializerOptions o) { } }",
+                // Arity mismatch.
+                @"[assembly: global::WallstopStudios.UnityHelpers.Core.Serialization.JsonConverters.WJsonConverter(typeof(Consumer.Box<>), typeof(Consumer.PairConverter<,>))]
+                  public sealed class Box<T> { }
+                  public sealed class PairConverter<TA, TB> : global::System.Text.Json.Serialization.JsonConverter<Box<TA>> { public override Box<TA> Read(ref global::System.Text.Json.Utf8JsonReader r, System.Type t, global::System.Text.Json.JsonSerializerOptions o) => null; public override void Write(global::System.Text.Json.Utf8JsonWriter w, Box<TA> v, global::System.Text.Json.JsonSerializerOptions o) { } }",
+                // Converts something else.
+                @"[assembly: global::WallstopStudios.UnityHelpers.Core.Serialization.JsonConverters.WJsonConverter(typeof(Consumer.Box<>), typeof(Consumer.OtherConverter<>))]
+                  public sealed class Box<T> { }
+                  public sealed class Other<T> { }
+                  public sealed class OtherConverter<T> : global::System.Text.Json.Serialization.JsonConverter<Other<T>> { public override Other<T> Read(ref global::System.Text.Json.Utf8JsonReader r, System.Type t, global::System.Text.Json.JsonSerializerOptions o) => null; public override void Write(global::System.Text.Json.Utf8JsonWriter w, Other<T> v, global::System.Text.Json.JsonSerializerOptions o) { } }",
+                // No public parameterless constructor, so `new` on it does not compile.
+                @"[assembly: global::WallstopStudios.UnityHelpers.Core.Serialization.JsonConverters.WJsonConverter(typeof(Consumer.Box<>), typeof(Consumer.SealedConverter<>))]
+                  public sealed class Box<T> { }
+                  public sealed class SealedConverter<T> : global::System.Text.Json.Serialization.JsonConverter<Box<T>> { private SealedConverter() { } public override Box<T> Read(ref global::System.Text.Json.Utf8JsonReader r, System.Type t, global::System.Text.Json.JsonSerializerOptions o) => null; public override void Write(global::System.Text.Json.Utf8JsonWriter w, Box<T> v, global::System.Text.Json.JsonSerializerOptions o) { } }",
+            };
+
+            foreach (string source in unusable)
+            {
+                Diagnostic match = Run(source).Single(diagnostic => diagnostic.Id == "WPROTO035");
+                Assert.AreEqual(DiagnosticSeverity.Warning, match.Severity, source);
+            }
+        }
+
+        [Test]
+        public void AWorkableJsonConverterDeclarationIsQuiet()
+        {
+            // Including the constrained shape the package actually ships: both sides carry the same
+            // `new()` constraint, and validating that against the serialized type's own parameters
+            // reported it unusable until a type parameter stopped being asked for its constructors.
+            Assert.IsEmpty(
+                Run(
+                        @"[assembly: global::WallstopStudios.UnityHelpers.Core.Serialization.JsonConverters.WJsonConverter(typeof(Consumer.Box<>), typeof(Consumer.BoxConverter<>))]
+                          public sealed class Box<T> where T : new() { }
+                          public sealed class BoxConverter<T> : global::System.Text.Json.Serialization.JsonConverter<Box<T>> where T : new() { public override Box<T> Read(ref global::System.Text.Json.Utf8JsonReader r, System.Type t, global::System.Text.Json.JsonSerializerOptions o) => null; public override void Write(global::System.Text.Json.Utf8JsonWriter w, Box<T> v, global::System.Text.Json.JsonSerializerOptions o) { } }"
+                    )
+                    .Where(diagnostic => diagnostic.Id == "WPROTO035")
+            );
+        }
+
+        [Test]
+        public void TwoJsonConverterDeclarationsForOneTypeIsAWarning()
+        {
+            // Which one wins is attribute order, which is not readable at either declaration.
+            ImmutableArray<Diagnostic> diagnostics = Run(
+                @"[assembly: global::WallstopStudios.UnityHelpers.Core.Serialization.JsonConverters.WJsonConverter(typeof(Consumer.Box<>), typeof(Consumer.BoxConverter<>))]
+                  [assembly: global::WallstopStudios.UnityHelpers.Core.Serialization.JsonConverters.WJsonConverter(typeof(Consumer.Box<>), typeof(Consumer.BoxConverter<>))]
+                  public sealed class Box<T> { }
+                  public sealed class BoxConverter<T> : global::System.Text.Json.Serialization.JsonConverter<Box<T>> { public override Box<T> Read(ref global::System.Text.Json.Utf8JsonReader r, System.Type t, global::System.Text.Json.JsonSerializerOptions o) => null; public override void Write(global::System.Text.Json.Utf8JsonWriter w, Box<T> v, global::System.Text.Json.JsonSerializerOptions o) { } }"
+            );
+
+            Assert.AreEqual(
+                DiagnosticSeverity.Warning,
+                diagnostics.Single(diagnostic => diagnostic.Id == "WPROTO036").Severity
+            );
+        }
+
+        [Test]
         public void AProtobufContractWithoutAWallstopProtoContractReportsMigrationInfo()
         {
             ImmutableArray<Diagnostic> diagnostics = Run(

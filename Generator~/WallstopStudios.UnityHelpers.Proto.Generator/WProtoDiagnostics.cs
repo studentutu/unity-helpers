@@ -331,11 +331,40 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             new DiagnosticDescriptor(
                 "WPROTO033",
                 "WallstopProto SkipConstructor discards this field's initializer",
-                "'{0}.{1}' is initialized where it is declared and is not a [WProtoMember], so its value exists only because a constructor ran. '{0}' declares SkipConstructor, which asks protobuf-net to allocate the instance UNINITIALIZED -- no constructor runs, no initializer runs, and a member the payload does not carry cannot restore it, so '{1}' arrives at its type's default on every deserialized instance. Allocate it where it is used instead, or give it a [WProtoMember] so the wire carries it. A [WProtoAfterDeserialization] hook is not enough on its own: protobuf-net does not invoke [ProtoAfterDeserialization] on a SkipConstructor contract. Suppress WPROTO033 at the declaration when the default really is a valid value for '{1}'.",
+                "'{0}.{1}' is initialized where it is declared and is not a [WProtoMember], so its value exists only because a constructor ran. '{0}' declares SkipConstructor, which asks protobuf-net to allocate the instance UNINITIALIZED -- no constructor runs, no initializer runs, and a member the payload does not carry cannot restore it, so '{1}' arrives at its type's default on every deserialized instance. Allocate it where it is used instead, or give it a [WProtoMember] so the wire carries it. A [WProtoAfterDeserialization] hook is only enough when every reader runs it, which is what WPROTO034 is about. Suppress WPROTO033 at the declaration when the default really is a valid value for '{1}'.",
                 "WallstopProto",
                 DiagnosticSeverity.Warning,
                 isEnabledByDefault: true
             );
+
+        internal static readonly DiagnosticDescriptor JsonConverterNotUsable =
+            new DiagnosticDescriptor(
+                "WPROTO035",
+                "WallstopProto JSON converter declaration cannot be closed",
+                "[assembly: WJsonConverter(typeof({0}), typeof({1}))] cannot be used. The generator closes both over the arguments of each construction it finds in source and registers the converter, so '{0}' must be an unbound generic, '{1}' must be an unbound generic of the same arity whose constraints the same arguments satisfy, and the closed '{1}' must derive from JsonConverter<{0}> and have a public parameterless constructor. Without all four the registration would not compile, so the declaration is ignored and the closure falls back to the reflective JsonConverterFactory path, which throws under IL2CPP.",
+                "WallstopProto",
+                DiagnosticSeverity.Warning,
+                isEnabledByDefault: true
+            );
+
+        internal static readonly DiagnosticDescriptor DuplicateJsonConverter =
+            new DiagnosticDescriptor(
+                "WPROTO036",
+                "WallstopProto JSON converter is declared twice for one type",
+                "This assembly declares more than one [assembly: WJsonConverter] for '{0}'. Only the first is used, and which one that is depends on attribute order rather than on anything you can read at the declaration. Remove all but the intended pairing with '{1}'.",
+                "WallstopProto",
+                DiagnosticSeverity.Warning,
+                isEnabledByDefault: true
+            );
+
+        internal static readonly DiagnosticDescriptor HookOnSubtype = new DiagnosticDescriptor(
+            "WPROTO034",
+            "WallstopProto lifecycle hook on a subtype does not run under every reader",
+            "'{0}.{1}' is a lifecycle hook on '{0}', which is a subtype of the [WProtoInclude] chain rooted at '{2}'. Only '{2}' owns the wire shape, and a reader invokes the callbacks it finds there: protobuf-net 3.2.56 runs the root's and NONE of a subtype's, so '{1}' never runs wherever the protobuf-net fallback serves this type -- a WALLSTOP_PROTO-off build, or any type Serializer reaches reflectively. protobuf-net 2.4.9 does run it, root-first; WallstopProto runs it subtype-first. Declare the hook on '{2}' and have it call a protected virtual method '{0}' overrides, which runs once, in one order, under all three. Suppress WPROTO034 at the declaration when the hook is an optimization every other path repeats.",
+            "WallstopProto",
+            DiagnosticSeverity.Warning,
+            isEnabledByDefault: true
+        );
 
         internal static readonly DiagnosticDescriptor HookSignature = new DiagnosticDescriptor(
             "WPROTO008",

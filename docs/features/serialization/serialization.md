@@ -846,6 +846,55 @@ System.Text.Json can require extra care under AOT (e.g., IL2CPP):
 - If you rely on many custom converters, ensure they are referenced by code so the linker doesn't strip them. The UnityHelpers converters are referenced via options by default.
 - Avoid deserializing `System.Type` from untrusted input (see `TypeConverter`); this is intended for trusted configs/tools.
 
+### Generic containers get their converters generated
+
+A `JsonConverterFactory` builds the converter for a generic type reflectively:
+
+```csharp
+Type closed = typeof(SomeConverter<,>).MakeGenericType(arguments);
+return (JsonConverter)Activator.CreateInstance(closed);
+```
+
+IL2CPP compiles a generic closure only when something references it, and reference types share one
+compiled body while **value types do not**. So `Deque<TheirStruct>` in a player has no
+`DequeConverter<TheirStruct>` to construct, and the first save throws:
+
+```text
+System.ExecutionEngineException : Attempting to call method
+'...DequeConverter`1[[TheirStruct]]::.ctor' for which no ahead of time (AOT) code was generated.
+```
+
+The package's own tests never caught it, because the closures they exercise (`Deque<int>` and so on)
+are named right here, which is exactly what gives IL2CPP a reason to compile them. A consumer's own
+closure has nothing naming it.
+
+Nothing is required of you. The source generator finds every closed construction your assemblies
+write, constructs the matching converter there, and hands it to `WJsonConverterRegistry`; each
+factory asks that registry before it reaches for reflection. `Deque<TheirStruct>`,
+`SerializableDictionary<string, TheirEnum>` and `Range<float>` all work in a player. Define
+`WALLSTOP_DISABLE_GENERATED_JSON_CONVERTERS` to turn the declarations off if your build never
+serializes one of these to JSON and you would rather not compile the closures.
+
+Two boundaries are worth knowing:
+
+- **An assembly that does not reference `System.Text.Json` gets no registrations.** The registration
+  names a `JsonConverter`, so emitting one there would be `CS0012` in generated code. This is the
+  default for a Unity assembly definition using `overrideReferences`, where every precompiled DLL is
+  listed by hand — add `System.Text.Json.dll` to that assembly's `precompiledReferences` if it
+  serializes package generics to JSON in a player.
+- **This covers the package's own generic types, not System.Text.Json's reflective handling of
+  yours.** A plain `struct` of your own with no converter still reaches
+  `ObjectDefaultConverter<T>`, which System.Text.Json also builds with `MakeGenericType`. Give such a
+  type its own converter, or serialize it with WallstopProto, which generates a formatter per
+  closure for exactly this reason.
+
+Registering the container's converter is necessary and was not sufficient. Every collection converter
+here used to read its payload with `JsonSerializer.Deserialize<List<T>>`, and System.Text.Json
+resolves _that_ through its own factory — so a player got as far as calling the registered converter
+and then threw on `ListOfTConverter<List<sbyte>, sbyte>::.ctor`. Measured on a 2021.3 IL2CPP
+standalone player. They now read and write elements one at a time, which asks only for `T`'s
+converter: a built-in for every primitive and enum, and a registered instance for anything declared.
+
 ## WallstopProto: the reflection-free wire layer (preview)
 
 `WallstopStudios.UnityHelpers.Core.Serialization.WallstopProto` is the beginning of an in-tree
@@ -983,14 +1032,31 @@ instance **uninitialized**: no constructor runs, so no field initializer runs ei
 wire does not carry cannot be restored — it arrives at its type's default on every deserialized
 instance. A scratch buffer is the usual case, and the usual fix is to allocate it where it is used
 rather than where it is declared. Putting it on the wire works too. A
-`[WProtoAfterDeserialization]` hook does **not**, on its own: protobuf-net does not invoke
-`[ProtoAfterDeserialization]` on a `SkipConstructor` contract. Suppress `WPROTO033` at the
-declaration when the default really is a valid value.
+`[WProtoAfterDeserialization]` hook works only when every reader runs it, which is what `WPROTO034`
+is about. Suppress `WPROTO033` at the declaration when the default really is a valid value.
 
 An inherited field is reported against every contract that declares `SkipConstructor` under it, and
 names the declaring type — `Machinery._scratch` rather than `_scratch` — so the one field is
 findable from each. That multiplicity is not noise: each of those contracts really does hand back an
 instance whose buffer is `null`, and allocating it where it is used fixes all of them at once.
+
+`WPROTO034` warns when a lifecycle hook is declared on a **subtype** of a `[WProtoInclude]` chain.
+A reader invokes the callbacks of the type that owns the wire shape — the root — and the three
+readers this package has to satisfy do not agree beyond that point:
+
+| Hook placement           | WallstopProto               | protobuf-net 2.4.9          | protobuf-net 3.2.56 |
+| ------------------------ | --------------------------- | --------------------------- | ------------------- |
+| On the root of the chain | runs once                   | runs once                   | runs once           |
+| On a subtype             | runs, innermost level first | runs, outermost level first | **never runs**      |
+| On a type with no chain  | runs once                   | runs once                   | runs once           |
+
+So a hook on a subtype is silently dead wherever protobuf-net 3 serves the type — a
+`WALLSTOP_PROTO`-off build, or anything `Serializer` reaches reflectively — and where it does run,
+it runs in the opposite order under the two readers that run it. Declare the hook on the root and
+have it call a `protected virtual` method the subtype overrides; that runs once, in one order,
+everywhere. `AbstractRandom` is the worked example: the after-deserialization work `DotNetRandom`
+needs is declared on `AbstractRandom` and dispatched through `OnAfterDeserialization`. Suppress
+`WPROTO034` at the declaration when the hook only repeats work every other path already does.
 
 `WPROTO031` warns when two assemblies declare different roots for the same type. It reports both
 roots and both assemblies, including conflicts that exist entirely between referenced packages.

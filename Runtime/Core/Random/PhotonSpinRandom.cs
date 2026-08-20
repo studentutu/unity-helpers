@@ -175,22 +175,19 @@ namespace WallstopStudios.UnityHelpers.Core.Random
 
             LoadSerializedElements(internalState._payload);
             NormalizeIndex();
+            EnsurePrimed();
             RestoreCommonState(internalState);
+        }
+
+        protected override void OnAfterDeserialization()
+        {
+            EnsureElements();
+            NormalizeIndex();
+            EnsurePrimed();
         }
 
         public override uint NextUint()
         {
-            // A formatter may hand back an instance no constructor ran and a payload that never
-            // named this member, so the initializer above guarantees nothing a caller can reach.
-            EnsureElements();
-
-            if (!_hasPrimed)
-            {
-                GenerateBlock();
-                _hasPrimed = true;
-                _index = BlockSize;
-            }
-
             if (_index >= BlockSize)
             {
                 GenerateBlock();
@@ -366,6 +363,21 @@ namespace WallstopStudios.UnityHelpers.Core.Random
             _index = BlockSize;
             _hasPrimed = false;
             NormalizeIndex();
+            EnsurePrimed();
+        }
+
+        private void EnsurePrimed()
+        {
+            if (_hasPrimed)
+            {
+                return;
+            }
+
+            // Older payloads can represent the pre-first-draw state. Advance only the discarded
+            // warmup block here so the next generated block and every published output stay exact.
+            GenerateBlock();
+            _hasPrimed = true;
+            _index = BlockSize;
         }
 
         private void GenerateBlock()

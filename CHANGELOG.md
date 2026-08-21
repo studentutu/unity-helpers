@@ -85,6 +85,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Correct `WDoomRandom`'s recorded period: 256 is its byte table's length, and `NextUint()` consumes four bytes, so a caller sees exactly 64 values before the sequence repeats. Measured, not restated ([#516](https://github.com/Ambiguous-Interactive/unity-helpers/issues/516)).
+- Document that `UnityRandom` cannot resume its stream from a `RandomState` snapshot: its position lives in `UnityEngine.Random`'s globals, so a restore silently continues from wherever the engine is. Every other generator resumes exactly. See [Random Generators](./docs/features/utilities/random-generators.md#saving-and-restoring-a-generator) ([#521](https://github.com/Ambiguous-Interactive/unity-helpers/issues/521)).
 - Say what has actually been measured about `IllusionFlow`, `StormDropRandom`, `PhotonSpinRandom`, `FlurryBurstRandom` and `BlastCircuitRandom`. All five are now verified clean through 8GB of PractRand 0.95 here, rather than described by an author's claim on a repository that is offline. Ratings are unchanged ([#286](https://github.com/Ambiguous-Interactive/unity-helpers/issues/286), [#516](https://github.com/Ambiguous-Interactive/unity-helpers/issues/516)).
 - Take every `Bounds`, `BoundsInt`, `Rect` and `Color` extension receiver by `in`. Calling one no longer copies the struct at your call site, which `ErrorProne.NET.Structs` reported as an `EPS06` warning you could not fix without giving up extension syntax ([#512](https://github.com/Ambiguous-Interactive/unity-helpers/issues/512)).
 - Make `PooledArray<T>` and `PooledResource<T>` `readonly struct`, so reading `array`, `length` or `resource` and calling `Dispose()` no longer copies the wrapper first ([#512](https://github.com/Ambiguous-Interactive/unity-helpers/issues/512)).
@@ -104,6 +106,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix protobuf-net writing a different payload than WallstopProto for a zero-initialized `FastVector2Int` or `FastVector3Int`. The surrogate mirrored the cached hash through `GetHashCode()` rather than the stored field, so the two encoders disagreed on the origin ([#309](https://github.com/Ambiguous-Interactive/unity-helpers/issues/309)).
+- Fix `default(FastVector2Int)` and `default(FastVector3Int)` comparing unequal to the origin they describe. An array element, an unset field or a dictionary miss did not match `new FastVector2Int(0, 0)`, so a set held the origin cell twice. Wire format is unchanged ([#309](https://github.com/Ambiguous-Interactive/unity-helpers/issues/309)).
+- Fix `default(CacheStatistics)` and `default(PoolStatistics)` comparing unequal to an all-zero snapshot, for the same reason ([#309](https://github.com/Ambiguous-Interactive/unity-helpers/issues/309)).
+- Fix `PoolStatistics` hashing the three rates it compares with a tolerance, so two snapshots that were equal could hash differently and a set held both ([#309](https://github.com/Ambiguous-Interactive/unity-helpers/issues/309)).
 - Fix generator metadata that named the wrong algorithm: `LinearCongruentialGenerator` is the Numerical Recipes `ranqd1` LCG, not Park-Miller; `RomuDuo` matches neither published ROMU duo variant; `IllusionFlow` is not a PCG or xorshift hybrid ([#509](https://github.com/Ambiguous-Interactive/unity-helpers/issues/509)).
 - Fix the license recorded for the ROMU algorithm behind `RomuDuo`: it is Apache 2.0, not CC0 ([#509](https://github.com/Ambiguous-Interactive/unity-helpers/issues/509)).
 - Fix `SortByName()` and `ScriptableObjectSingleton<T>.Instance` throwing on a name whose trailing digits do not fit an `int`, such as a timestamp, or are not ASCII digits. Such names now order correctly, and a suffix of any length is compared without being parsed ([#386](https://github.com/Ambiguous-Interactive/unity-helpers/issues/386)).

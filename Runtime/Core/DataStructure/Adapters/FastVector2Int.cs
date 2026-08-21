@@ -60,6 +60,27 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
         [ProtoMember(3)]
         private readonly int _hash;
 
+        // A zero-initialized instance -- default(FastVector2Int), an array element, a struct a
+        // deserializer allocated without running a constructor -- carries _hash == 0 while its
+        // components are already the origin's. Mapping 0 onto the origin's hash is what makes such
+        // an instance indistinguishable from new FastVector2Int(0, 0), which is what its components
+        // claim it is. A non-origin cell whose hash happens to be 0 merely collides with the origin,
+        // and Equals settles that the same way it settles every other collision.
+        //
+        // The obvious alternative -- store the hash biased by this constant, so 0 already means the
+        // origin and no branch is needed -- is rejected because _hash is [ProtoMember(3)]. Biasing
+        // changes what a payload carries, so every value already persisted by a shipped build would
+        // read back with the wrong hash. This costs one compare and keeps that data readable.
+        private static readonly int OriginHash = Objects.HashCode(0, 0);
+
+        /// <summary>
+        /// The cached hash exactly as it is stored and written to the wire, which is deliberately
+        /// NOT <see cref="GetHashCode"/>: a zero-initialized instance stores 0 and reports the
+        /// origin's hash. Anything mirroring the serialized form has to read this, or it writes
+        /// bytes that disagree with what the formatter writes for <c>default</c>.
+        /// </summary>
+        internal int SerializedHash => _hash;
+
         /// <summary>
         /// Initializes a new fast vector with integer components and a cached hash.
         /// </summary>
@@ -224,7 +245,7 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool Equals(FastVector2Int other)
         {
-            return GetHashCode() == other.GetHashCode() && x == other.x && y == other.y;
+            return x == other.x && y == other.y;
         }
 
         /// <summary>
@@ -385,7 +406,7 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public override int GetHashCode()
         {
-            return _hash;
+            return _hash != 0 ? _hash : OriginHash;
         }
 
         /// <summary>

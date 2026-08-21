@@ -27,7 +27,7 @@ Runtime/                   # Runtime C# libraries
     Math/                  # Math utilities, ballistics, geometry
     Model/                 # Serializable types (Dictionary, HashSet, Nullable, Type, Guid)
     OneOf/                 # Discriminated unions
-    Random/                # 15+ PRNG implementations with IRandom interface
+    Random/                # 20+ PRNG implementations with IRandom interface
     Serialization/         # JSON/Protobuf serialization with Unity type converters
     Threading/             # Thread pools, main thread dispatcher, guards
   Tags/                    # Effects/attribute system (AttributeEffect, TagHandler, Cosmetics)
@@ -325,6 +325,11 @@ deliberate act, not the tail of every commit.
     against another's release build. Those assertions are skipped, loudly, outside Release; the
     allocation gates are configuration-independent and run either way.
   - `npm run agent:preflight:fix` then `npm run agent:preflight`.
+  - `.venv/bin/mkdocs build --strict` when the change touches `docs/**` or `mkdocs.yml`. It is
+    the exact command the Validate Documentation job runs, takes ~30 s, and is the only local
+    check that catches a link leaving the docs tree -- a relative link from `docs/` out to
+    `.github/workflows/` aborts the strict build, and `lint:docs` and `lint:markdown` both pass
+    it. Reference workflow files as inline code, the way the runbooks do.
   - Relevant targeted checks for the files changed; `npm run validate:local` is the explicit
     repository-wide lint and contract aggregate when that broader evidence is warranted.
   - `npm run validate:prepush` as the final fast Git/config safety check.

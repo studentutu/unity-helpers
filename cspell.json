@@ -873,7 +873,12 @@
         "luma",
         "texel",
         "devirtualize",
-        "pessimization"
+        "pessimization",
+        "Hankel",
+        "tlmin",
+        "tlmax",
+        "FPF",
+        "BCFN"
       ]
     }
   ],
@@ -1019,6 +1024,7 @@
     "Nebel",
     "wstaffordp",
     "LCG",
+    "ranqd",
     "Vigna",
     "XSH",
     "Neill",

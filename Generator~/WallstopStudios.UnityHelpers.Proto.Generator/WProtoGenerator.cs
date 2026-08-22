@@ -2519,6 +2519,21 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                     continue;
                 }
 
+                bool zigZag = AsksForZigZag(attribute);
+                if (zigZag && !Shape.SupportsZigZag(type))
+                {
+                    Report(
+                        context,
+                        WProtoDiagnostics.DataFormatNotApplicable,
+                        symbol,
+                        contract.Name,
+                        symbol.Name,
+                        TypeNaming.Display(type)
+                    );
+                    failed = true;
+                    continue;
+                }
+
                 int depthRefusals = nested.DepthRefusals;
                 Member member = Member.Create(
                     contract.Name,
@@ -2527,6 +2542,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                     type,
                     NamedFlag(attribute, "IsRequired"),
                     NamedFlag(attribute, "OverwriteList"),
+                    zigZag,
                     surrogates,
                     nested,
                     out bool ambiguous
@@ -2653,6 +2669,47 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             context.ReportDiagnostic(
                 Diagnostic.Create(descriptor, symbol.Locations.FirstOrDefault(), arguments)
             );
+        }
+
+        /// <summary>
+        /// Reports whether the attribute asks for <c>DataFormat = ZigZag</c>.
+        /// </summary>
+        /// <remarks>
+        /// The member's value is read off the enum's <b>own declaration</b> rather than compared
+        /// against a constant here. An enum argument arrives as its underlying integer, so a
+        /// hard-coded <c>1</c> would work right up until someone renumbered
+        /// <c>WProtoDataFormat</c> -- after which every annotated member would silently go back to
+        /// writing <c>int32</c>, which is a different payload and not a build error. The generator
+        /// cannot reference the runtime assembly, but it can read the symbol the argument is typed
+        /// as, which is the same declaration.
+        /// </remarks>
+        private static bool AsksForZigZag(AttributeData attribute)
+        {
+            foreach (KeyValuePair<string, TypedConstant> argument in attribute.NamedArguments)
+            {
+                if (argument.Key != "DataFormat" || argument.Value.Value == null)
+                {
+                    continue;
+                }
+
+                if (argument.Value.Type is not INamedTypeSymbol format)
+                {
+                    continue;
+                }
+
+                foreach (ISymbol member in format.GetMembers("ZigZag"))
+                {
+                    if (
+                        member is IFieldSymbol { HasConstantValue: true } declared
+                        && Equals(declared.ConstantValue, argument.Value.Value)
+                    )
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
         }
 
         private static bool NamedFlag(AttributeData attribute, string name)

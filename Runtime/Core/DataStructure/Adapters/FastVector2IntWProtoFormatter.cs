@@ -12,13 +12,35 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
         /// protobuf-net writes it.
         /// </summary>
         /// <remarks>
+        /// <para>
         /// Hand-written now, generated later. It lives in a separate file declaring the same
         /// <c>partial</c> type because that is exactly what the source generator will emit -- a
         /// nested type is how generated code reaches a private member such as the cached hash
         /// without reflection, which is what makes the whole approach AOT-safe.
+        /// </para>
+        /// <para>
+        /// Components are written as <c>sint32</c> on fields 5 and 6, and the <c>int32</c> fields 1
+        /// and 2 are still read. That is additive rather than a renumbering for one reason: a varint
+        /// written as <c>int32</c> and read as <c>sint32</c> is a different NUMBER, not a failure, so
+        /// reusing the old field numbers would have turned every saved grid into silently halved
+        /// coordinates. Fields 5 and 6 are one-byte keys just as 1 and 2 are, so backwards
+        /// compatibility here costs nothing on the wire.
+        /// </para>
         /// </remarks>
         public sealed class WProtoFormatter : IWProtoFormatter<FastVector2Int>
         {
+            /// <summary>The field carrying <c>x</c> as a ZigZag varint.</summary>
+            internal const int XTag = 5;
+
+            /// <summary>The field carrying <c>y</c> as a ZigZag varint.</summary>
+            internal const int YTag = 6;
+
+            /// <summary>The field <c>x</c> occupied while it was an <c>int32</c>; read, never written.</summary>
+            internal const int LegacyXTag = 1;
+
+            /// <summary>The field <c>y</c> occupied while it was an <c>int32</c>; read, never written.</summary>
+            internal const int LegacyYTag = 2;
+
             /// <summary>The shared instance; the formatter holds no state.</summary>
             public static readonly WProtoFormatter Instance = new();
 
@@ -28,12 +50,12 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
                 int size = 0;
                 if (value.x != 0)
                 {
-                    size += WProtoSizes.TagSize(1) + WProtoSizes.Int32Size(value.x);
+                    size += WProtoSizes.TagSize(XTag) + WProtoSizes.ZigZag32Size(value.x);
                 }
 
                 if (value.y != 0)
                 {
-                    size += WProtoSizes.TagSize(2) + WProtoSizes.Int32Size(value.y);
+                    size += WProtoSizes.TagSize(YTag) + WProtoSizes.ZigZag32Size(value.y);
                 }
 
                 return size;
@@ -45,8 +67,8 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
                 if (value.x != 0)
                 {
                     if (
-                        !writer.TryWriteTag(1, WProtoWireType.Varint)
-                        || !writer.TryWriteInt32(value.x)
+                        !writer.TryWriteTag(XTag, WProtoWireType.Varint)
+                        || !writer.TryWriteZigZag32(value.x)
                     )
                     {
                         return false;
@@ -56,8 +78,8 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
                 if (value.y != 0)
                 {
                     if (
-                        !writer.TryWriteTag(2, WProtoWireType.Varint)
-                        || !writer.TryWriteInt32(value.y)
+                        !writer.TryWriteTag(YTag, WProtoWireType.Varint)
+                        || !writer.TryWriteZigZag32(value.y)
                     )
                     {
                         return false;
@@ -73,20 +95,23 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
             /// from x and y. A payload written before the hash left the wire still carries it as
             /// field 3; that field is skipped as unknown, so old data reads back correctly and a
             /// tampered one cannot hand back an object whose <c>GetHashCode</c> disagrees with its
-            /// <c>Equals</c> -- which would corrupt every dictionary it was used in.
+            /// <c>Equals</c> -- which would corrupt every dictionary it was used in. Fields 1 and 2
+            /// are read as the <c>int32</c>s they were, for the same reason.
             /// </remarks>
             public bool TryRead(ref WProtoReader reader, out FastVector2Int value)
             {
                 int x = 0;
                 int y = 0;
+                int legacyX = 0;
+                int legacyY = 0;
 
                 while (reader.TryReadTag(out int fieldNumber, out int wireType))
                 {
                     switch (fieldNumber)
                     {
-                        case 1 when wireType == WProtoWireType.Varint:
+                        case XTag when wireType == WProtoWireType.Varint:
                         {
-                            if (!reader.TryReadInt32(out x))
+                            if (!reader.TryReadZigZag32(out x))
                             {
                                 value = default;
                                 return false;
@@ -94,9 +119,29 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
 
                             break;
                         }
-                        case 2 when wireType == WProtoWireType.Varint:
+                        case YTag when wireType == WProtoWireType.Varint:
                         {
-                            if (!reader.TryReadInt32(out y))
+                            if (!reader.TryReadZigZag32(out y))
+                            {
+                                value = default;
+                                return false;
+                            }
+
+                            break;
+                        }
+                        case LegacyXTag when wireType == WProtoWireType.Varint:
+                        {
+                            if (!reader.TryReadInt32(out legacyX))
+                            {
+                                value = default;
+                                return false;
+                            }
+
+                            break;
+                        }
+                        case LegacyYTag when wireType == WProtoWireType.Varint:
+                        {
+                            if (!reader.TryReadInt32(out legacyY))
                             {
                                 value = default;
                                 return false;
@@ -123,7 +168,10 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
                     return false;
                 }
 
-                value = new FastVector2Int(x, y);
+                // The same rule FastVector2IntSurrogate applies, so a payload carrying both
+                // encodings -- which no encoder here produces, but a hand-written one can --
+                // decodes to one value rather than to two that depend on which reader saw it.
+                value = new FastVector2Int(x != 0 ? x : legacyX, y != 0 ? y : legacyY);
                 return true;
             }
         }

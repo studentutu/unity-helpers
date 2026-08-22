@@ -4,6 +4,7 @@
 namespace WallstopStudios.UnityHelpers.Core.Serialization
 {
     using System;
+    using System.Collections.Generic;
     using ProtoBuf;
     using ProtoBuf.Meta;
     using UnityEngine;
@@ -389,45 +390,76 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization
     // protobuf-net cannot bind a parameterized constructor nor assign readonly fields without
     // Reflection.Emit, so it falls back to ParameterInfo.GetRequiredCustomModifiers which hits the
     // unsupported RuntimeParameterInfo::GetTypeModifiers icall. Routing these types through a
-    // mutable surrogate uses protobuf-net's working surrogate path instead. Field numbers mirror
-    // the originals exactly so the wire format is byte-identical to the pre-surrogate mono output.
+    // mutable surrogate uses protobuf-net's working surrogate path instead. Field numbers mirrored
+    // the originals exactly, so the wire format was byte-identical to the pre-surrogate mono output;
+    // the two FastVector surrogates below have since moved their components onto new numbers, and
+    // say why where they do it.
 
+    // Components travel as sint32 on fields 5 and 6, where a negative coordinate costs its
+    // magnitude rather than the ten bytes int32 spends sign-extending it. The int32 fields they
+    // replace are still declared, and are read-only in practice: nothing sets them on the way out,
+    // so they are zero and protobuf-net omits them. Renumbering instead of adding was not an option
+    // -- an int32 varint read as sint32 is a different number rather than an error, so a grid saved
+    // by an earlier build would have loaded with every coordinate silently halved.
     [ProtoContract]
     [WProtoContract]
     internal partial struct FastVector2IntSurrogate
     {
+        [ProtoMember(5, DataFormat = DataFormat.ZigZag)]
+        [WProtoMember(5, DataFormat = WProtoDataFormat.ZigZag)]
+        public int x;
+
+        [ProtoMember(6, DataFormat = DataFormat.ZigZag)]
+        [WProtoMember(6, DataFormat = WProtoDataFormat.ZigZag)]
+        public int y;
+
         [ProtoMember(1)]
         [WProtoMember(1)]
-        public int x;
+        public int legacyX;
 
         [ProtoMember(2)]
         [WProtoMember(2)]
-        public int y;
+        public int legacyY;
 
         public static implicit operator FastVector2IntSurrogate(FastVector2Int v) =>
             new() { x = v.x, y = v.y };
 
-        public static implicit operator FastVector2Int(FastVector2IntSurrogate s) => new(s.x, s.y);
+        // A payload carries one encoding or the other, never both, so "the zigzag field unless it is
+        // absent" is exactly "whichever one was written".
+        public static implicit operator FastVector2Int(FastVector2IntSurrogate s) =>
+            new(s.x != 0 ? s.x : s.legacyX, s.y != 0 ? s.y : s.legacyY);
     }
 
+    // As FastVector2IntSurrogate. The legacy z stays on tag 4, the number it had when field 3
+    // carried the cached hash, so a payload written by a build that still wrote that hash does not
+    // read it as z.
     [ProtoContract]
     [WProtoContract]
     internal partial struct FastVector3IntSurrogate
     {
+        [ProtoMember(5, DataFormat = DataFormat.ZigZag)]
+        [WProtoMember(5, DataFormat = WProtoDataFormat.ZigZag)]
+        public int x;
+
+        [ProtoMember(6, DataFormat = DataFormat.ZigZag)]
+        [WProtoMember(6, DataFormat = WProtoDataFormat.ZigZag)]
+        public int y;
+
+        [ProtoMember(7, DataFormat = DataFormat.ZigZag)]
+        [WProtoMember(7, DataFormat = WProtoDataFormat.ZigZag)]
+        public int z;
+
         [ProtoMember(1)]
         [WProtoMember(1)]
-        public int x;
+        public int legacyX;
 
         [ProtoMember(2)]
         [WProtoMember(2)]
-        public int y;
-
-        // z keeps tag 4, the number it had when field 3 carried FastVector3Int's cached hash, so a
-        // payload written by a build that still wrote the hash does not read it as z.
+        public int legacyY;
 
         [ProtoMember(4)]
         [WProtoMember(4)]
-        public int z;
+        public int legacyZ;
 
         public static implicit operator FastVector3IntSurrogate(FastVector3Int v) =>
             new()
@@ -438,7 +470,7 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization
             };
 
         public static implicit operator FastVector3Int(FastVector3IntSurrogate s) =>
-            new(s.x, s.y, s.z);
+            new(s.x != 0 ? s.x : s.legacyX, s.y != 0 ? s.y : s.legacyY, s.z != 0 ? s.z : s.legacyZ);
     }
 
     [ProtoContract]
@@ -612,76 +644,107 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization
 
     internal static class ProtobufUnityModel
     {
+        /// <summary>
+        /// The types whose surrogate could not be registered, in the order they were refused.
+        /// </summary>
+        /// <remarks>
+        /// A list rather than a flag because the useful question is <b>which</b> type is now writing
+        /// the wrong bytes, and because a test needs to be able to assert that the answer is none.
+        /// </remarks>
+        internal static readonly List<string> RegistrationFailures = new List<string>();
+
         static ProtobufUnityModel()
         {
+            RuntimeTypeModel model;
             try
             {
-                RuntimeTypeModel model = RuntimeTypeModel.Default;
-
-                // Register surrogates for Unity types we cannot annotate directly.
-                model
-                    .Add(typeof(Vector2), applyDefaultBehaviour: false)
-                    .SetSurrogate(typeof(Vector2Surrogate));
-                model
-                    .Add(typeof(Vector3), applyDefaultBehaviour: false)
-                    .SetSurrogate(typeof(Vector3Surrogate));
-                model
-                    .Add(typeof(Quaternion), applyDefaultBehaviour: false)
-                    .SetSurrogate(typeof(QuaternionSurrogate));
-                model
-                    .Add(typeof(Color), applyDefaultBehaviour: false)
-                    .SetSurrogate(typeof(ColorSurrogate));
-                model
-                    .Add(typeof(Color32), applyDefaultBehaviour: false)
-                    .SetSurrogate(typeof(Color32Surrogate));
-                model
-                    .Add(typeof(Rect), applyDefaultBehaviour: false)
-                    .SetSurrogate(typeof(RectSurrogate));
-                model
-                    .Add(typeof(RectInt), applyDefaultBehaviour: false)
-                    .SetSurrogate(typeof(RectIntSurrogate));
-                model
-                    .Add(typeof(Bounds), applyDefaultBehaviour: false)
-                    .SetSurrogate(typeof(BoundsSurrogate));
-                model
-                    .Add(typeof(BoundsInt), applyDefaultBehaviour: false)
-                    .SetSurrogate(typeof(BoundsIntSurrogate));
-                model
-                    .Add(typeof(Vector2Int), applyDefaultBehaviour: false)
-                    .SetSurrogate(typeof(Vector2IntSurrogate));
-                model
-                    .Add(typeof(Vector3Int), applyDefaultBehaviour: false)
-                    .SetSurrogate(typeof(Vector3IntSurrogate));
-                model
-                    .Add(typeof(Resolution), applyDefaultBehaviour: false)
-                    .SetSurrogate(typeof(ResolutionSurrogate));
-
-                // Immutable readonly [ProtoContract] structs we own. applyDefaultBehaviour: false
-                // discards their direct contract so the mutable surrogate path is used instead; this
-                // is what keeps them serializable under IL2CPP/AOT (Class B). Wire format is preserved.
-                model
-                    .Add(typeof(FastVector2Int), applyDefaultBehaviour: false)
-                    .SetSurrogate(typeof(FastVector2IntSurrogate));
-                model
-                    .Add(typeof(FastVector3Int), applyDefaultBehaviour: false)
-                    .SetSurrogate(typeof(FastVector3IntSurrogate));
-                model
-                    .Add(typeof(Parabola), applyDefaultBehaviour: false)
-                    .SetSurrogate(typeof(ParabolaSurrogate));
-                model
-                    .Add(typeof(ImmutableBitSet), applyDefaultBehaviour: false)
-                    .SetSurrogate(typeof(ImmutableBitSetSurrogate));
-
-                // NOTE: SerializableHashSet, SerializableSortedSet, SerializableDictionary, and
-                // SerializableSortedDictionary are handled via wrapper-based serialization in
-                // Serializer.ProtoSerialize/ProtoDeserialize rather than RuntimeTypeModel configuration.
-                // This is necessary because protobuf-net's TryGetRepeatedProvider does not respect
-                // IgnoreListHandling, causing IEnumerable types to always be treated as collections.
-                // See: https://github.com/protobuf-net/protobuf-net/issues/1185
+                model = RuntimeTypeModel.Default;
             }
             catch
             {
-                // In restricted environments, model mutation may fail; ignore to keep JSON-only scenarios working.
+                // In restricted environments the model itself may be unavailable; JSON-only
+                // scenarios keep working.
+                return;
+            }
+
+            // Register surrogates for Unity types we cannot annotate directly.
+            Register<Vector2, Vector2Surrogate>(model);
+            Register<Vector3, Vector3Surrogate>(model);
+            Register<Quaternion, QuaternionSurrogate>(model);
+            Register<Color, ColorSurrogate>(model);
+            Register<Color32, Color32Surrogate>(model);
+            Register<Rect, RectSurrogate>(model);
+            Register<RectInt, RectIntSurrogate>(model);
+            Register<Bounds, BoundsSurrogate>(model);
+            Register<BoundsInt, BoundsIntSurrogate>(model);
+            Register<Vector2Int, Vector2IntSurrogate>(model);
+            Register<Vector3Int, Vector3IntSurrogate>(model);
+            Register<Resolution, ResolutionSurrogate>(model);
+
+            // Immutable readonly [ProtoContract] structs we own. applyDefaultBehaviour: false
+            // discards their direct contract so the mutable surrogate path is used instead; this
+            // is what keeps them serializable under IL2CPP/AOT (Class B). Wire format is preserved.
+            Register<FastVector2Int, FastVector2IntSurrogate>(model);
+            Register<FastVector3Int, FastVector3IntSurrogate>(model);
+            Register<Parabola, ParabolaSurrogate>(model);
+            Register<ImmutableBitSet, ImmutableBitSetSurrogate>(model);
+
+            // NOTE: SerializableHashSet, SerializableSortedSet, SerializableDictionary, and
+            // SerializableSortedDictionary are handled via wrapper-based serialization in
+            // Serializer.ProtoSerialize/ProtoDeserialize rather than RuntimeTypeModel configuration.
+            // This is necessary because protobuf-net's TryGetRepeatedProvider does not respect
+            // IgnoreListHandling, causing IEnumerable types to always be treated as collections.
+            // See: https://github.com/protobuf-net/protobuf-net/issues/1185
+        }
+
+        /// <summary>
+        /// Points protobuf-net at <typeparamref name="TSurrogate"/> for <typeparamref name="TReal"/>.
+        /// </summary>
+        /// <typeparam name="TReal">The type being given a wire shape.</typeparam>
+        /// <typeparam name="TSurrogate">The shape it is given.</typeparam>
+        /// <remarks>
+        /// <para>
+        /// Guarded one registration at a time, which is the whole point of the method existing.
+        /// <c>RuntimeTypeModel.Default</c> is process-global and freezes a type the first time it
+        /// serializes one, so anything that reaches protobuf-net before this constructor runs --
+        /// another package, or a consumer calling <c>ProtoBuf.Serializer</c> directly -- makes
+        /// <c>Add</c> throw for that type. Under one shared <c>try</c> that single throw skipped
+        /// every registration after it, and the package then silently encoded <see cref="Vector3"/>,
+        /// <see cref="Color"/> and the rest through whatever protobuf-net inferred: different bytes,
+        /// no exception, saves that do not load.
+        /// </para>
+        /// <para>
+        /// The failure is recorded rather than thrown, because a static constructor that throws
+        /// takes the whole type down with a <c>TypeInitializationException</c> on every later use,
+        /// which is worse than one type having the wrong shape.
+        /// </para>
+        /// </remarks>
+        private static void Register<TReal, TSurrogate>(RuntimeTypeModel model)
+        {
+            try
+            {
+                model
+                    .Add(typeof(TReal), applyDefaultBehaviour: false)
+                    .SetSurrogate(typeof(TSurrogate));
+            }
+            catch (Exception error)
+            {
+                RegistrationFailures.Add(typeof(TReal).Name);
+#if !ENABLE_IL2CPP
+                // Reported only where protobuf-net is a path this package can actually take. Under
+                // IL2CPP it is not: it builds its serializers by reflection, which the AOT compiler
+                // cannot emit, and every type here is served by WallstopProto instead -- which is
+                // the whole reason WallstopProto exists. A refusal there is expected and inert, so
+                // logging it would put eight errors in front of every player at startup for a
+                // fallback that was never going to run. Measured: the standalone legs refuse
+                // Vector2, Vector3, Rect, RectInt, Bounds, BoundsInt, Vector2Int and Vector3Int.
+                Debug.LogError(
+                    $"[UnityHelpers] protobuf-net already bound {typeof(TReal).Name}, so its "
+                        + $"{typeof(TSurrogate).Name} could not be registered and the type will be "
+                        + $"encoded with different bytes than this package documents. Something "
+                        + $"serialized it before UnityHelpers' Serializer was first touched. {error.Message}"
+                );
+#endif
             }
         }
 

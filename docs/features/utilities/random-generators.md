@@ -69,10 +69,13 @@ constructor that takes one back. Snapshot mid-stream, store the snapshot in your
 restored generator resumes the exact sequence — verified for all of them by
 `GeneratorSnapshotRestoreTests`.
 
-**`UnityRandom` is the one exception, and it cannot resume a stream.** Its live position belongs to
-`UnityEngine.Random`'s engine globals rather than to the object, so its snapshot carries only the seed it
-was constructed with. Restoring it continues from wherever the engine currently is, without any error.
-Use a concrete PRNG when a save file has to reproduce a sequence.
+`UnityRandom` resumes too, and it is worth knowing how. Its position belongs to
+`UnityEngine.Random`'s engine globals rather than to the object, so the snapshot carries that position
+and restoring one **writes `UnityEngine.Random.state` back**. Anything else drawing from
+`UnityEngine.Random` is moved with it — which is the same global that `new UnityRandom(seed)` already
+resets through `InitState`. A snapshot written before 3.6 carries no position; restoring one of those
+leaves the engine exactly where it is, and so does a payload that is not an engine position at all —
+assigning one would leave `UnityEngine.Random` stuck returning a single value for the rest of the run.
 
 ---
 

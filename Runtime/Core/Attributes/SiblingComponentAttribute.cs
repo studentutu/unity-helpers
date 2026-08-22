@@ -167,13 +167,14 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
                                             metadata.isInterface
                                         );
 
-                                Array correctTypedArray = metadata.arrayCreator(filteredCount);
-                                for (int i = 0; i < filteredCount; ++i)
-                                {
-                                    correctTypedArray.SetValue(components[i], i);
-                                }
-
-                                metadata.SetValue(component, correctTypedArray);
+                                metadata.SetValue(
+                                    component,
+                                    CreateTypedArray(
+                                        metadata.elementType,
+                                        components,
+                                        filteredCount
+                                    )
+                                );
                                 foundSibling = filteredCount > 0;
                                 break;
                             }
@@ -334,32 +335,36 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
             FieldMetadata<SiblingComponentAttribute> metadata
         )
         {
-            Array componentsArray = SiblingComponentFastInvoker.GetArray(
+            List<Component> matches = SiblingComponentFastInvoker.Collect(
                 component,
                 metadata.elementType
             );
-
-            return AssignComponentsFromArray(component, metadata, componentsArray);
+            try
+            {
+                return AssignComponentsFromList(component, metadata, matches);
+            }
+            finally
+            {
+                SiblingComponentFastInvoker.Release(matches);
+            }
         }
 
-        private static bool AssignComponentsFromArray(
+        private static bool AssignComponentsFromList(
             Component component,
             FieldMetadata<SiblingComponentAttribute> metadata,
-            Array componentsArray
+            List<Component> components
         )
         {
-            if (componentsArray == null)
-            {
-                componentsArray = Array.CreateInstance(metadata.elementType, 0);
-            }
-
-            int count = componentsArray.Length;
+            int count = components == null ? 0 : components.Count;
 
             switch (metadata.kind)
             {
                 case FieldKind.Array:
                 {
-                    metadata.SetValue(component, componentsArray);
+                    metadata.SetValue(
+                        component,
+                        CreateTypedArray(metadata.elementType, components, count)
+                    );
                     return count > 0;
                 }
                 case FieldKind.List:
@@ -376,7 +381,7 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
 
                     for (int i = 0; i < count; ++i)
                     {
-                        instance.Add(componentsArray.GetValue(i));
+                        instance.Add(components[i]);
                     }
 
                     return count > 0;
@@ -396,7 +401,7 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
 
                     for (int i = 0; i < count; ++i)
                     {
-                        metadata.hashSetAdder(hashSet, componentsArray.GetValue(i));
+                        metadata.hashSetAdder(hashSet, components[i]);
                     }
 
                     return count > 0;
@@ -411,16 +416,49 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
 
     internal static class SiblingComponentFastInvoker
     {
-        internal static Array GetArray(Component component, Type elementType)
+        // Handed out and detached, so a re-entrant call gets its own list rather than refilling the
+        // one its caller is still reading. Re-entry is not hypothetical: a consumer's Equals or
+        // GetHashCode override runs inside a HashSet field's adds. Release puts the list back.
+        // Reused rather than pool-leased because the lease measured more per call than the
+        // allocation it removed; [ThreadStatic] keeps that safe off the main thread too.
+        [ThreadStatic]
+        private static List<Component> Scratch;
+
+        internal static List<Component> Collect(Component component, Type elementType)
         {
+            List<Component> results = Scratch;
+            if (results == null)
+            {
+                results = new List<Component>();
+            }
+            else
+            {
+                Scratch = null;
+            }
+
             // AOT-safe: the non-generic Type overload avoids the runtime generic-method +
             // Expression.Compile path, which IL2CPP cannot service (the old compiled path threw
-            // at runtime in player builds). GetComponents(Type) returns only elementType
-            // instances; copy them into a typed array the caller can assign to its field.
-            Component[] matches = component.GetComponents(elementType);
-            Array typed = Array.CreateInstance(elementType, matches.Length);
-            Array.Copy(matches, typed, matches.Length);
-            return typed;
+            // at runtime in player builds). The List overload of the same query fills a caller
+            // buffer instead of allocating an array per call.
+            results.Clear();
+            component.GetComponents(elementType, results);
+            return results;
+        }
+
+        internal static void Release(List<Component> results)
+        {
+            if (results == null || Scratch != null)
+            {
+                return;
+            }
+
+            results.Clear();
+            if (MaximumRetainedScratchCapacity < results.Capacity)
+            {
+                results.Capacity = 0;
+            }
+
+            Scratch = results;
         }
     }
 }

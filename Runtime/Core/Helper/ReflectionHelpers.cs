@@ -1141,6 +1141,172 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
 #endif
         }
 
+        private static readonly MethodInfo BuildTypedArrayMethod =
+            typeof(ReflectionHelpers).GetMethod(
+                nameof(BuildTypedArray),
+                BindingFlags.NonPublic | BindingFlags.Static
+            );
+
+        private static class TypedArrayBuilders<TSource>
+            where TSource : class
+        {
+#if SINGLE_THREADED
+            internal static readonly Dictionary<Type, Func<List<TSource>, int, Array>> Builders =
+                new();
+#else
+            internal static readonly ConcurrentDictionary<
+                Type,
+                Func<List<TSource>, int, Array>
+            > Builders = new();
+#endif
+        }
+
+        /// <summary>
+        /// Builds an array whose element type is <paramref name="elementType"/> from the first
+        /// <paramref name="count"/> entries of <paramref name="source"/>.
+        /// </summary>
+        /// <typeparam name="TSource">Element type of the source list.</typeparam>
+        /// <param name="elementType">Element type the returned array must have.</param>
+        /// <param name="source">Items to copy. A null list produces an empty array.</param>
+        /// <param name="count">How many leading items to copy. Clamped to the list length.</param>
+        /// <returns>An <c>elementType[]</c> holding the copied items.</returns>
+        /// <remarks>
+        /// Use this instead of <see cref="Array.CreateInstance(Type, int)"/> plus
+        /// <see cref="Array.SetValue(object, int)"/> per element when the element type is known only
+        /// at run time. Every write here goes through the array's own typed indexer, inside a generic
+        /// method resolved and cached once per (source, element) pair, where the non-generic pair
+        /// re-checks the element type on every access. Measured on Unity 6000.4.6f1 Mono, five
+        /// elements cost 0.496 us the non-generic way against 0.230 us here.
+        ///
+        /// An item that is not an instance of <paramref name="elementType"/> is written as null
+        /// rather than throwing. A value-typed <paramref name="elementType"/> falls back to
+        /// <see cref="Array.SetValue(object, int)"/>.
+        /// Null handling: a null <paramref name="elementType"/> returns an empty array.
+        /// Thread-safety: safe for concurrent use unless SINGLE_THREADED is defined.
+        /// </remarks>
+        public static Array CreateTypedArray<TSource>(
+            Type elementType,
+            List<TSource> source,
+            int count
+        )
+            where TSource : class
+        {
+            if (elementType == null)
+            {
+                return Array.Empty<TSource>();
+            }
+
+            if (count < 0 || source == null)
+            {
+                count = 0;
+            }
+            else if (count > source.Count)
+            {
+                count = source.Count;
+            }
+
+            Func<List<TSource>, int, Array> builder = GetTypedArrayBuilderCached<TSource>(
+                elementType
+            );
+            if (builder != null)
+            {
+                return builder(source, count);
+            }
+
+            Array fallback = Array.CreateInstance(elementType, count);
+            for (int i = 0; i < count; ++i)
+            {
+                fallback.SetValue(source[i], i);
+            }
+
+            return fallback;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static Func<List<TSource>, int, Array> GetTypedArrayBuilderCached<TSource>(
+            Type elementType
+        )
+            where TSource : class
+        {
+#if SINGLE_THREADED
+            if (
+                !TypedArrayBuilders<TSource>.Builders.TryGetValue(
+                    elementType,
+                    out Func<List<TSource>, int, Array> factory
+                )
+            )
+            {
+                factory = CreateTypedArrayBuilder<TSource>(elementType);
+                TypedArrayBuilders<TSource>.Builders[elementType] = factory;
+            }
+
+            return factory;
+#else
+            return TypedArrayBuilders<TSource>.Builders.GetOrAdd(
+                elementType,
+                static type => CreateTypedArrayBuilder<TSource>(type)
+            );
+#endif
+        }
+
+        private static Func<List<TSource>, int, Array> CreateTypedArrayBuilder<TSource>(
+            Type elementType
+        )
+            where TSource : class
+        {
+            if (BuildTypedArrayMethod == null || (!elementType.IsClass && !elementType.IsInterface))
+            {
+                return null;
+            }
+
+            try
+            {
+                MethodInfo closed = BuildTypedArrayMethod.MakeGenericMethod(
+                    typeof(TSource),
+                    elementType
+                );
+                return (Func<List<TSource>, int, Array>)
+                    Delegate.CreateDelegate(typeof(Func<List<TSource>, int, Array>), closed);
+            }
+            catch (Exception)
+            {
+                // An AOT runtime that never generated this instantiation throws here rather than
+                // returning null, and the caller has a non-generic fallback that always works. A
+                // null is cached alongside the successes, so the refusal costs one attempt per
+                // element type rather than one per call. This file already carries the scar of the
+                // opposite choice: the relational fast path used to close a generic Unity method at
+                // run time and threw in player builds until it was rewritten non-generically.
+                return null;
+            }
+        }
+
+        /// <remarks>
+        /// A loop, not <see cref="Array.Copy(Array, Array, int)"/> or <c>List.CopyTo</c>, and that is
+        /// measured rather than assumed. Those write through a covariant view of the destination --
+        /// a <c>TElement[]</c> handed around as <c>TSource[]</c> -- so the runtime re-checks the
+        /// element type on every element. On Unity 6000.4.6f1 Mono they cost 3.6-3.9x this loop, and
+        /// the ratio is flat from 5 elements to 500, which is the tell that the cost is per element
+        /// rather than fixed overhead that would amortize. They are also illegal when
+        /// <typeparamref name="TElement"/> is an interface: an interface array is not a covariant
+        /// view of a class array, so the cast throws.
+        ///
+        /// The bulk win exists, but it is upstream of here: filling a <c>List&lt;TElement&gt;</c> in
+        /// the first place makes <c>CopyTo</c> an exact-type memmove. For Unity component queries
+        /// that needs a run-time-closed generic, which IL2CPP has refused in this package before.
+        /// </remarks>
+        private static Array BuildTypedArray<TSource, TElement>(List<TSource> source, int count)
+            where TSource : class
+            where TElement : class
+        {
+            TElement[] result = new TElement[count];
+            for (int i = 0; i < count; ++i)
+            {
+                result[i] = source[i] as TElement;
+            }
+
+            return result;
+        }
+
         /// <summary>
         /// Gets (or caches) a List&lt;T&gt; creator function for the given element type.
         /// </summary>

@@ -1814,7 +1814,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
                 return false;
             }
 
-            bool state = _rowFoldoutStates.GetOrAdd(foldoutKey, _ => true);
+            bool state = _rowFoldoutStates.GetOrAdd(foldoutKey, static _ => true);
             element.isExpanded = state;
             return state;
         }
@@ -4178,7 +4178,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
             }
 
             ParameterlessFactoryCache.TryRemove(type, out _);
-            UnsupportedParameterlessTypes[type] = 0;
+            UnsupportedParameterlessTypes.TryAdd(type, 0);
             value = null;
             return false;
         }
@@ -5061,12 +5061,11 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
 
             if (resolved != null)
             {
-                ParameterlessFactoryCache[type] = resolved;
-                factory = resolved;
+                factory = ParameterlessFactoryCache.GetOrAdd(type, resolved);
                 return true;
             }
 
-            UnsupportedParameterlessTypes[type] = 0;
+            UnsupportedParameterlessTypes.TryAdd(type, 0);
             factory = null;
             return false;
         }

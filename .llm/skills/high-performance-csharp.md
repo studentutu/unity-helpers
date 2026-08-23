@@ -338,6 +338,62 @@ unavoidable -- but only one result is ever stored and returned, which is the pro
 Keep the plain `TryGetValue`-then-indexer form **only** under `SINGLE_THREADED`, where the field is a
 plain `Dictionary` and there is no race to lose.
 
+`scripts/lint-concurrent-cache-fill.ps1` enforces this. It tracks preprocessor state, so the
+`SINGLE_THREADED` form does not trip it, and a deliberate last-writer-wins overwrite is exempted by
+a `// concurrent-overwrite: <why>` comment on the write line or anywhere in the contiguous comment
+block above it. Do not reach for that marker to silence a fill -- it is for a write that _must_
+replace an earlier answer, such as an explicit registration overriding what inference cached.
+
+**It catches one direction only, and the other is easier to get wrong.** Nothing flags a
+`GetOrAdd`/`TryAdd` that should have stayed an overwrite, and that conversion is silent and
+permanent. Session 217 nearly shipped one: a drawer cached a constructor factory, and when that
+factory returned `null` it fell back to `Activator` and **overwrote** the cache; as `TryAdd` the
+overwrite became a no-op, so the first call worked and every later one hit the broken factory and
+returned `false`. The test is not "is the value deterministic" but **"can this key already hold
+something this write is meant to replace?"** -- i.e. does any path reach the write _after_ something
+already stored under that key, rather than only through an early `TryGetValue` miss.
+
+### A cache factory must be `static`, and a method group is not free
+
+The factory is built **before** the call, so whatever it costs is paid on every call, cache hit
+included. 400,000 warm hits per shape on 6000.4.6f1, control moved 30.6 MB:
+
+| factory shape                            | bytes per call |
+| ---------------------------------------- | -------------: |
+| lambda capturing a method parameter      |      **115.8** |
+| method group (`GetOrAdd(key, Build)`)    |      **106.3** |
+| `static` lambda + state-taking overload  |            0.0 |
+| cached `static readonly Func<...>` field |            0.1 |
+
+- **Mark every cache-factory lambda `static`** (the linter enforces this). It is not cheaper -- a
+  non-capturing lambda is cached in a static field either way. It makes the compiler **reject** a
+  capture (`CS8820`), so the expensive shape stops compiling. That sweep found five capturing
+  factories in `Runtime` and two in `Editor` that nothing else reported.
+- **Never pass a method group.** C# 9 does not cache the conversion (C# 11 does), so
+  `GetOrAdd(key, Build)` allocates every call. Hold it in a `static readonly Func<...>`. No linter
+  can catch this -- it is lexically identical to a local holding a delegate.
+
+**Measure the capture in a method, not a loop.** The first run of that table read **0 B/call** for
+the capturing lambda, because a captured _local_ beside the loop gets one display class. Real code
+captures a **parameter**, so a fresh one is built per call. Reproduce the method, not the shape.
+
+### A monitor around a cache read is the whole call when the answer is "nothing to do"
+
+A `lock` costs ~15 ns more than a `ConcurrentDictionary` read -- nothing beside the work most callers
+then do, and everything beside the work a caller does when the answer is `false`.
+`RelationalComponentAssigner.HasRelationalAssignments` was the case: `AssignHierarchy` asks it per
+component, and most components have no relational field, so for them the lookup _is_ the call.
+Best of three on 6000.4.6f1:
+
+| shape                              |    cost |
+| ---------------------------------- | ------: |
+| `lock` + `Dictionary.TryGetValue`  | 23.1 ns |
+| `ConcurrentDictionary.TryGetValue` |  7.7 ns |
+
+That 15.4 ns was **26%** of a non-relational component: `AssignHierarchy` over 601 of them went from
+59.7 to 41.5 ns each. Before assuming a lock is negligible, ask what the call does when the cache
+says "no".
+
 A guard the factory cannot express -- "only build when I have a live probe" -- still belongs in front
 of `GetOrAdd`, because a factory handed a bad argument would cache a refusal for a reason that has
 nothing to do with the key.

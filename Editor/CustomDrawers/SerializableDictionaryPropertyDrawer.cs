@@ -8096,7 +8096,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
             Func<object> factory = TryResolveConstructorFactory(type);
             if (factory != null)
             {
-                ParameterlessConstructorCache[type] = factory;
+                factory = ParameterlessConstructorCache.GetOrAdd(type, factory);
                 object created = factory();
                 if (created != null)
                 {
@@ -8111,7 +8111,7 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
                 return true;
             }
 
-            UnsupportedParameterlessTypes[type] = 0;
+            UnsupportedParameterlessTypes.TryAdd(type, 0);
             instance = null;
             return false;
         }
@@ -8160,6 +8160,9 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
                 object created = Activator.CreateInstance(type, nonPublic: true);
                 if (created != null)
                 {
+                    // concurrent-overwrite: the caller reaches here only after a resolved
+                    // constructor factory returned null, and that factory is already cached. This
+                    // must replace it, or every later call takes the cache hit and fails forever.
                     ParameterlessConstructorCache[type] = () =>
                     {
                         try
@@ -8183,6 +8186,8 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
             try
             {
                 object uninitialized = FormatterServices.GetUninitializedObject(type);
+                // concurrent-overwrite: replaces a resolved constructor factory that returned null,
+                // for the same reason as the Activator branch above.
                 ParameterlessConstructorCache[type] = () =>
                 {
                     try

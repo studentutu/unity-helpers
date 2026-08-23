@@ -237,8 +237,15 @@ or a **passing test reports as failed**:
   `catch` that assumes any exception is a failure turns every `Assert.Pass` test red — with the pass
   message as the "error" (`ConstructorWithNullComparerDoesNotThrow: Does not throw.`).
 - **Treat `InconclusiveException` / `IgnoreException` as skips**, not failures.
-- **Skip `[Values]` tests rather than run them.** They carry `[Test]` with parameters and no
-  `[TestCase]`; the real runner expands them and this loop cannot.
+- **Skip `[Values]` and `[TestCaseSource]` tests rather than run them.** They carry `[Test]` with
+  parameters and no inline `[TestCase]`; the real runner expands them and this loop cannot.
+  **A skip count is not a coverage statement, and reading it as one is how this loop lies.**
+  Session 217 reported `JsonConverterFuzzTests: 19 pass / 0 fail / 8 skip` and concluded from it
+  that the fixture "does not reach" the path under test. It reaches it: all eight skipped
+  methods are `[TestCaseSource(nameof(Targets))]`, and `Targets` is exactly the list of types
+  the change touched. The pass line counted the fixture's incidental cases and none of its real
+  ones. Before drawing any conclusion from a fixture, **list what was skipped and why** — a
+  target-driven fixture can have its entire meaningful coverage inside the skip bucket.
 
 Two whole categories cannot run here at all, and neither is a regression: a fixture whose body calls
 `LogAssert.Expect` (`No log scope is available`), and an Editor **drawer** test, which needs a real
@@ -266,6 +273,24 @@ Four constraints. The first two were recorded backwards before being measured on
   surfaces as a bare `NullReferenceException` from the sandbox with no line number, so it reads like a
   logic bug in the script rather than a failed lookup — name every lookup and report which one was
   null before using any of them.
+  The two-argument `GetMethod(name, flags)` does not return `null` for an overloaded method — it
+  **throws `AmbiguousMatchException`**, which the bridge reports as `UNEXPECTED_ERROR: Command was
+executed partially`. `SerializableDictionary<,>.Add` and `Serializer.JsonSerialize` both do this.
+  Arity matching avoids both failure modes, but only if the arity is the _right_ one: selecting
+  `JsonSerialize` on `ps.Length >= 1` picked a five-parameter overload and cost a round to
+  `TargetParameterCountException`. Pin the return type too when overloads differ by it.
+- **A second edit in the same session may not auto-compile, and the refresh that forces it kills its
+  own command.** The first write of a session was picked up on its own within ~90 s; a later one was
+  still not compiled after ~110 s with `IsCompiling: false`. A `RunCommand` whose whole body is
+  `AssetDatabase.Refresh()` fixes it, but that command **times out rather than returning**, because
+  the domain reload it triggers unloads the sandbox assembly that would have answered. That timeout
+  is the success signal; re-issue the real command afterwards. Discriminate from a busy editor with
+  `Unity_ManageEditor GetState` as always.
+- **Gate every measurement on a member only the variant under test declares, and print the gate.**
+  This session probed for `RelationalComponentAssigner.ComputeHasRelationalAssignments` and the
+  _absence_ of `_cacheLock`, and refused to print numbers otherwise. Absence matters as much as
+  presence: a stale assembly that still has the old field is exactly the one whose numbers would be
+  reported as the new result.
 - **A `CommonTestBase` fixture runs fine; only its teardown does not.** Both `[SetUp]` methods
   (`BaseSetUp` and the fixture's own) return normally. `[TearDown] TearDown` throws
   `InvalidOperationException: No log scope is available`, because `LogAssert.NoUnexpectedReceived()`

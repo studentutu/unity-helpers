@@ -116,7 +116,7 @@ Run formatters/linters **immediately after each file change**, not batched at ta
 - **Markdown**: `npm run lint:docs` + `npm run lint:markdown`
 - **YAML**: `npm run lint:yaml` (then `actionlint` for workflows)
 - **Spelling**: `npm run lint:spelling` (add valid terms to `cspell.json`). A Claude Code PostToolUse hook (`scripts/hooks/cspell-post-edit.js`, registered in the tracked [`.claude/settings.json`](../.claude/settings.json) which ships with the repo) auto-runs cspell after every Edit/Write/MultiEdit/NotebookEdit, so typos surface immediately; manual invocation before completion remains the expectation (the hook is a safety net, not a substitute -- it does not fire in CI or when editing outside Claude Code)
-- **Tests**: `pwsh -NoProfile -File scripts/lint-tests.ps1 -FixNullChecks -Paths <changed test files>`, then `pwsh -NoProfile -File scripts/lint-tests.ps1 -Paths <changed test files>`
+- **Tests**: `pwsh -NoProfile -File scripts/lint-tests.ps1 -FixNullChecks -Paths <changed test files>`, then `pwsh -NoProfile -File scripts/lint-tests.ps1 -Paths <changed test files>`. Passing more than one path only works because every `-Paths` script now declares a `ValueFromRemainingArguments` sibling -- `pwsh -File` binds the first token and drops the rest, so before that these commands linted ONE file and printed "No issues found". `PWS005` enforces the declaration
 - **Skill files and [context](./context.md)**: `pwsh -NoProfile -File scripts/lint-skill-sizes.ps1` (500-line limit)
 - **Commit prep**: stage files, then run `npm run agent:preflight:fix` (includes changed spell-checkable file checks) before any commit attempt
 - **Pre-push validation**: run `npm run validate:prepush` before push; it is a roughly one-second
@@ -141,9 +141,11 @@ See [formatting](./skills/formatting.md) and [validate-before-commit](./skills/v
 - **Order every comparison left-to-right: use only `<` and `<=`.** `index >= 0` becomes
   `0 <= index`, `a > b` becomes `b < a`, and a range reads as one line of number line:
   `0 <= sum && sum < max`. Swap the operands, not the meaning -- and check for side effects before
-  swapping, because swapping changes evaluation order. New and edited code follows this; the
-  repo-wide sweep of the remaining ~2,900 sites is
-  [#554](https://github.com/Ambiguous-Interactive/unity-helpers/issues/554).
+  swapping, because swapping changes evaluation order. `npm run lint:comparison-direction` enforces
+  this over `Runtime/`, `Editor/`, `Tests/` and `Generator~` and runs in `lint:repo`;
+  `npm run lint:comparison-direction:fix` rewrites what it can and reports the rest with the reason
+  it declined. Relational patterns (`c is >= 'A' and <= 'Z'`) have no left-hand operand to move and
+  are exempt. `Runtime/Utils/SevenZip` is vendored upstream verbatim and is excluded.
 - **`Scene.handle` is an `int` up to Unity 6000.4 and a `SceneHandle` from 6000.5**, where the
   implicit conversion to `int` is obsolete-as-an-**error**. Compare `Scene` values (`==`,
   `IsValid()`) instead of caching a handle. No local gate catches this: `typecheck:unity` uses
@@ -374,6 +376,12 @@ deliberate act, not the tail of every commit.
 - **Exhaust the local gates first.** In rough order of cost, all of them cheaper than one CI run:
   - `npm run typecheck:unity` -- compiles the real `Runtime/**` against UnityEngine reference
     assemblies with the shipped analyzer loaded, in seconds. Catches `CS####` and `WPROTO###`.
+    **Those reference assemblies are `UnityEngine.Modules` 2021.3.33, older than every editor CI
+    runs, and that is the only version the package has ever published** -- so the pin cannot be
+    moved and the gate prints what it is on every compile. Member signatures are safe to check
+    here; anything resolved out of Unity's own metadata (attribute targets, defaults, serialization
+    behaviour) has to be confirmed in a real editor, because the failure mode is a confident answer
+    for a Unity nobody ships ([#553](https://github.com/Ambiguous-Interactive/unity-helpers/issues/553)).
     It builds each source tree four ways, because four different branches ship: the
     `WALLSTOP_PROTO` default, the legacy define-off fallback,
     `WALLSTOP_UNITY_HELPERS_ODIN_INSPECTOR` (`typecheck:unity:odin` / `typecheck:tests:odin`) and

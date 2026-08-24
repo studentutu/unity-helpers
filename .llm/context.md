@@ -132,6 +132,36 @@ See [formatting](./skills/formatting.md) and [validate-before-commit](./skills/v
 
 ### Additional Technical Rules
 
+- **Run the control FIRST, and let it decide whether the platform can be measured.** An allocation
+  assertion needs an instrument that can see an allocation; on an IL2CPP standalone player it cannot,
+  so `Is.Not.AllocatingGCMemory()` there is the absence of a measurement rather than a pass. Assert
+  the control moves, and `Assert.Ignore` when it does not, instead of asserting the subject and
+  hoping. A control asserted _after_ the subject turns an unmeasurable platform into a red build
+  (session 220, two gated IL2CPP legs).
+- **Order every comparison left-to-right: use only `<` and `<=`.** `index >= 0` becomes
+  `0 <= index`, `a > b` becomes `b < a`, and a range reads as one line of number line:
+  `0 <= sum && sum < max`. Swap the operands, not the meaning -- and check for side effects before
+  swapping, because swapping changes evaluation order. New and edited code follows this; the
+  repo-wide sweep of the remaining ~2,900 sites is
+  [#554](https://github.com/Ambiguous-Interactive/unity-helpers/issues/554).
+- **`Scene.handle` is an `int` up to Unity 6000.4 and a `SceneHandle` from 6000.5**, where the
+  implicit conversion to `int` is obsolete-as-an-**error**. Compare `Scene` values (`==`,
+  `IsValid()`) instead of caching a handle. No local gate catches this: `typecheck:unity` uses
+  2021.3 reference assemblies and the MCP editor is on 6000.4, so it cost a full Unity matrix run to
+  find. Same class as [#553](https://github.com/Ambiguous-Interactive/unity-helpers/issues/553).
+- **Reach for the math helpers rather than open-coding the arithmetic.** `WallMath.WrappedAdd`,
+  `WrappedIncrement` and `PositiveMod` already exist; `(i + 1) % capacity` is a re-implementation
+  that also gets the negative case wrong.
+- **Never compare against a magic sentinel; test for the valid range.** `index != -1` becomes
+  `index >= 0` and `index == -1` becomes `index < 0`. The comparison then says what it means, and it
+  refuses a value that is invalid for a reason the sentinel does not cover. Swept to zero across
+  `Runtime/` and `Editor/` in session 220; owner review, PR #551.
+- **An auto-property's data is serialized under `<Name>k__BackingField`, not `Name`.** Any lookup
+  that resolves a member the author NAMED -- a `[WShowIf]` condition, a value source -- must try the
+  source name first and `SerializedMemberNames.BackingFieldFor(name)` second, or it silently falls
+  through to reading the live C# member and stops seeing un-applied Inspector edits. `[field: Attr]`
+  puts an attribute on that backing field, so `AttributeTargets.Field` does not exclude a serialized
+  property (#550).
 - When editing `.gitignore`, validate with `git check-ignore -v <path>` and run `pwsh -NoProfile -File scripts/lint-gitignore-docs.ps1`
 - When adding abbreviations, add them to `cspell.json` (see [cspell dictionary categories](#cspell-dictionary-quick-reference))
 - When introducing ANY new all-caps token or acronym in a skill/doc/script (lint error code, new abbreviation, new API name), add it to the correct cspell dictionary category before committing. `npm run agent:preflight` catches this before pre-commit; the `validate-lint-error-codes` contract enforces lint-error-code families permanently

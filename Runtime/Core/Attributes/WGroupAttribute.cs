@@ -55,11 +55,13 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
     /// }
     /// </code>
     /// </example>
-    [AttributeUsage(
-        AttributeTargets.Field | AttributeTargets.Property,
-        AllowMultiple = true,
-        Inherited = true
-    )]
+    // Fields only, and that does NOT exclude a property whose data is serialized. Write
+    // [field: WGroup(...)] on an auto-property and the attribute lands on the compiler-generated
+    // backing field -- which is a field, and is the member Unity serializes -- so it groups exactly
+    // like one. WGroupLayoutBuilderTests.GroupingWorksThroughABackingFieldAttribute pins that.
+    // What Field refuses is a property Unity does not serialize, which the layout has no
+    // SerializedProperty path to draw and so could only ever silently do nothing.
+    [AttributeUsage(AttributeTargets.Field, AllowMultiple = true, Inherited = true)]
     public sealed class WGroupAttribute : Attribute
     {
         /// <summary>

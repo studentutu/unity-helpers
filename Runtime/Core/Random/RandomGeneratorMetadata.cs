@@ -32,13 +32,15 @@ namespace WallstopStudios.UnityHelpers.Core.Random
             RandomQuality quality,
             string notes,
             string reference = "",
-            string referenceUrl = ""
+            string referenceUrl = "",
+            string period = ""
         )
         {
             Quality = quality;
             Notes = notes ?? string.Empty;
             Reference = reference ?? string.Empty;
             ReferenceUrl = referenceUrl ?? string.Empty;
+            Period = period ?? string.Empty;
         }
 
         public RandomQuality Quality { get; }
@@ -48,6 +50,17 @@ namespace WallstopStudios.UnityHelpers.Core.Random
         public string Reference { get; }
 
         public string ReferenceUrl { get; }
+
+        /// <summary>
+        /// The generator's output period, in the units a caller draws in.
+        /// </summary>
+        /// <remarks>
+        /// Every value is a claim, and it says whose: a published period is quoted as its
+        /// specification states it, and where none is published the value reports the measured live
+        /// state width instead and labels it as measured. A period of 2^128 cannot be observed, so
+        /// a bound that says what was actually seen is worth more than a number nobody checked.
+        /// </remarks>
+        public string Period { get; }
 
         public int QualitySortValue => (int)Quality;
     }
@@ -87,6 +100,7 @@ namespace WallstopStudios.UnityHelpers.Core.Random
                     RandomQuality.Unknown,
                     "Not annotated.",
                     string.Empty,
+                    string.Empty,
                     string.Empty
                 );
             }
@@ -96,7 +110,8 @@ namespace WallstopStudios.UnityHelpers.Core.Random
                 attribute.Quality,
                 attribute.Notes,
                 attribute.Reference,
-                attribute.ReferenceUrl
+                attribute.ReferenceUrl,
+                attribute.Period
             );
         }
     }
@@ -108,6 +123,7 @@ namespace WallstopStudios.UnityHelpers.Core.Random
             RandomQuality.Unknown,
             string.Empty,
             string.Empty,
+            string.Empty,
             string.Empty
         );
 
@@ -116,7 +132,8 @@ namespace WallstopStudios.UnityHelpers.Core.Random
             RandomQuality quality,
             string notes,
             string reference,
-            string referenceUrl
+            string referenceUrl,
+            string period = ""
         )
         {
             Type = type;
@@ -124,6 +141,7 @@ namespace WallstopStudios.UnityHelpers.Core.Random
             Notes = notes ?? string.Empty;
             Reference = reference ?? string.Empty;
             ReferenceUrl = referenceUrl ?? string.Empty;
+            Period = period ?? string.Empty;
         }
 
         public Type Type { get; }
@@ -135,6 +153,16 @@ namespace WallstopStudios.UnityHelpers.Core.Random
         public string Reference { get; }
 
         public string ReferenceUrl { get; }
+
+        /// <summary>
+        /// The generator's output period, or a measured state-width bound when none is published.
+        /// </summary>
+        public string Period { get; }
+
+        /// <summary>
+        /// <see cref="Period"/> for display, falling back to a label rather than an empty cell.
+        /// </summary>
+        public string PeriodLabel => string.IsNullOrWhiteSpace(Period) ? "Undeclared" : Period;
 
         public string QualityLabel
         {

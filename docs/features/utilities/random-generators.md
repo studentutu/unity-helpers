@@ -83,28 +83,47 @@ assigning one would leave `UnityEngine.Random` stuck returning a single value fo
 
 All generators implement the `IRandom` interface:
 
-| Generator                     | Speed           | Quality      | Best For                                                      |
-| ----------------------------- | --------------- | ------------ | ------------------------------------------------------------- |
-| `LinearCongruentialGenerator` | Fastest         | Poor         | Non-critical effects only                                     |
-| `WaveSplatRandom`             | Fastest         | Experimental | Throwaway effects; no formal test results published           |
-| `SplitMix64`                  | Very Fast       | Very Good    | High-throughput generation                                    |
-| `BlastCircuitRandom`          | Very Fast       | Good         | Bulk effects, chaotic mixing                                  |
-| `PcgRandom`                   | Fast            | Excellent    | General purpose, seeded generation                            |
-| `FlurryBurstRandom`           | Fast            | Excellent    | All-around alternative to PCG                                 |
-| `IllusionFlow`                | Fast            | Excellent    | Balanced speed and quality                                    |
-| `XoroShiroRandom`             | Fast            | Good         | Bulk placement, shuffles, procedural noise                    |
-| `RomuDuo`                     | Fast            | Good         | Alternative to PCG                                            |
-| `Xoshiro128StarStar`          | Not benchmarked | Excellent    | `NextBool`/low-bit masks; WebGL and other 32-bit targets      |
-| `Xoshiro256StarStar`          | Not benchmarked | Excellent    | `NextDouble`/`NextUlong`-heavy work (one advance per 64 bits) |
-| `StormDropRandom`             | Moderate        | Excellent    | Long streams from a large 1024-word state                     |
-| `XorShiftRandom`              | Moderate        | Fair         | Legacy compatibility                                          |
-| `WyRandom`                    | Moderate        | Very Good    | Hash-based scenarios                                          |
-| `SquirrelRandom`              | Moderate        | Fair         | Noise-based generation                                        |
-| `PhotonSpinRandom`            | Slow            | Excellent    | Maximum quality needed                                        |
-| `UnityRandom`                 | Slow            | Fair         | Match Unity behavior                                          |
-| `SystemRandom`                | Very Slow       | Poor         | .NET compatibility                                            |
-| `DotNetRandom`                | Very Slow       | Poor         | Bridging `System.Random` code to `IRandom`                    |
-| `WDoomRandom`                 | Fastest         | Poor         | Retro feel, deterministic replays                             |
+| Generator                     | Speed           | Quality      | Period                                                                        | Best For                                                      |
+| ----------------------------- | --------------- | ------------ | ----------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `LinearCongruentialGenerator` | Fastest         | Poor         | 2^32; bit k only 2^(k+1)                                                      | Non-critical effects only                                     |
+| `WaveSplatRandom`             | Fastest         | Experimental | 2^64 (author's claim, unverified)                                             | Throwaway effects; no formal test results published           |
+| `SplitMix64`                  | Very Fast       | Very Good    | 2^64 (published)                                                              | High-throughput generation                                    |
+| `BlastCircuitRandom`          | Very Fast       | Good         | unpublished; 251/256 state bits live (measured)                               | Bulk effects, chaotic mixing                                  |
+| `PcgRandom`                   | Fast            | Excellent    | 2^64 (published)                                                              | General purpose, seeded generation                            |
+| `FlurryBurstRandom`           | Fast            | Excellent    | unpublished; 192/192 state bits live (measured)                               | All-around alternative to PCG                                 |
+| `IllusionFlow`                | Fast            | Excellent    | unpublished; 108/160 state bits live (measured)                               | Balanced speed and quality                                    |
+| `XoroShiroRandom`             | Fast            | Good         | 2^128-1 (published)                                                           | Bulk placement, shuffles, procedural noise                    |
+| `RomuDuo`                     | Fast            | Good         | no guaranteed period (Romu is non-linear); 128/128 state bits live (measured) | Alternative to PCG                                            |
+| `Xoshiro128StarStar`          | Not benchmarked | Excellent    | 2^128-1 (published)                                                           | `NextBool`/low-bit masks; WebGL and other 32-bit targets      |
+| `Xoshiro256StarStar`          | Not benchmarked | Excellent    | 2^256-1 (published)                                                           | `NextDouble`/`NextUlong`-heavy work (one advance per 64 bits) |
+| `StormDropRandom`             | Moderate        | Excellent    | unpublished; 28,407 state bits live (measured)                                | Long streams from a large 1024-word state                     |
+| `XorShiftRandom`              | Moderate        | Fair         | 2^32-1 (published)                                                            | Legacy compatibility                                          |
+| `WyRandom`                    | Moderate        | Very Good    | 2^64 (published)                                                              | Hash-based scenarios                                          |
+| `SquirrelRandom`              | Moderate        | Fair         | 2^32 (32-bit position counter)                                                | Noise-based generation                                        |
+| `PhotonSpinRandom`            | Slow            | Excellent    | unpublished; 734 state bits live (measured)                                   | Maximum quality needed                                        |
+| `UnityRandom`                 | Slow            | Fair         | 2^128-1 (Unity documents Xorshift 128)                                        | Match Unity behavior                                          |
+| `SystemRandom`                | Very Slow       | Poor         | unpublished; 1,717 state bits live (measured)                                 | .NET compatibility                                            |
+| `DotNetRandom`                | Very Slow       | Poor         | runtime-dependent (System.Random); not fixed                                  | Bridging `System.Random` code to `IRandom`                    |
+| `WDoomRandom`                 | Fastest         | Poor         | 1024 draws (measured: 10 state bits live)                                     | Retro feel, deterministic replays                             |
+
+### Reading the Period column
+
+A period of 2^128 cannot be observed, so every value in that column is a claim and the column says
+whose. `(published)` quotes the algorithm's specification. `(author's claim, unverified)` is a
+number the upstream author states that nothing here has checked. And where nothing is published at
+all, the value reports what **was** measured instead: `state bits live (measured)` is the count of
+state bits observed to change over 3,000 `NextUint()` draws, out of the generator's declared state
+width.
+
+Read a live-state count as a **lower bound on state width, not a period**. Bits that did not move
+in 3,000 draws may still be live, and a wide state does not by itself guarantee a long cycle. It is
+there because it is the strongest honest statement available for a generator whose author published
+no period -- and because four `Excellent` ratings in this roster came from repositories that are now
+offline, so a quoted period with no source is exactly the failure this column is meant to avoid.
+
+Each generator declares its own value through `[RandomGeneratorMetadata(period: "...")]`, readable
+at run time as `RandomGeneratorMetadataRegistry.Snapshot(type).Period`. A contract test fails the
+build if a generator declares none, or if this table and the annotation disagree.
 
 `Xoshiro128StarStar` and `Xoshiro256StarStar` are new and have not been through the benchmark
 harness yet; their speed rows fill in the next time

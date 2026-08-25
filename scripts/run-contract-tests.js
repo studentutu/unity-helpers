@@ -40,6 +40,16 @@ const CHECKS = [
     run: "npm run test:analyzer-placement"
   },
   {
+    id: "random-periods",
+    name: "Generator period declarations and docs",
+    run: "npm run test:random-periods"
+  },
+  {
+    id: "verify-shipped-analyzers",
+    name: "Shipped analyzer freshness gate self-test",
+    run: "npm run test:verify-shipped-analyzers"
+  },
+  {
     id: "asset-postprocessor-reachability",
     name: "AssetPostprocessor reachability",
     run: "npm run test:asset-postprocessor-reachability"
@@ -51,6 +61,11 @@ const CHECKS = [
   },
 
   // Linter self-tests.
+  {
+    id: "lint-changelog",
+    name: "Changelog linter self-test",
+    run: "npm run test:lint-changelog"
+  },
   {
     id: "lint-dependabot",
     name: "Dependabot linter self-test",

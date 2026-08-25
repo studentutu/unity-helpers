@@ -166,6 +166,22 @@ See [formatting](./skills/formatting.md) and [validate-before-commit](./skills/v
   since invalidated. That shipped in 3.5.1: every single relational field with
   `IncludeInactive = false` bound the disabled candidate ahead of the enabled one
   ([#529](https://github.com/Ambiguous-Interactive/unity-helpers/issues/529)).
+- **A gate that asks "is this covered" must exclude the files that merely NAME the thing.** The
+  meta-check for [#556](https://github.com/Ambiguous-Interactive/unity-helpers/issues/556) -- every
+  linter needs a self-test that can make it report -- scanned `scripts/tests/**` for the linter's
+  file name, including `test-run-repo-lint.js`, which names linters in two ALLOWLISTS rather than
+  running them, so each allowlisted linter read as covered by the list excusing it. A check written
+  for #556 nearly shipped with #556's own defect; registries are now excluded by name.
+- **`(?:.|\n)*?` is not a safe "any character" in V8; use `[\s\S]*?`.** Measured: the same lazy
+  pattern matched a 300-character slice of `PcgRandom.cs` and returned `null` for the whole 8 KB
+  file, so an annotation plainly present read as absent -- and Python's engine matched both, which
+  is how one expression passed in one script and silently failed in the next.
+- **`RandomGeneratorMetadata.Period` carries its provenance, because a 2^128 period cannot be
+  observed.** A published specification is quoted; otherwise the value states the MEASURED live
+  state width (`"unpublished; 251/256 state bits live (measured)"`).
+  `scripts/tests/test-random-periods.js` requires every generator to declare one and refuses a docs
+  table that disagrees either way. Four `Excellent` ratings here came from repositories that now
+  404; an invented period is that failure one column over.
 - **Reach for the math helpers rather than open-coding the arithmetic.** `WallMath.WrappedAdd`,
   `WrappedIncrement` and `PositiveMod` already exist; `(i + 1) % capacity` is a re-implementation
   that also gets the negative case wrong.
@@ -441,9 +457,11 @@ deliberate act, not the tail of every commit.
   session 175 updated the `Generator~` differentials, missed the Unity golden vectors in
   `Tests/Runtime/Serialization/`, and cost a full matrix run to discover. Grep for the affected byte
   literals in `Tests/` as well as `Generator~/`.
-- **Superseding your own run is pure waste**, and it also reds the previous commit: a stale run
-  fails with a `Stale pull request run for <sha>` annotation, which looks like breakage until you
-  read the annotations.
+- **Superseding your own run reds the previous SHA's Unity Tests entry; a QUEUED matrix is no
+  cheaper.** Every leg of the old run fails its `require-current-pr-head` guard as a stale run,
+  whether or not those legs started, so queue depth does not touch the cost -- session 223 pushed
+  four times on that reasoning and left three red runs. But **`Unity CI Success` is not fooled**:
+  it re-resolves the head last and passed all three, by design. Batch anyway; do not panic at it.
 
 ### Test Execution
 

@@ -59,7 +59,8 @@ namespace WallstopStudios.UnityHelpers.Core.Random
         RandomQuality.Good,
         "Published romuDuo: the ROMU multiplier with the ROTL(y,36) + ROTL(y,15) - x update. NextUint returns the low 32 bits of the 64-bit word.",
         "Overton 2020",
-        "https://romu-random.org/code.c"
+        "https://romu-random.org/code.c",
+        period: "no guaranteed period (Romu is non-linear); 128/128 state bits live (measured)"
     )]
     [Serializable]
     [DataContract]

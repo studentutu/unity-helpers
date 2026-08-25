@@ -4,7 +4,6 @@
 namespace WallstopStudios.UnityHelpers.Core.DataStructure
 {
     using System;
-    using System.Buffers;
     using System.Collections.Generic;
     using System.Collections.Immutable;
     using UnityEngine;
@@ -335,15 +334,18 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
             }
 
             bucketSize = Math.Max(1, bucketSize);
-            int[] scratch = ArrayPool<int>.Shared.Rent(elementCount);
-            try
-            {
-                _head = BuildNode(_bounds, 0, elementCount, bucketSize, scratch);
-            }
-            finally
-            {
-                ArrayPool<int>.Shared.Return(scratch, clearArray: true);
-            }
+            // SystemArrayPool, not WallstopArrayPool: elementCount is a runtime collection size, and
+            // WallstopArrayPool keeps a permanent bucket per distinct size -- its own docs call
+            // Get(collection.Count) an unbounded leak. SystemArrayPool is this package's
+            // scoped-handle wrapper over the shared pool, so it still disposes through PooledArray
+            // with no try/finally. clearArray is false because the build writes every slot before
+            // reading it, which is what the previous ArrayPool.Shared.Rent already relied on.
+            using PooledArray<int> scratchLease = SystemArrayPool<int>.Get(
+                elementCount,
+                clearArray: false,
+                out int[] scratch
+            );
+            _head = BuildNode(_bounds, 0, elementCount, bucketSize, scratch);
         }
 
         private OctTreeNode BuildNode(

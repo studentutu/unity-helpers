@@ -244,52 +244,59 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
 
             results.Clear();
 
-            using PooledResource<Dictionary<int, List<int>>> dictResource = DictionaryBuffer<
-                int,
-                List<int>
-            >.Dictionary.Get(out Dictionary<int, List<int>> setMap);
-            using PooledResource<List<PooledResource<List<int>>>> scratchLeaseResource = Buffers<
-                PooledResource<List<int>>
-            >.List.Get(out List<PooledResource<List<int>>> scratchLeases);
+            int elementCount = _parent.Length;
+            if (elementCount == 0)
+            {
+                return results;
+            }
 
-            for (int i = 0; i < _parent.Length; i++)
+            // A root is an index into _parent, so a dense array indexed by root answers "which
+            // result list is this set's" without hashing -- and the element goes straight into its
+            // destination, where the previous shape gathered every element into a per-root scratch
+            // list and then copied all of them a second time. The slot holds resultIndex + 1 so a
+            // zero-filled array already means "unseen" and no sentinel fill pass is needed.
+            //
+            // SystemArrayPool, not WallstopArrayPool: elementCount is a runtime collection size, and
+            // WallstopArrayPool keeps a permanent bucket per distinct size -- its own docs call
+            // Get(collection.Count) an unbounded leak. SystemArrayPool is this package's
+            // scoped-handle wrapper over the shared pool, so it still disposes through PooledArray
+            // with no try/finally. clearArray is true because the slot is READ before it is written:
+            // that read is what "unseen" means, and the shared pool hands back dirty arrays.
+            using PooledArray<int> rootLease = SystemArrayPool<int>.Get(
+                elementCount,
+                clearArray: true,
+                out int[] rootToResult
+            );
+
+            for (int i = 0; i < elementCount; i++)
             {
                 if (!TryFind(i, out int root))
                 {
                     continue;
                 }
 
-                if (!setMap.TryGetValue(root, out List<int> scratch))
+                int slot = rootToResult[root];
+                List<int> destination;
+                if (0 < slot)
                 {
-                    PooledResource<List<int>> lease = Buffers<int>.List.Get(out scratch);
-                    scratchLeases.Add(lease);
-                    setMap[root] = scratch;
-                }
-                scratch.Add(i);
-            }
-
-            foreach (List<int> scratch in setMap.Values)
-            {
-                if (!reuseStack.TryPop(out List<int> destination))
-                {
-                    destination = new List<int>(scratch.Count);
+                    destination = results[slot - 1];
                 }
                 else
                 {
-                    destination.Clear();
-                    if (destination.Capacity < scratch.Count)
+                    if (reuseStack.TryPop(out destination))
                     {
-                        destination.Capacity = scratch.Count;
+                        destination.Clear();
                     }
+                    else
+                    {
+                        destination = new List<int>();
+                    }
+
+                    results.Add(destination);
+                    rootToResult[root] = results.Count;
                 }
 
-                destination.AddRange(scratch);
-                results.Add(destination);
-            }
-
-            for (int i = 0; i < scratchLeases.Count; ++i)
-            {
-                scratchLeases[i].Dispose();
+                destination.Add(i);
             }
 
             return results;

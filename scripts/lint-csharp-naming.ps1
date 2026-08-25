@@ -117,8 +117,16 @@ function Get-FilesToCheck {
   }
 
   $files = @()
-  foreach ($root in $sourceRoots) {
-    if (-not (Test-Path $root)) { continue }
+  foreach ($rootName in $sourceRoots) {
+    # Anchored on the script's own location, not the caller's working directory: these roots are
+    # repository-relative, and resolving them against the cwd turned "run from anywhere else" into
+    # a hard failure once the missing-root guard below landed.
+    $root = Join-Path $PSScriptRoot '..' $rootName
+    # Renaming a source root used to remove that whole tree from the scan silently (#556).
+    if (-not (Test-Path $root)) {
+      Write-Host "[lint-csharp-naming] ERROR: source root not found: $rootName. If it moved, update `$sourceRoots in the same commit." -ForegroundColor Red
+      exit 1
+    }
     # [IO.Directory]::EnumerateFiles rather than Get-ChildItem -Recurse -Include, which enumerates
     # everything and post-filters. Measured on this repository's 1643 C# files over the
     # devcontainer's 9p mount: 0.8 s against 28.5 s. Sorted because the walk order is the
@@ -158,6 +166,13 @@ $violations = @()
 Write-Info "Scanning for C# method names with underscores..."
 
 $files = Get-FilesToCheck -StagedOnly:$StagedOnly
+
+# -StagedOnly matching nothing is ordinary; a repository-wide walk finding no C# files is
+# the walk breaking, and reporting success for it is the failure mode #556 is about.
+if (-not $StagedOnly -and @($files).Count -eq 0) {
+  Write-Host '[lint-csharp-naming] ERROR: the repository-wide scan found no C# files, so a pass here would mean nothing.' -ForegroundColor Red
+  exit 1
+}
 
 foreach ($file in $files) {
   $filePath = $file.FullName

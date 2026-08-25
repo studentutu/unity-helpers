@@ -306,6 +306,27 @@ executed partially`. `SerializableDictionary<,>.Add` and `Serializer.JsonSeriali
   (`unity3d.unityengine`) stops at 2020.3.21 -- so instead every `typecheck:unity` /
   `typecheck:tests` compile now prints the version it answered for
   ([#553](https://github.com/Ambiguous-Interactive/unity-helpers/issues/553)).
+- **A test body calling `TestContext` cannot run here either, and it fails as a bare
+  `NullReferenceException`.** `TestContext.WriteLine` needs NUnit's execution context, which this
+  loop does not create. Five fixtures failed that way in session 222
+  (`IListExtensionTests`, `UnityExtensionsGridConcaveHullTests`) and read exactly like regressions
+  from the change under test. Treat a bare NRE as "unrunnable here" only **after** grepping the body
+  for `TestContext` -- and only then; the same message is what a genuinely broken fixture produces.
+- **Select fixtures by the AREA OF THE FILE YOU CHANGED, not by name-matching the types you
+  touched.** Session 222 converted eight pool sites, ran the fixtures whose _names_ matched those
+  types (`339 pass / 0 fail`), pushed, and reddened all four playmode legs: the regression was in
+  `JsonConverterTests`, which covers `SphericalHarmonicsL2Converter` but is not named after it. A
+  green run over the wrong fixture set is worth nothing. Map each changed file to its namespace
+  (`Runtime/Core/Serialization/**` -> the `Serialization` fixtures) and run that whole namespace.
+- **Select fixtures by NAMESPACE, and make the probe refuse a zero-fixture run.** A sweep that
+  filtered on the assembly _name_ containing `Serialization` matched **nothing** and printed
+  `0 pass / 0 fail`, which reads exactly like a clean suite. The serialization fixtures are in
+  `WallstopStudios.UnityHelpers.Tests.Runtime`, not a per-directory assembly -- the per-directory
+  split is real but partial, so an assembly-name filter is a guess and a namespace filter is not.
+  Every selecting probe needs the property
+  [#556](https://github.com/Ambiguous-Interactive/unity-helpers/issues/556) is about: end with
+  `if (matched == 0) { result.LogError("NO FIXTURES MATCHED -- this run measured nothing."); return; }`,
+  or print the matched names. One `GetAssemblies()` dump answers the naming for the whole session.
 - **Gate every measurement on a member only the variant under test declares, and print the gate.**
   This session probed for `RelationalComponentAssigner.ComputeHasRelationalAssignments` and the
   _absence_ of `_cacheLock`, and refused to print numbers otherwise. Absence matters as much as

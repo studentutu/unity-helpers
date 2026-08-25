@@ -116,7 +116,7 @@ Run formatters/linters **immediately after each file change**, not batched at ta
 - **Markdown**: `npm run lint:docs` + `npm run lint:markdown`
 - **YAML**: `npm run lint:yaml` (then `actionlint` for workflows)
 - **Spelling**: `npm run lint:spelling` (add valid terms to `cspell.json`). A Claude Code PostToolUse hook (`scripts/hooks/cspell-post-edit.js`, registered in the tracked [`.claude/settings.json`](../.claude/settings.json) which ships with the repo) auto-runs cspell after every Edit/Write/MultiEdit/NotebookEdit, so typos surface immediately; manual invocation before completion remains the expectation (the hook is a safety net, not a substitute -- it does not fire in CI or when editing outside Claude Code)
-- **Tests**: `pwsh -NoProfile -File scripts/lint-tests.ps1 -FixNullChecks -Paths <changed test files>`, then `pwsh -NoProfile -File scripts/lint-tests.ps1 -Paths <changed test files>`. Passing more than one path only works because every `-Paths` script now declares a `ValueFromRemainingArguments` sibling -- `pwsh -File` binds the first token and drops the rest, so before that these commands linted ONE file and printed "No issues found". `PWS005` enforces the declaration
+- **Tests**: `pwsh -NoProfile -File scripts/lint-tests.ps1 -FixNullChecks -Paths <changed test files>`, then `pwsh -NoProfile -File scripts/lint-tests.ps1 -Paths <changed test files>`. Passing more than one path only works because every `-Paths` script declares BOTH a `ValueFromRemainingArguments` sibling and `[CmdletBinding(PositionalBinding = $false)]` -- `pwsh -File` binds the first token and offers the rest to the other named parameters positionally, so the sibling alone only works when every neighbour happens to be a `[switch]`. Measured: `ensure-editor.ps1 -RequiredEditorPayloadRelativePath a b` put `b` in `-InstallRoot`. `PWS005` enforces both halves
 - **Skill files and [context](./context.md)**: `pwsh -NoProfile -File scripts/lint-skill-sizes.ps1` (500-line limit)
 - **Commit prep**: stage files, then run `npm run agent:preflight:fix` (includes changed spell-checkable file checks) before any commit attempt
 - **Pre-push validation**: run `npm run validate:prepush` before push; it is a roughly one-second
@@ -151,6 +151,21 @@ See [formatting](./skills/formatting.md) and [validate-before-commit](./skills/v
   `IsValid()`) instead of caching a handle. No local gate catches this: `typecheck:unity` uses
   2021.3 reference assemblies and the MCP editor is on 6000.4, so it cost a full Unity matrix run to
   find. Same class as [#553](https://github.com/Ambiguous-Interactive/unity-helpers/issues/553).
+- **Three measured Unity/pool costs live in [unity-api-costs](./skills/unity-api-costs.md):** every
+  list-taking `Get*Components` overload clears the list for you (so a `.Clear()` before one is dead
+  code); `UnityEngine.Object`'s `!=` is a native aliveness check at 5.84x a managed compare (so a
+  helper that already knows should return a `bool` with an `out` -- but never replace a _liveness_
+  check with `is not null`); and `SystemArrayPool<T>` is the default array rent, with the exact-size
+  pools reserved for a consumer that rejects a longer array, because they leak a bucket per size.
+- **`UnityEngine.Object` declares `implicit operator bool`, so no `Component`-shaped expression is
+  ever a type error in a boolean position** -- not in a `return`, an `if`, an `&&` or a `!`. A
+  `bool`-returning method that ends `return FindTheThing(...);` compiles, converts the found object
+  to `true`, and **discards it**. Read a `bool` method with an `out` parameter as one unit: if a path
+  returns without writing the `out`, the caller gets a stale value and the compiler will not say so,
+  because definite-assignment is satisfied by any earlier write -- including one a failed filter has
+  since invalidated. That shipped in 3.5.1: every single relational field with
+  `IncludeInactive = false` bound the disabled candidate ahead of the enabled one
+  ([#529](https://github.com/Ambiguous-Interactive/unity-helpers/issues/529)).
 - **Reach for the math helpers rather than open-coding the arithmetic.** `WallMath.WrappedAdd`,
   `WrappedIncrement` and `PositiveMod` already exist; `(i + 1) % capacity` is a re-implementation
   that also gets the negative case wrong.

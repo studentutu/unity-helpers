@@ -70,30 +70,32 @@ jobs:
           const performanceAssembly = "WallstopStudios.UnityHelpers.Tests.Runtime.Performance";
           const randomAssembly = "WallstopStudios.UnityHelpers.Tests.Runtime.Random";
 
+          // PlayMode only. Both benchmark assemblies are platform-neutral, and Unity's EditMode
+          // runner takes only assemblies flagged EditorAssembly -- so the four editmode legs
+          // were handed two assembly names, ran zero tests, and failed "Verify tests actually
+          // ran" on every scheduled run. Measured: the 2021.3.45f1 editmode leg's log mentions
+          // Tests.Runtime.Random three times (the echoed list) against 2,375 in playmode
+          // (#570). The thorough Random sweep the editmode leg was configured for moves here,
+          // which is the only mode that can execute it.
           function benchmarkProfile(target) {
             const discovered = discovery.defaultIncludeAssemblies(process.cwd(), {
               includePerf: true,
               target
             });
-            if (!discovered.includes(performanceAssembly)) {
-              throw new Error(`The ${target} benchmark profile did not discover ${performanceAssembly}.`);
+            for (const required of [performanceAssembly, randomAssembly]) {
+              if (!discovered.includes(required)) {
+                throw new Error(`The ${target} benchmark profile did not discover ${required}.`);
+              }
             }
-            if (target === "editmode" && !discovered.includes(randomAssembly)) {
-              throw new Error(`The editmode benchmark profile did not discover ${randomAssembly}.`);
-            }
-            const assemblies = target === "editmode"
-              ? [performanceAssembly, randomAssembly]
-              : [performanceAssembly];
-            return assemblies.join(";");
+            return [performanceAssembly, randomAssembly].join(";");
           }
 
           const profiles = {
-            editmode: benchmarkProfile("editmode"),
             playmode: benchmarkProfile("playmode")
           };
           const include = [];
           for (const version of versions) {
-            for (const mode of ["editmode", "playmode"]) {
+            for (const mode of ["playmode"]) {
               include.push({
                 "unity-version": version,
                 "test-mode": mode,
@@ -289,19 +291,18 @@ jobs:
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
           UNITY_ACCELERATOR_ENDPOINT: ${{ secrets.UNITY_ACCELERATOR_ENDPOINT }}
-          # EditMode also owns the thorough Random sweep. Selecting both its
+          # This leg also owns the thorough Random sweep. Selecting both its
           # assembly and Fast category folds that sweep into this one Unity
           # launch while the explicit assembly list prevents unrelated Fast
           # tests from entering the benchmark lane.
           UH_BENCHMARK_ASSEMBLIES: ${{ matrix.assemblies }}
-          UH_UNITY_TEST_CATEGORY: >-
-            ${{ matrix.test-mode == 'editmode' && 'Performance;Stress;Fast' || 'Performance;Stress' }}
-          UH_RANDOM_SAMPLE_COUNT: ${{ matrix.test-mode == 'editmode' && '12750000' || '' }}
-          UH_RANDOM_NOISE_MAP_ITERATIONS: ${{ matrix.test-mode == 'editmode' && '1000' || '' }}
-          # The combined EditMode pass previously had two independent 80-minute
-          # watchdog budgets. Keep deliberate combined headroom while leaving
-          # ten minutes for cleanup before this step's 120-minute hard limit.
-          UH_EDITOR_TEST_TIMEOUT_SECONDS: ${{ matrix.test-mode == 'editmode' && '6600' || '' }}
+          UH_UNITY_TEST_CATEGORY: "Performance;Stress;Fast"
+          UH_RANDOM_SAMPLE_COUNT: "12750000"
+          UH_RANDOM_NOISE_MAP_ITERATIONS: "1000"
+          # The combined pass previously had two independent 80-minute watchdog
+          # budgets. Keep deliberate combined headroom while leaving ten minutes
+          # for cleanup before this step's 120-minute hard limit.
+          UH_EDITOR_TEST_TIMEOUT_SECONDS: "6600"
           UH_PERF_COMMIT: ${{ github.sha }}
         run: |
           # Release (not Debug) code optimization for the editmode/playmode perf
@@ -605,14 +606,22 @@ jobs:
       # git-auto-commit-action is a no-op when there is no diff, so a run that
       # produced no new results does not create an empty commit.
       #
-      # TODO(unity-helpers): if the default branch is protected such that the
-      # built-in GITHUB_TOKEN cannot push (branch protection / required reviews),
-      # this direct commit will be REJECTED. DxMessaging's perf-numbers.yml hit
-      # exactly this and switched to a GitHub App installation token
-      # (actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1) that opens an auto-merge PR instead.
-      # If that happens here, provision an App token and mirror that rationale;
-      # the default below is the simplest path that works on an UNprotected
-      # default branch.
+      # A direct push to main is permitted today, and that was measured rather than
+      # assumed (#515). `"protected": true` on the branch object is set by ANY
+      # ruleset, including ones that allow pushes: GET /branches/main/protection
+      # returns 404 "Branch not protected", and the only rules on main come from
+      # ruleset 15358326 -- deletion, non_fast_forward and copilot_code_review.
+      # None of those blocks a fast-forward push, there is no pull_request rule
+      # and no required_status_checks rule, and 10 of the last 100 commits on main
+      # were pushed by bots.
+      #
+      # The moment a pull_request or required_status_checks rule is added, this
+      # push starts failing on the following Sunday. The fallback is DxMessaging's
+      # perf-numbers.yml: a GitHub App installation token
+      # (actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1)
+      # that opens an auto-merge PR. It has to be an App token, not the built-in
+      # one -- a pull request opened with GITHUB_TOKEN does not trigger workflows,
+      # so its required checks never start and auto-merge stalls forever.
       - name: Commit perf results
         uses: stefanzweifel/git-auto-commit-action@4a55954c782fc1ea30b9056cd3e7a2b40ca8887d
         with:

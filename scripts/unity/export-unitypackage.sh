@@ -41,10 +41,36 @@ if [[ -z "${OUTPUT_PATH}" ]]; then
     OUTPUT_PATH="${REPO_ROOT}/.artifacts/release/${PACKAGE_NAME}-${PACKAGE_VERSION}.unitypackage"
 fi
 
+# The project directory is deleted with `rm -rf` below, so it has to be somewhere a mistake is
+# survivable. A strict subdirectory of .artifacts or of the system temp directory qualifies; the
+# roots themselves do not, and neither does anything else.
+#
+# The temp root is not a convenience. Staging copies ~1,900 files and 82 MB, and on a bind-mounted
+# workspace that is the whole cost of the export smoke gate: measured 4.25 s to copy Runtime and
+# Editor into .artifacts against 0.022 s into /tmp, and 15.0 s against ~1 s for the whole
+# --stage-only run (#540).
 ARTIFACTS_ROOT="$(realpath -m "${REPO_ROOT}/.artifacts")"
+TEMP_ROOT="$(realpath -m "${TMPDIR:-/tmp}")"
+RESOLVED_REPO_ROOT="$(realpath -m "${REPO_ROOT}")"
 PROJECT_DIR="$(realpath -m "${PROJECT_DIR}")"
-if [[ "${PROJECT_DIR}" == "${ARTIFACTS_ROOT}" || "${PROJECT_DIR}" != "${ARTIFACTS_ROOT}/"* ]]; then
-    echo "ERROR: Refusing to create the export project unless it is a subdirectory under ${ARTIFACTS_ROOT}: ${PROJECT_DIR}" >&2
+
+# .artifacts is unconditionally fine -- it IS the repository's scratch directory. The temp root is
+# fine only outside the checkout, because a checkout can live under it: a CI runner working
+# directory, or a container whose workspace is a temp mount. Without the second test, --project-dir
+# pointing at the repository root would be accepted there and then deleted (Bugbot, PR #574).
+PROJECT_DIR_ALLOWED=0
+if [[ "${PROJECT_DIR}" != "${ARTIFACTS_ROOT}" && "${PROJECT_DIR}" == "${ARTIFACTS_ROOT}/"* ]]; then
+    PROJECT_DIR_ALLOWED=1
+elif [[ "${PROJECT_DIR}" != "${TEMP_ROOT}" && "${PROJECT_DIR}" == "${TEMP_ROOT}/"* ]]; then
+    # Neither the checkout, nor anything inside it, nor anything containing it.
+    if [[ "${PROJECT_DIR}" != "${RESOLVED_REPO_ROOT}" &&
+          "${PROJECT_DIR}" != "${RESOLVED_REPO_ROOT}/"* &&
+          "${RESOLVED_REPO_ROOT}" != "${PROJECT_DIR}/"* ]]; then
+        PROJECT_DIR_ALLOWED=1
+    fi
+fi
+if (( PROJECT_DIR_ALLOWED == 0 )); then
+    echo "ERROR: Refusing to create the export project unless it is a subdirectory under ${ARTIFACTS_ROOT}, or under ${TEMP_ROOT} and outside ${RESOLVED_REPO_ROOT}: ${PROJECT_DIR}" >&2
     exit 1
 fi
 

@@ -134,9 +134,31 @@ namespace WallstopStudios.UnityHelpers.Tags
             float calculatedValue = _baseValue;
             if (0 < _modifications.Count)
             {
-                ApplyModificationsInOrder(ModificationAction.Addition, ref calculatedValue);
-                ApplyModificationsInOrder(ModificationAction.Multiplication, ref calculatedValue);
-                ApplyModificationsInOrder(ModificationAction.Override, ref calculatedValue);
+                // The Addition pass has to visit every modification anyway, so it reports which
+                // other actions are present and the other two passes are skipped when they would
+                // find nothing. Most effects use one action, so this is usually one traversal
+                // rather than three: measured 0.464 us -> 0.171 us for three handles of two
+                // additions, on 6000.4.6f1 (#529).
+                //
+                // The passes stay separate and in this order. Addition, Multiplication and
+                // Override are not interchangeable, and a single pass accumulating them would
+                // also change the ORDER of the float additions, which changes their result.
+                RemainingActions remaining = ApplyModificationsInOrder(
+                    ModificationAction.Addition,
+                    ref calculatedValue
+                );
+                if (remaining.hasMultiplication)
+                {
+                    _ = ApplyModificationsInOrder(
+                        ModificationAction.Multiplication,
+                        ref calculatedValue
+                    );
+                }
+
+                if (remaining.hasOverride)
+                {
+                    _ = ApplyModificationsInOrder(ModificationAction.Override, ref calculatedValue);
+                }
             }
 
             _currentValue = calculatedValue;
@@ -283,8 +305,13 @@ namespace WallstopStudios.UnityHelpers.Tags
             _currentValueCalculated = false;
         }
 
-        private void ApplyModificationsInOrder(ModificationAction action, ref float value)
+        private RemainingActions ApplyModificationsInOrder(
+            ModificationAction action,
+            ref float value
+        )
         {
+            bool hasMultiplication = false;
+            bool hasOverride = false;
             foreach (
                 KeyValuePair<EffectHandle, List<AttributeModification>> entry in _modifications
             )
@@ -293,12 +320,30 @@ namespace WallstopStudios.UnityHelpers.Tags
                 for (int index = 0; index < modifications.Count; index++)
                 {
                     AttributeModification modification = modifications[index];
-                    if (modification.action == action)
+                    ModificationAction modificationAction = modification.action;
+                    if (modificationAction == action)
                     {
                         ApplyAttributeModification(modification, ref value);
+                        continue;
+                    }
+
+                    switch (modificationAction)
+                    {
+                        case ModificationAction.Multiplication:
+                        {
+                            hasMultiplication = true;
+                            break;
+                        }
+                        case ModificationAction.Override:
+                        {
+                            hasOverride = true;
+                            break;
+                        }
                     }
                 }
             }
+
+            return new RemainingActions(hasMultiplication, hasOverride);
         }
 
         private static void ValidateInput(float value, [CallerMemberName] string caller = null)
@@ -521,6 +566,21 @@ namespace WallstopStudios.UnityHelpers.Tags
         public override string ToString()
         {
             return ((float)this).ToString(CultureInfo.InvariantCulture);
+        }
+
+        // Returned rather than reported through `out` parameters: these accumulate across the
+        // whole traversal, and an `out` assigned anywhere but immediately before the return is the
+        // shape that lets a later path forget to write it.
+        private readonly struct RemainingActions
+        {
+            public readonly bool hasMultiplication;
+            public readonly bool hasOverride;
+
+            public RemainingActions(bool hasMultiplication, bool hasOverride)
+            {
+                this.hasMultiplication = hasMultiplication;
+                this.hasOverride = hasOverride;
+            }
         }
     }
 }

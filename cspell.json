@@ -363,7 +363,9 @@
         "blittable",
         "IVT",
         "undefining",
-        "undefines"
+        "undefines",
+        "finalizable",
+        "finalizer"
       ]
     },
     {
@@ -880,7 +882,9 @@
         "tlmin",
         "tlmax",
         "FPF",
-        "BCFN"
+        "BCFN",
+        "ABBABAAB",
+        "TestU01"
       ]
     }
   ],

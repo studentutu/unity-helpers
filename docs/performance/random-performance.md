@@ -1,12 +1,55 @@
 # Random Number Generator Performance Benchmarks
 
-> Auto-generated via RandomPerformanceTests.Benchmark. Run the test to refresh these summary and detail tables.
-
 State repair for a generator restored from JSON or protobuf happens in its constructor or the shared
 after-deserialization callback. This includes each generator's state, the shared bit/byte reservoirs
 and GUID scratch buffer. Repair is not repeated in a draw method, so malformed/default serialized
 state is repaired before the first draw without adding a guard to every later draw. PhotonSpin's
 one-time warmup priming also happens there, leaving only its block-boundary check in the draw path.
+
+## How the Speed column is measured
+
+The ops/s columns are each generator measured on its own, one after another. That answers "how fast
+is this generator here" and it is the wrong instrument for "which generator is faster": the roster
+takes minutes to walk, and anything that changed on the machine in between lands on whichever
+generator was being measured at the time.
+
+The **Speed** column is measured differently. Every generator is compared against `IllusionFlow`
+(what `PRNG.Instance` returns) in a fixed `ABBABAAB` batch, so each of the four readings that make
+up a ratio sits next to the reading it is divided by, and both generators occupy the same mean
+position in the batch. A drift that is linear across the batch cancels rather than being attributed
+to one side. The four raw readings per side are kept, and their spread is what decides whether the
+ratio is worth publishing: if the machine moved more than 3% between adjacent cycles, that
+generator falls back to the un-paired number and the run says so.
+
+So a Speed bucket is a claim about the generators; an ops/s figure is a claim about this machine on
+that day.
+
+## Two batteries, because they ask different questions
+
+**PractRand** streams until something fails and reports the depth: a generator is "clean through
+8GB" or it is not. **TestU01 SmallCrush** runs fifteen fixed statistics and reports a p-value for
+each. A generator can be clean at 8GB of PractRand and still land a decisive p-value here, so
+neither stands in for the other.
+
+Both run against the same byte stream, from the same host, so a difference between them is a
+difference between the batteries rather than between two ways of producing bytes.
+
+Reading a SmallCrush result takes one piece of context: with fifteen statistics, a perfectly good
+generator lands one p-value outside `[0.001, 0.9990]` roughly one run in seven. The threshold that
+separates noise from signal is not close: the recorded weak control reports `eps` (below 1e-300),
+while noise sits around 1e-4. Anything below **1e-10** is treated as a failure; anything above it is
+reported and ignored. `IllusionFlow` produced a single 7.2e-4 at the manifest seed and was clean on
+two other seeds, which is what that rule is for.
+
+Whole-inventory SmallCrush, 2026-08-26, seed `00010203-0405-0607-0809-0a0b0c0d0e0f`, 908 MB and
+6.3 s of CPU per generator:
+
+- **Every generator rated `Good` or better passed.**
+- Four recorded-weak generators failed decisively, most of their statistics at `eps`:
+  `LinearCongruentialGenerator`, `WDoomRandom`, `WaveSplatRandom`, `XorShiftRandom`.
+- Three recorded-weak generators passed: `DotNetRandom`, `SquirrelRandom`, `SystemRandom`.
+  SmallCrush is the shallower instrument, so that is inconclusive rather than a contradiction of
+  their rating.
 
 For statistical batteries, the repository's
 `Generator~/WallstopStudios.UnityHelpers.RandomQuality` host emits a reproducible little-endian byte
@@ -108,3 +151,7 @@ little-endian, so their 64-bit stream is the 32-bit one with each adjacent word 
 exactly 8GB and is clean through 8GB at 64-bit. Every "clean through 8GB" above is the 32-bit
 figure; the 64-bit outcomes are recorded per generator in
 `scripts/random-quality/expected-outcomes.json`.
+
+## Refreshing these numbers
+
+Run `RandomPerformanceTests.Benchmark` from Unity's Test Runner, or let the weekly `Unity Benchmarks` workflow do it. Both rewrite the tables in place.

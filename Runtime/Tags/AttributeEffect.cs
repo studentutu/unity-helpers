@@ -180,6 +180,101 @@ namespace WallstopStudios.UnityHelpers.Tags
         [JsonIgnore]
         public List<EffectBehavior> behaviors = new();
 
+        [NonSerialized]
+        private bool _instantWithHandleDataReported;
+
+        [NonSerialized]
+        private bool _unassignedCosmeticReported;
+
+        /// <summary>
+        /// Gets whether this effect is <see cref="ModifierDurationType.Instant"/> yet carries
+        /// periodic or behaviour data. Instant effects return no handle, so neither can ever run.
+        /// </summary>
+        internal bool IsInstantWithHandleData =>
+            durationType == ModifierDurationType.Instant
+            && ((periodicEffects is { Count: > 0 }) || (behaviors is { Count: > 0 }));
+
+        /// <summary>
+        /// Returns <c>true</c> the first time it is called on a misconfigured effect, and
+        /// <c>false</c> forever after.
+        /// </summary>
+        /// <remarks>
+        /// The condition is a static property of the asset, so reporting it on the per-application
+        /// path made a single authoring mistake cost a diagnostic on every hit, every tick, for the
+        /// whole session. Editing the effect re-arms the report through
+        /// <see cref="OnValidate"/>.
+        /// </remarks>
+        internal bool ShouldReportInstantWithHandleData()
+        {
+            if (_instantWithHandleDataReported || !IsInstantWithHandleData)
+            {
+                return false;
+            }
+
+            _instantWithHandleDataReported = true;
+            return true;
+        }
+
+        /// <summary>
+        /// Gets whether <see cref="cosmeticEffects"/> holds an unassigned entry. Those entries
+        /// cannot be instanced, so they are skipped every time the effect is applied.
+        /// </summary>
+        internal bool HasUnassignedCosmeticEffect
+        {
+            get
+            {
+                foreach (CosmeticEffectData cosmeticEffect in cosmeticEffects)
+                {
+                    if (cosmeticEffect == null)
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Returns <c>true</c> the first time it is called on an effect holding an unassigned
+        /// cosmetic entry, and <c>false</c> forever after.
+        /// </summary>
+        /// <remarks>
+        /// Same shape as <see cref="ShouldReportInstantWithHandleData"/>: a static property of the
+        /// asset, previously reported once per unassigned entry per application.
+        /// </remarks>
+        internal bool ShouldReportUnassignedCosmeticEffect()
+        {
+            if (_unassignedCosmeticReported || !HasUnassignedCosmeticEffect)
+            {
+                return false;
+            }
+
+            _unassignedCosmeticReported = true;
+            return true;
+        }
+
+        private void OnValidate()
+        {
+            _instantWithHandleDataReported = false;
+            _unassignedCosmeticReported = false;
+            if (IsInstantWithHandleData)
+            {
+                this.LogWarn(
+                    $"Effect {name} defines periodic or behaviour data but is Instant. These features require a Duration or Infinite effect.",
+                    stackTrace: false
+                );
+            }
+
+            if (HasUnassignedCosmeticEffect)
+            {
+                this.LogWarn(
+                    $"Effect {name} has an unassigned CosmeticEffectData entry, which cannot be instanced and is skipped.",
+                    stackTrace: false
+                );
+            }
+        }
+
         /// <summary>
         /// Determines how this effect groups stacks for stacking decisions.
         /// </summary>

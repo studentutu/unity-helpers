@@ -1158,7 +1158,9 @@
     "yujen",
     "Schwarz",
     "doomwiki",
-    "WUH"
+    "WUH",
+    "Ptr",
+    "UIntPtr"
   ],
   "flagWords": [],
   "minWordLength": 3,

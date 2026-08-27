@@ -63,6 +63,8 @@ logs_extracted*
 # already cover the VS Code and Codex client configs.)
 .mcp.json
 .cursor/mcp.json
+opencode.json
+opencode.json.meta
 # The SOURCE of those endpoint values is per-developer too. Ignoring only the
 # generated configs while tracking their input leaves the host address one
 # `git add` away from being committed.

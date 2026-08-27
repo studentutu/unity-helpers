@@ -1027,31 +1027,29 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.WallstopProto
     /// <remarks>
     /// The measure deliberately excludes every prefix: callers wrap this payload in a length or a
     /// message envelope themselves, which is also how the oracle reaches an identical member and
-    /// root form. An empty region refuses rather than manufacturing a value no constructor could
-    /// have produced.
+    /// root form. Writing uses the same forgiving encoder as every other string-shaped field, so
+    /// an unpaired surrogate becomes U+FFFD bytes rather than an exception from inside a save;
+    /// reading stays strict, because wire bytes that are not valid UTF-8 are corruption to refuse,
+    /// not text to invent. An empty region refuses rather than manufacturing a value no
+    /// constructor could have produced.
     /// </remarks>
     public sealed class WProtoUriFormatter : IWProtoFormatter<Uri>
     {
         /// <summary>The shared instance; the formatter holds no state.</summary>
         public static readonly WProtoUriFormatter Instance = new WProtoUriFormatter();
 
-        // The BCL's Encoding.UTF8 replaces an invalid byte with U+FFFD instead of reporting it,
-        // which would turn corrupt bytes into a silently different Uri. A strict decoder is what
-        // makes a malformed region refuse instead of decode.
-        private static readonly UTF8Encoding StrictUtf8 = new UTF8Encoding(false, true);
-
         private WProtoUriFormatter() { }
 
         /// <inheritdoc />
         public int Measure(in Uri value)
         {
-            return StrictUtf8.GetByteCount(value.OriginalString);
+            return WProtoSizes.Utf8ByteCount(value.OriginalString);
         }
 
         /// <inheritdoc />
         public bool Write(ref WProtoWriter writer, in Uri value)
         {
-            byte[] encoded = StrictUtf8.GetBytes(value.OriginalString);
+            byte[] encoded = Encoding.UTF8.GetBytes(value.OriginalString);
             return writer.TryWriteRaw(encoded);
         }
 
@@ -1067,7 +1065,7 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.WallstopProto
             string text;
             try
             {
-                text = StrictUtf8.GetString(payload);
+                text = WProtoText.StrictUtf8.GetString(payload);
             }
             catch (ArgumentException)
             {

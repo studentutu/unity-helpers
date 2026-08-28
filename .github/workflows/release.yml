@@ -94,38 +94,17 @@ jobs:
           source_ref="${INPUT_SOURCE_REF}"
           allow_tag_recovery="${INPUT_ALLOW_TAG_RECOVERY}"
 
-          if [ -z "${tag}" ]; then
-            echo "::error::Release version is required."
-            exit 1
-          fi
-          if [[ "${tag}" == *$'\n'* || "${tag}" == *$'\r'* ]]; then
-            echo "::error::Release version must be a single line."
-            exit 1
-          fi
-          if ! printf '%s\n' "${tag}" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
-            echo "::error::Release tags must use unprefixed X.Y.Z semver."
-            exit 1
-          fi
-          if [ -z "${source_ref}" ]; then
-            echo "::error::Release source ref is required."
-            exit 1
-          fi
-          if [[ "${source_ref}" == *$'\n'* || "${source_ref}" == *$'\r'* ]]; then
-            echo "::error::Release source ref must be a single line."
-            exit 1
-          fi
+          # Tag + package metadata contract, extracted for unit testing (#360). Writes the
+          # package-name/package-version/tag step outputs and exits non-zero with a
+          # ::error:: annotation on any violation.
+          pwsh -NoProfile -File scripts/ci/verify-release-tag.ps1 \
+            -Tag "${tag}" \
+            -SourceRef "${source_ref}" \
+            -PackageJsonPath package.json
 
           source_sha="$(git rev-parse HEAD)"
           package_name="$(jq -r '.name // empty' package.json)"
           package_version="$(jq -r '.version // empty' package.json)"
-          if [ -z "${package_name}" ] || [ -z "${package_version}" ]; then
-            echo "::error::package.json name/version is missing."
-            exit 1
-          fi
-          if [ "${tag}" != "${package_version}" ]; then
-            echo "::error::Tag ${tag} does not match package.json version ${package_version}."
-            exit 1
-          fi
           # shellcheck disable=SC2016 # PowerShell $env:CHANGELOG_VERSION is expanded by pwsh, not bash.
           if ! CHANGELOG_VERSION="${package_version}" pwsh -NoProfile -Command '
             $ErrorActionPreference = "Stop"
@@ -224,11 +203,8 @@ jobs:
             echo "source-sha=${source_sha}"
             echo "tag-action=${tag_action}"
           } >> "${GITHUB_OUTPUT}"
-          {
-            echo "package-name=${package_name}"
-            echo "package-version=${package_version}"
-            echo "tag=${tag}"
-          } >> "${GITHUB_OUTPUT}"
+          # package-name, package-version, and tag step outputs are written by
+          # scripts/ci/verify-release-tag.ps1 after the tag contract passes.
 
   release-ready:
     name: Confirm release publish inputs

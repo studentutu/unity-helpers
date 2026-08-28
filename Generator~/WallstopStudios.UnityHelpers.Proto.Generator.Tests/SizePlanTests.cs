@@ -247,20 +247,33 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
                     Assert.IsTrue(formatter.Write(ref warmBaseline, value));
                 }
 
-                long plannedAllocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+                // The zero-allocation gates read the MINIMUM of three windows each. One stray
+                // allocation somewhere in the process (a static another test's addition moved past
+                // a growth boundary, a JIT helper) lands in any single window rarely but reliably
+                // at this assembly's size, and it red-ran this gate about one full suite in three.
+                // A path that truly allocates per operation allocates in every window, so the
+                // minimum still catches it; one-off noise cannot land in all three. The minimum --
+                // not the first reading -- is what keeps that property. Timings stay single
+                // readings: they were never a gate.
                 long plannedTicks = MeasurePlanned(value, ref plannedBuffer, iterations);
-                long plannedAllocated =
-                    GC.GetAllocatedBytesForCurrentThread() - plannedAllocatedBefore;
+                long plannedAllocated = MeasurePlannedAllocations(
+                    value,
+                    ref plannedBuffer,
+                    iterations
+                );
 
-                long baselineAllocatedBefore = GC.GetAllocatedBytesForCurrentThread();
                 long baselineTicks = MeasureBackpatched(
                     formatter,
                     value,
                     baselineBuffer,
                     iterations
                 );
-                long baselineAllocated =
-                    GC.GetAllocatedBytesForCurrentThread() - baselineAllocatedBefore;
+                long baselineAllocated = MeasureBackpatchedAllocations(
+                    formatter,
+                    value,
+                    baselineBuffer,
+                    iterations
+                );
 
                 TestContext.WriteLine(
                     $"Depth-3 256 KiB nested payload, {iterations} operations: "
@@ -278,6 +291,61 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
             {
                 WProtoFormatterProvider.Register<BulkNode>(null);
             }
+        }
+
+        private static long MeasurePlannedAllocations(
+            BulkNode value,
+            ref byte[] buffer,
+            int iterations
+        )
+        {
+            const int readings = 3;
+            long minimum = long.MaxValue;
+            for (int reading = 0; reading < readings; ++reading)
+            {
+                long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+                _ = MeasurePlanned(value, ref buffer, iterations);
+                long allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+                if (allocated < minimum)
+                {
+                    minimum = allocated;
+                }
+
+                if (minimum == 0)
+                {
+                    break;
+                }
+            }
+
+            return minimum;
+        }
+
+        private static long MeasureBackpatchedAllocations(
+            BulkNodeFormatter formatter,
+            BulkNode value,
+            byte[] buffer,
+            int iterations
+        )
+        {
+            const int readings = 3;
+            long minimum = long.MaxValue;
+            for (int reading = 0; reading < readings; ++reading)
+            {
+                long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+                _ = MeasureBackpatched(formatter, value, buffer, iterations);
+                long allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+                if (allocated < minimum)
+                {
+                    minimum = allocated;
+                }
+
+                if (minimum == 0)
+                {
+                    break;
+                }
+            }
+
+            return minimum;
         }
 
         private static long MeasurePlanned(BulkNode value, ref byte[] buffer, int iterations)

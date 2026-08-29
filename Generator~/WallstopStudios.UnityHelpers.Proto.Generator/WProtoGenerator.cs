@@ -107,7 +107,15 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 }
 
                 ReportOrphanedHooks(context, symbol);
+
+                // A [WProtoSubtype] here names a base that will never write it: nothing is
+                // generated for a type with no contract of its own.
+                SubtypeMap.Validate(context.ReportDiagnostic, symbol, true);
             }
+
+            // Built before anything is emitted, because the base's formatter has to carry the
+            // includes its subtypes declared and a base is routinely compiled before them.
+            SubtypeMap subtypes = SubtypeMap.Build(contracts);
 
             SurrogateMap surrogates = SurrogateMap.Build(context.Compilation);
             SurrogateMap.Validate(context.Compilation, context.ReportDiagnostic);
@@ -131,31 +139,86 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             HashSet<INamedTypeSymbol> enumClosures = new HashSet<INamedTypeSymbol>(
                 SymbolEqualityComparer.Default
             );
-            foreach (INamedTypeSymbol contract in contracts)
+            // THE INVARIANT: no published formatter names a formatter that was not published.
+            //
+            // Only two kinds of generated code hard-name another contract's nested formatter, and
+            // they run in OPPOSITE directions: a base's include dispatch (and the CanWrite built
+            // from the same list) names each subtype's, and a subtype's root formatter names the
+            // ROOT's. Everything else goes through WProtoFormatterProvider.Get<T>(), which is a
+            // generic call that compiles whether or not T got a formatter -- measured, and it is
+            // why a refused contract held as a MEMBER of another was never a problem.
+            //
+            // A WPROTO### already fails the build, so nothing ships from a compilation that has
+            // one. Withholding therefore has exactly one job: stop a CS error inside generated code
+            // burying the diagnostic that says what to fix. It must withhold what would name a
+            // missing formatter and NOTHING else -- withdrawing a whole hierarchy over one refused
+            // sibling unpublishes every valid formatter in it, which for AbstractRandom's 21
+            // subtypes means a consumer's one undeclared subclass silently drops all 21 onto the
+            // reflection path that does not run under IL2CPP.
+            //
+            // So: a refused contract is withheld; so is anything whose ROOT is refused, because of
+            // that reverse reference; and every contract that IS published has its include set
+            // filtered to drop entries naming a withheld type. Contracts are emitted deepest-first
+            // precisely so that filter can be applied as the source is written -- an include names
+            // a DIRECT subtype, so by the time a base is reached every one of its subtypes has
+            // already been decided.
+            List<Emission> emissions = new List<Emission>();
+            HashSet<INamedTypeSymbol> refused = new HashSet<INamedTypeSymbol>(
+                SymbolEqualityComparer.Default
+            );
+            foreach (INamedTypeSymbol contract in DeepestFirst(contracts))
             {
-                string source = Emit(context, contract, surrogates, out string registration);
+                string source = Emit(
+                    context,
+                    contract,
+                    surrogates,
+                    subtypes,
+                    refused,
+                    out string registration
+                );
                 if (source == null)
+                {
+                    refused.Add(contract);
+                    continue;
+                }
+
+                emissions.Add(new Emission(contract, source, registration));
+            }
+
+            foreach (Emission emission in emissions)
+            {
+                // The reverse edge, and it reaches further than the root: CanServe walks EVERY
+                // contract from this one up the chain and names each one's formatter, so a refused
+                // ancestor at any level is a name this would emit. It binds anyway -- a nested type
+                // is inherited, so `Middle.WProtoFormatter` silently resolves to `Root`'s and the
+                // chain asks the root twice instead of the missing level. Measured: no CS error,
+                // which is worse than one, because only the build failing on the real WPROTO error
+                // stops it. Withhold the descendants instead; siblings are untouched either way.
+                if (HasRefusedAncestor(emission.Contract, refused))
                 {
                     continue;
                 }
 
-                context.AddSource(FileNameFor(contract), SourceText.From(source, Encoding.UTF8));
-                emittedContracts.Add(contract);
-                if (registration != null)
+                context.AddSource(
+                    FileNameFor(emission.Contract),
+                    SourceText.From(emission.Source, Encoding.UTF8)
+                );
+                emittedContracts.Add(emission.Contract);
+                if (emission.Registration != null)
                 {
-                    registrations.Add(registration);
+                    registrations.Add(emission.Registration);
                 }
                 else
                 {
                     // A generic subtype's closures need the same entry point a non-generic one gets.
                     string entryPoint =
-                        RootContract(contract) == null
+                        RootContract(emission.Contract) == null
                             ? ".WProtoFormatter.Instance"
                             : ".WProtoRootFormatter.Instance";
                     foreach (
                         string closed in ClosedConstructions(
                             context.Compilation,
-                            contract,
+                            emission.Contract,
                             context.ReportDiagnostic,
                             announced
                         )
@@ -681,10 +744,20 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             GeneratorExecutionContext context,
             INamedTypeSymbol contract,
             SurrogateMap surrogates,
+            SubtypeMap subtypes,
+            HashSet<INamedTypeSymbol> refused,
             out string registration
         )
         {
             registration = null;
+
+            // Before anything else this contract might report, because a subtype declaration the
+            // map refused is missing from the base's include set, and every later diagnostic
+            // would then describe a consequence rather than the cause.
+            if (!SubtypeMap.Validate(context.ReportDiagnostic, contract, false))
+            {
+                return null;
+            }
 
             if (!IsPartialEverywhere(contract))
             {
@@ -722,7 +795,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 return null;
             }
 
-            List<Include> includes = CollectIncludes(context, contract, members);
+            List<Include> includes = CollectIncludes(context, contract, members, subtypes);
             if (includes == null)
             {
                 return null;
@@ -761,6 +834,23 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                         contract.Name
                     )
                 );
+                return null;
+            }
+
+            // Every diagnostic above reads the set the author DECLARED. What gets emitted is that
+            // set minus the subtypes this compilation refused, so the dispatch chain and the
+            // CanWrite built from it never name a formatter that was not published. Filtering after
+            // the checks rather than before keeps a refused sibling from turning into a second,
+            // misleading error on this type -- WPROTO014 in particular would fire on an abstract
+            // contract whose subtypes were all refused elsewhere.
+            int declaredIncludeCount = includes.Count;
+            includes.RemoveAll(include => refused.Contains(include.SubType));
+
+            // ...and an abstract contract with nothing left to dispatch to cannot be emitted at all:
+            // the read path would have to `new` an abstract type. Withheld silently, because the
+            // subtype that caused it has already reported the error worth acting on.
+            if (contract.IsAbstract && includes.Count == 0 && 0 < declaredIncludeCount)
+            {
                 return null;
             }
 
@@ -883,7 +973,16 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             // dispatch chain, matches no branch, and fails at run time in a shipped player. The
             // alternative -- writing this type's members alone -- is what protobuf-net would read
             // back as the BASE's fields, so refusing is the only answer that is not silently wrong.
-            if (root != null && !DeclaresInclude(contract.BaseType, contract))
+            //
+            // Either end may declare it. A [WProtoSubtype] that is present but unusable has
+            // already been refused above, so asking only whether one was WRITTEN keeps the error
+            // on the declaration the developer got wrong instead of adding a second one saying
+            // nothing declared the relationship.
+            if (
+                root != null
+                && !DeclaresInclude(contract.BaseType, contract)
+                && !SubtypeMap.Declares(contract)
+            )
             {
                 context.ReportDiagnostic(
                     Diagnostic.Create(
@@ -1274,6 +1373,10 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
         /// The IMMEDIATE base, deliberately. protobuf-net refuses a grandchild declared on the
         /// grandparent with "Unexpected sub-type" (measured), so each level declares only what
         /// derives directly from it.
+        /// <para>
+        /// One of the two halves of the same question; <see cref="SubtypeMap.Declares"/> is the
+        /// other, asked of the subtype instead of the base.
+        /// </para>
         /// </remarks>
         private static bool DeclaresInclude(INamedTypeSymbol baseType, INamedTypeSymbol subType)
         {
@@ -1565,6 +1668,77 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             }
 
             return root;
+        }
+
+        /// <summary>
+        /// Reports whether any contract between <paramref name="contract"/> and its chain root was
+        /// refused.
+        /// </summary>
+        /// <param name="contract">The contract whose ancestry is walked.</param>
+        /// <param name="refused">The contracts this compilation declined to emit.</param>
+        /// <returns><c>true</c> when a formatter this type would name was not published.</returns>
+        /// <remarks>
+        /// Walks the same chain <c>CanServe</c> emits, so the two cannot disagree about which
+        /// ancestors are named.
+        /// </remarks>
+        private static bool HasRefusedAncestor(
+            INamedTypeSymbol contract,
+            HashSet<INamedTypeSymbol> refused
+        )
+        {
+            for (
+                INamedTypeSymbol current = Shape.IsContract(contract.BaseType)
+                    ? contract.BaseType
+                    : null;
+                current != null;
+                current = Shape.IsContract(current.BaseType) ? current.BaseType : null
+            )
+            {
+                if (refused.Contains(current))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Orders contracts so that every subtype precedes the base it derives from.
+        /// </summary>
+        /// <param name="contracts">The compilation's contracts, in discovery order.</param>
+        /// <returns>The same contracts, deepest inheritance level first.</returns>
+        /// <remarks>
+        /// What lets a base's include set be filtered as its source is written: an include names a
+        /// DIRECT subtype, so once every deeper contract has been attempted, the outcome of each of
+        /// a base's subtypes is already known. Ordering by depth is enough -- a subtype is strictly
+        /// deeper than its base -- and <see cref="Enumerable.OrderByDescending{T, TKey}"/> is
+        /// stable, so contracts at one depth keep discovery order and the output stays
+        /// deterministic.
+        /// </remarks>
+        private static List<INamedTypeSymbol> DeepestFirst(List<INamedTypeSymbol> contracts)
+        {
+            return contracts.OrderByDescending(ContractDepth).ToList();
+        }
+
+        /// <summary>
+        /// How many contracts sit above <paramref name="contract"/> in its base chain.
+        /// </summary>
+        /// <param name="contract">The contract to measure.</param>
+        /// <returns>Zero when nothing above it is a contract.</returns>
+        private static int ContractDepth(INamedTypeSymbol contract)
+        {
+            int depth = 0;
+            for (
+                INamedTypeSymbol current = contract.BaseType;
+                current != null && Shape.IsContract(current);
+                current = current.BaseType
+            )
+            {
+                depth++;
+            }
+
+            return depth;
         }
 
         /// <summary>
@@ -2607,19 +2781,34 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
         }
 
         /// <summary>
-        /// Reads and validates the contract's <c>[WProtoInclude]</c> list, deepest subtype first.
+        /// Reads and validates the contract's subtype list, however each entry was declared.
         /// </summary>
+        /// <param name="context">The generator context, for reporting.</param>
+        /// <param name="contract">The contract whose subtypes are being collected.</param>
+        /// <param name="members">Its own members, whose field numbers are already claimed.</param>
+        /// <param name="subtypes">Every <c>[WProtoSubtype]</c> declaration in the compilation.</param>
+        /// <returns>The merged list ordered by field number, or <c>null</c> when one was refused.</returns>
         /// <remarks>
+        /// <para>
+        /// <c>[WProtoInclude(tag, typeof(Sub))]</c> on the base and <c>[WProtoSubtype(typeof(Base),
+        /// tag)]</c> on the subtype are the same declaration written from either end, and they merge
+        /// into one list here so that everything downstream -- the dispatch chain, <c>CanWrite</c>,
+        /// the measure and read paths -- has a single description of the hierarchy and the two forms
+        /// produce identical bytes.
+        /// </para>
+        /// <para>
         /// The ordering is load-bearing rather than cosmetic. <c>value is Beta</c> is true for a
         /// <c>Gamma</c>, so a dispatch chain that tested the shallower type first would write a
         /// <c>Gamma</c> under Beta's include tag and lose the Gamma level entirely -- a silent type
         /// downgrade. Sorting by inheritance depth, deepest first, makes the first matching test the
         /// most derived one.
+        /// </para>
         /// </remarks>
         private static List<Include> CollectIncludes(
             GeneratorExecutionContext context,
             INamedTypeSymbol contract,
-            List<Member> members
+            List<Member> members,
+            SubtypeMap subtypes
         )
         {
             List<Include> includes = new List<Include>();
@@ -2629,6 +2818,9 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 claimed.Add(member.Tag);
             }
 
+            // Which subtype took each field number, so a collision between the two declaration
+            // forms can name both of them rather than only the one that arrived second.
+            Dictionary<int, INamedTypeSymbol> owners = new Dictionary<int, INamedTypeSymbol>();
             bool failed = false;
             foreach (AttributeData attribute in contract.GetAttributes())
             {
@@ -2696,11 +2888,56 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                     continue;
                 }
 
+                owners[tag] = subType;
                 includes.Add(new Include(tag, subType));
             }
 
+            foreach (Include declared in subtypes.For(contract))
+            {
+                if (owners.TryGetValue(declared.Tag, out INamedTypeSymbol taken))
+                {
+                    context.ReportDiagnostic(
+                        Diagnostic.Create(
+                            WProtoDiagnostics.DuplicateSubtypeTag,
+                            declared.SubType.Locations.FirstOrDefault(),
+                            declared.SubType.Name,
+                            taken.Name,
+                            declared.Tag,
+                            contract.Name
+                        )
+                    );
+                    failed = true;
+                    continue;
+                }
+
+                if (!claimed.Add(declared.Tag))
+                {
+                    context.ReportDiagnostic(
+                        Diagnostic.Create(
+                            WProtoDiagnostics.BadSubtype,
+                            declared.SubType.Locations.FirstOrDefault(),
+                            declared.SubType.Name,
+                            contract.Name,
+                            declared.Tag,
+                            "field number "
+                                + declared.Tag
+                                + " is already claimed by a member of '"
+                                + contract.Name
+                                + "'"
+                        )
+                    );
+                    failed = true;
+                    continue;
+                }
+
+                owners[declared.Tag] = declared.SubType;
+                includes.Add(declared);
+            }
+
             // Direct subtypes of one type are mutually exclusive, so the chain's order cannot
-            // change which branch matches; sorting by tag only makes the emitted code deterministic.
+            // change which branch matches; sorting by tag only makes the emitted code deterministic
+            // -- and it is what makes the two declaration forms interchangeable, because the order
+            // subtype declarations are discovered in is not a property of the source.
             includes.Sort((left, right) => left.Tag.CompareTo(right.Tag));
 
             return failed ? null : includes;
@@ -3181,6 +3418,25 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// One contract's generated source, held until it is known whether it may be published.
+        /// </summary>
+        private sealed class Emission
+        {
+            internal Emission(INamedTypeSymbol contract, string source, string registration)
+            {
+                Contract = contract;
+                Source = source;
+                Registration = registration;
+            }
+
+            internal INamedTypeSymbol Contract { get; }
+
+            internal string Source { get; }
+
+            internal string Registration { get; }
         }
 
         private sealed class Receiver : ISyntaxReceiver

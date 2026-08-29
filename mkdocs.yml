@@ -3,15 +3,25 @@ site_name: Unity Helpers
 
 validation:
   nav:
-    omitted_files: info
+    # A page that exists but is in no nav entry is reachable only by search. That is right for a
+    # runbook and wrong for a feature guide: docs/performance/analyzers.md documents the shipped
+    # WUH### analyzers, has CHANGELOG entries pointing at it, and was unreachable from the site's
+    # navigation. Anything deliberately off the nav belongs in not_in_nav below instead.
+    omitted_files: warn
   links:
     absolute_links: info
     unrecognized_links: info
+    # An in-page or cross-page `#anchor` that resolves on GitHub does not necessarily resolve
+    # here: the emoji in a heading is stripped rather than kept as a separator, so GitHub's
+    # `#1--inspector-tooling` is `#1-inspector-tooling` on the site. Six links in the front
+    # page's own "choose your starting point" table were dead that way, reported only as INFO.
+    anchors: warn
 
 not_in_nav: |
   404.md
   readme.md
   includes/abbreviations.md
+  runbooks/unity-runners-after-transfer.md
 site_url: https://ambiguous-interactive.github.io/unity-helpers/
 site_description: >-
   Production-ready Unity utilities: 10-15x faster PRNGs, O(log n) spatial queries,
@@ -226,6 +236,7 @@ nav:
       - IList Sorting: performance/ilist-sorting-performance.md
       - Dictionary Key Performance: performance/dictionary-key-performance.md
       - Baseline Tests: performance/baseline-tests-performance.md
+      - Performance Analyzers: performance/analyzers.md
   - Guides:
       - Odin Migration: guides/odin-migration-guide.md
       - Unity Devcontainer Licensing: guides/unity-devcontainer-licensing.md

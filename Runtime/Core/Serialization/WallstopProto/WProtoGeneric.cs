@@ -59,10 +59,10 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.WallstopProto
         /// </summary>
         /// <remarks>
         /// <para>
-        /// False for a type that has neither a scalar formatter nor a registered contract formatter:
-        /// a type protobuf-net reaches through a <b>surrogate</b>, and every <b>enum</b>. Both are
-        /// resolved while a contract is generated, and a generic member's closure is not known then,
-        /// so nothing registers a formatter under the closed type.
+        /// False for a type that has neither a scalar formatter nor a registered contract formatter.
+        /// Generated generic-contract dependencies include their closed surrogate contracts and
+        /// concrete enum scalar formatters; a root marshal whose element is otherwise unsupported,
+        /// or an unnameable closure the registrar skipped, still has no formatter here.
         /// </para>
         /// <para>
         /// A registered message formatter can also decline its particular closure through
@@ -335,7 +335,7 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.WallstopProto
             return _scalar.WriteValue(ref writer, value);
         }
 
-        /// <summary>Reads a value written by <see cref="WriteField"/> or <see cref="WriteElement"/>.</summary>
+        /// <summary>Reads a value written by <see cref="WriteField(ref WProtoWriter, int, in T)"/> or <see cref="WriteElement"/>.</summary>
         /// <param name="reader">The source.</param>
         /// <param name="value">Receives the value, or <c>default</c> on failure.</param>
         /// <returns><c>true</c> when a value was read.</returns>

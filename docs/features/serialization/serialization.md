@@ -1415,7 +1415,7 @@ public partial struct Vector3Surrogate
 }
 ```
 
-Any member of the real type (plain, repeated, or a map value) is then written as the surrogate,
+Any member of the real type (plain, repeated, or a map key or value) is then written as the surrogate,
 byte-for-byte, and converted back on read. The surrogate's field numbers alone define the bytes.
 
 **The attribute goes on the assembly**, not on either type. The real type usually lives somewhere
@@ -1426,6 +1426,24 @@ override a surrogate for a type you also use.
 
 Both conversions must exist, implicit or explicit. A default surrogated **struct** is still written
 (a tag and a zero length), following the same rule as any struct sub-message.
+
+An open generic pair covers every closed construction the consumer names:
+
+```csharp
+[assembly: WProtoSurrogate(typeof(ValueTuple<,>), typeof(SerializableValueTuple<,>))]
+```
+
+Both sides must be open and have the same arity. The surrogate's generic constraints may be no
+stricter than the real type's: an unconstrained `Real<T>` cannot pair with a surrogate requiring
+`T : unmanaged` or `T : IComparable<T>`, because some valid real closures could not close the
+surrogate. `WPROTO038` reports a mismatched shape or constraint at the assembly attribute. The
+generator closes valid pairs over the real member's type arguments and checks both conversions
+before it emits a formatter.
+
+The package ships this pair for two- and three-component `ValueTuple`, so tuple members and tuple
+map keys work without an attribute in your assembly. Define
+`WALLSTOP_DISABLE_VALUE_TUPLE_SERIALIZATION` to omit both these member surrogates and the matching
+root marshals when code size matters more than tuple support.
 
 #### Generic contracts
 
@@ -1576,8 +1594,29 @@ seeds normally, since that one exists on both sides.
 A save your game reads back with WallstopProto is protobuf on the wire, so anyone downstream -- a
 companion tool, a server, an analytics pipeline -- can read it with any protobuf toolchain, if they
 have the schema. **Tools > Wallstop Studios > Unity Helpers > Proto Schema Exporter** writes that
-schema: pick the assemblies whose `[WProtoContract]` types you want, choose a `.proto` path, and
-export.
+schema.
+
+Every contract is listed by full type name under the assembly that owns it, with a search box and a
+tick per type, so you export exactly what a downstream consumer is allowed to see. Deselections
+survive a recompile, and a contract you add later arrives ticked rather than silently missing from
+the next export. **Proto Package** writes an optional proto3 `package` clause; a value that is not
+dot-separated identifiers blocks the export instead of writing a file `protoc` refuses.
+
+**File Layout** decides how the selection is distributed. Every file is self-contained: a schema
+carries the dependencies its messages reach, so a downstream project can take one file and compile
+it alone.
+
+That also means a message two groups both reach is written into both files. **The files one export
+produces are alternatives to choose between, not a set to hand `protoc` together** -- it rejects
+the second definition of a name it has already seen. Pick the layout whose files each go to a
+different consumer, or use **Single File** when one consumer needs everything.
+
+| Layout            | Writes                                                   |
+| ----------------- | -------------------------------------------------------- |
+| **Single File**   | one `.proto` holding every selected contract             |
+| **Per Assembly**  | one `.proto` per assembly, named after the assembly      |
+| **Per Namespace** | one `.proto` per namespace, named after the namespace    |
+| **Per Type**      | one `.proto` per selected contract, named after the type |
 
 ```text
 // [WProtoContract] members keep their C# names, at the same field numbers the wire carries:
@@ -1794,14 +1833,13 @@ own `IWProtoFormatter<T>` implementation, and the generator registers one per cl
 finds, `Deque<YourStruct>` included, which is why the pair is an assembly attribute rather than
 something this package hard-codes.
 
-A marshal **declines** when its element type is one WallstopProto cannot encode (a type
-protobuf-net reaches through a surrogate, or an enum), so the collection falls back to protobuf-net
-exactly as it did before, rather than failing. A **generic contract** declines the same way, for the
-same reason: `SerializableList<Vector2>` is registered for that closure, and `Vector2`'s wire shape
-comes from a surrogate that is substituted while a contract is generated, when a closure's element is
-not yet known. That decision propagates through nested closures, so an outer generic contract also
-declines when its inner contract cannot serve its own type argument. And a `null` root of one of these collections now
-encodes to an empty payload and reads back as an empty collection, where the reflection path threw.
+A marshal **declines** when its element type has no WallstopProto formatter, so the collection falls
+back to protobuf-net exactly as it did before, rather than failing. A **generic contract** carries
+more information: the generator follows its closed member graph and registers every nameable
+surrogate contract, nested generic contract, and enum scalar that graph needs. It still declines an
+unsupported or unnameable argument, and that decision propagates through nested closures. A `null`
+root of one of these collections now encodes to an empty payload and reads back as an empty
+collection, where the reflection path threw.
 
 Nothing about your own contracts changes. A member typed as one of these collections is written
 exactly as it was before (a map for the dictionaries, a repeated field for the sets), and the three

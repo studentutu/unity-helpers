@@ -25,6 +25,19 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.WallstopProto
     /// subtype by number alone, so renumbering silently deserializes one type as another.
     /// </para>
     /// <para>
+    /// <c>[WProtoSubtype(typeof(Weapon))]</c> -- no number -- takes its field number from the
+    /// assembly's committed manifest (<see cref="WProtoSubtypeTagAttribute"/>) instead, which the
+    /// editor writes on the assembly reload that first sees the declaration. The author then picks
+    /// nothing and runs nothing: the tool takes the next free small number, never renumbers an
+    /// entry it already wrote, and never reuses one <see cref="WProtoRetiredSubtypeTagAttribute"/>
+    /// holds. Until the entry exists the declaration is <c>WPROTO041</c> rather than a guess,
+    /// because a guessed number is a wire contract nobody agreed to -- a warning in the editor, so
+    /// that the assembly compiles and the tool can see the type, and an error for any compilation
+    /// without <c>UNITY_EDITOR</c>, because an unnumbered subtype has no wire form to ship. The two
+    /// forms produce identical bytes for the same number; an explicit number is the override, and
+    /// everything already published uses it.
+    /// </para>
+    /// <para>
     /// <see cref="BaseType"/> must be the annotated type's <b>immediate</b> base and must itself be
     /// a <see cref="WProtoContractAttribute"/> in the same assembly, and neither type may be
     /// generic. protobuf-net refuses a grandchild declared on the grandparent, so a deeper type
@@ -48,12 +61,38 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.WallstopProto
         {
             BaseType = baseType;
             Tag = tag;
+            HasTag = true;
+        }
+
+        /// <summary>
+        /// Initializes the attribute with the base type alone, taking the field number from the
+        /// assembly's manifest.
+        /// </summary>
+        /// <param name="baseType">The immediate base contract this type may be written as.</param>
+        /// <remarks>
+        /// The zero-touch form. The number comes from a <see cref="WProtoSubtypeTagAttribute"/> the
+        /// assignment tool committed, so nothing about this declaration has to change when a sibling
+        /// is added or removed.
+        /// </remarks>
+        public WProtoSubtypeAttribute(Type baseType)
+        {
+            BaseType = baseType;
+            Tag = 0;
+            HasTag = false;
         }
 
         /// <summary>The immediate base contract this type may be written as.</summary>
         public Type BaseType { get; }
 
-        /// <summary>The field number carrying this subtype on the base message.</summary>
+        /// <summary>
+        /// The field number carrying this subtype on the base message, or <c>0</c> when the manifest
+        /// supplies it.
+        /// </summary>
         public int Tag { get; }
+
+        /// <summary>
+        /// Whether the declaration states its own field number rather than taking the manifest's.
+        /// </summary>
+        public bool HasTag { get; }
     }
 }

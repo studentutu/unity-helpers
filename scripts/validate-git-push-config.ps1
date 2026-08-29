@@ -2,11 +2,17 @@
 # Git Push Config Validator (read-only)
 # =============================================================================
 # Fast check-only validator suitable for validate:prepush. Runs the two
-# self-healing checks from scripts/agent-preflight.ps1 in read-only mode:
+# self-healing checks from scripts/agent-preflight.ps1 in read-only mode, plus
+# one devcontainer-only postcondition:
 #
 #   - push.autoSetupRemote == true and push.default == simple (local config)
 #   - No stray <hook-name>.{txt,log,out,err,tmp} artifact files at repo root
 #     or inside .githooks/
+#   - github.com still resolves through the cached-token credential helper and
+#     not through the Dev Containers helper (#600). That one belongs here
+#     because it is the LAST thing checked before a push and the only symptom
+#     otherwise is the push itself hanging for its full timeout while a dialog
+#     waits on the owner's desktop. Measured at ~0.09 s.
 #
 # Exits 0 on success, 1 if any check fails. Never modifies state.
 # Remediation on failure: run npm run agent:preflight:fix.
@@ -166,6 +172,48 @@ if ($uniqueStrayFiles.Count -gt 0) {
         Write-Host 'For files not gitignored: delete manually if stale, or add a .gitignore entry and re-run (auto-delete is refused for safety).' -ForegroundColor Cyan
     }
     $failureCount++
+}
+
+# Devcontainer credential postcondition (#600).
+#
+# Gated on the Dev Containers helper actually being registered, and the gate is
+# evaluated HERE rather than inside the shell script so that a developer machine
+# with its own credential manager never spawns bash at all — on Windows a `bash`
+# on PATH need not share this filesystem, and would then fail for a reason that
+# has nothing to do with credentials.
+$credentialCheck = Join-Path $repoRoot 'scripts/check-container-git-credentials.sh'
+if (Test-Path -LiteralPath $credentialCheck -PathType Leaf) {
+    # Anchored with -C, not left to the caller's cwd. $credentialCheck is derived from $repoRoot but
+    # this block runs after the Pop-Location above, so an unanchored `git config` would read
+    # whichever repository the caller happened to be standing in and gate a claim about THIS one on
+    # it. The repo rule is explicit: a script that derives its own root anchors every repo-relative
+    # git call there.
+    $configuredHelpers = @(& git -C $repoRoot config --get-all credential.helper 2>$null)
+    if ($LASTEXITCODE -ne 0) { $configuredHelpers = @() }
+    $devContainerHelper = @(
+        $configuredHelpers | Where-Object {
+            $_ -like '*vscode-remote-containers*' -or $_ -like '*git-credential-helper*'
+        }
+    )
+
+    if ($devContainerHelper.Count -gt 0) {
+        $bashCommand = Get-Command bash -ErrorAction SilentlyContinue
+        if ($null -eq $bashCommand) {
+            Write-ErrorMsg 'The Dev Containers credential helper is registered but bash is unavailable to verify the override.'
+            Write-Host "Run manually: bash $credentialCheck" -ForegroundColor Cyan
+            $failureCount++
+        }
+        else {
+            $credentialOutput = & $bashCommand.Source $credentialCheck '--quiet' 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                Write-ErrorMsg 'github.com does not resolve through the cached-token credential helper:'
+                foreach ($line in @($credentialOutput)) {
+                    Write-Host "  $line" -ForegroundColor Yellow
+                }
+                $failureCount++
+            }
+        }
+    }
 }
 
 if ($failureCount -gt 0) {

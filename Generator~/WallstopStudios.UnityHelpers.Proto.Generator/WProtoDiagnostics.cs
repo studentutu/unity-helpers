@@ -174,7 +174,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
         internal static readonly DiagnosticDescriptor SubtypeNotIncluded = new DiagnosticDescriptor(
             "WPROTO018",
             "WallstopProto subtype is not declared by its base",
-            "'{0}' is a [WProtoContract] whose base '{1}' is one too, but the relationship is declared neither way: '{1}' has no [WProtoInclude] naming '{0}', and '{0}' has no [WProtoSubtype] naming '{1}'. A subtype is written as its base writes it -- the include holding this type's members, then the base's -- so without a declaration there is no tag to write it under, and serializing one fails at run time in a shipped player. Add [WProtoSubtype(typeof({1}), tag)] to '{0}' or [WProtoInclude(tag, typeof({0}))] to '{1}' -- the two produce identical bytes -- or remove [WProtoContract] from '{0}' if it is not meant to be serialized on its own.",
+            "'{0}' is a [WProtoContract] whose base '{1}' is one too, but the relationship is declared neither way: '{1}' has no [WProtoInclude] naming '{0}', and '{0}' has no [WProtoSubtype] naming '{1}'. A subtype is written as its base writes it -- the include holding this type's members, then the base's -- so without a declaration there is no tag to write it under, and serializing one fails at run time in a shipped player. Add [WProtoSubtype(typeof({1}))] to '{0}' -- its field number then comes from the assembly's manifest, which Tools > Wallstop Studios > Unity Helpers > Assign WallstopProto Subtype Tags writes -- or [WProtoSubtype(typeof({1}), tag)] to pick the number yourself, or [WProtoInclude(tag, typeof({0}))] to '{1}'. All three produce identical bytes. Remove [WProtoContract] from '{0}' instead if it is not meant to be serialized on its own.",
             "WallstopProto",
             DiagnosticSeverity.Error,
             isEnabledByDefault: true
@@ -301,7 +301,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             new DiagnosticDescriptor(
                 "WPROTO030",
                 "protobuf-net contract has not been ported to WallstopProto",
-                "'{0}' is a [ProtoContract] with no [WProtoContract], so it has no generated WallstopProto formatter. Unless it is deliberately served through a surrogate, root marshal, or hand-written formatter, Serializer falls back to protobuf-net's reflection path, which does not work under IL2CPP. Add [WProtoContract] and a [WProtoMember] beside each [ProtoMember] with matching field numbers, or suppress WPROTO030 at the [ProtoContract] declaration when another formatter serves it.",
+                "'{0}' has no [WProtoContract], so it has no generated WallstopProto formatter. WPROTO030 matched it because {1}. Unless it is deliberately served through a surrogate, root marshal, or hand-written formatter, Serializer falls back to protobuf-net's reflection path, which does not work under IL2CPP. Add [WProtoContract] and a [WProtoMember] beside each protobuf-net member with matching field numbers, or suppress WPROTO030 at the contract declaration when another formatter serves it.",
                 "WallstopProto",
                 DiagnosticSeverity.Info,
                 isEnabledByDefault: true
@@ -399,11 +399,61 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
         internal static readonly DiagnosticDescriptor BadSubtype = new DiagnosticDescriptor(
             "WPROTO040",
             "WallstopProto subtype declaration is not usable",
-            "'{0}' declares [WProtoSubtype(typeof({1}), {2})], but {3}. A subtype declaration names the immediate base it is written as, so it must name a [WProtoContract] that '{0}' derives DIRECTLY from, in the same assembly, with a free field number.",
+            "'{0}' declares [WProtoSubtype({1})], but {2}. A subtype declaration names the immediate base it is written as, so it must name a [WProtoContract] that '{0}' derives DIRECTLY from, in the same assembly, with a free field number.",
             "WallstopProto",
             DiagnosticSeverity.Error,
             isEnabledByDefault: true
         );
+
+        /// <summary>
+        /// A tag-less subtype declaration the assembly's manifest has no entry for.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Declared as an error, and reported as one for any compilation that can reach a player.
+        /// An unnumbered subtype has no wire representation at all, so shipping one is a save that
+        /// throws on the machine of whoever installed the build.
+        /// </para>
+        /// <para>
+        /// It is reported as a WARNING when <c>UNITY_EDITOR</c> is defined, and that is not a
+        /// softening -- it is what makes the fix reachable. The assignment tool discovers
+        /// declarations through <c>TypeCache</c>, which indexes types in assemblies that COMPILED;
+        /// an error here fails the assembly, the new type never exists, and the tool whose only job
+        /// is to number it cannot see it. The escape was to hand-write the number, which is the
+        /// thing the manifest exists to remove. Measured in 6000.4.6f1: a numberless subtype gave
+        /// <c>compilationFailed=True</c> and the type was absent from every assembly in the
+        /// AppDomain. As a warning the assembly compiles, the editor's automatic pass assigns the
+        /// number, and the player build is still refused -- here by severity, and again by
+        /// <c>WProtoSubtypeTagBuildGate</c>.
+        /// </para>
+        /// </remarks>
+        internal static readonly DiagnosticDescriptor SubtypeTagUnassigned =
+            new DiagnosticDescriptor(
+                "WPROTO041",
+                "WallstopProto subtype has no field number",
+                "'{0}' declares [WProtoSubtype(typeof({1}))] without a field number and this assembly's manifest has no entry for it, so there is nothing to write it under. The number is not derived, because a number a generator invented would depend on which types that run happened to see and would change under data already saved. {2} Nothing is written under a guessed number in the meantime: serializing a '{0}' throws rather than writing it as a '{1}', so no save can lose the subtype silently.",
+                "WallstopProto",
+                DiagnosticSeverity.Error,
+                isEnabledByDefault: true
+            );
+
+        /// <summary>The editor half of <see cref="SubtypeTagUnassigned"/>'s message.</summary>
+        internal const string SubtypeTagUnassignedInEditor =
+            "The editor assigns it for you: the number is written to this assembly's WProtoSubtypeTags.cs on the next assembly reload, and this is a warning rather than an error so that the assembly compiles and the assignment tool can see the type at all. Run Tools > Wallstop Studios > Unity Helpers > Assign WallstopProto Subtype Tags if it has not.";
+
+        /// <summary>The player half of <see cref="SubtypeTagUnassigned"/>'s message.</summary>
+        internal const string SubtypeTagUnassignedInPlayer =
+            "UNITY_EDITOR is not defined for this compilation, so it can reach a player and cannot be allowed to. Open the project in the editor, which assigns the number automatically, or run Tools > Wallstop Studios > Unity Helpers > Assign WallstopProto Subtype Tags (headless: -executeMethod WallstopStudios.UnityHelpers.Editor.Tools.WProtoSubtypeTagAssigner.AssignFromCommandLine), then commit the [assembly: WProtoSubtypeTag] entry it writes. Writing the number yourself as [WProtoSubtype(typeof(Base), tag)] also works.";
+
+        internal static readonly DiagnosticDescriptor BadSubtypeTagManifest =
+            new DiagnosticDescriptor(
+                "WPROTO042",
+                "WallstopProto subtype tag manifest entry is not usable",
+                "The subtype tag manifest entry {0} cannot be honoured: {1}. The manifest is the wire contract for every [WProtoSubtype] that omits its field number, so an entry that cannot be read is a subtype with no number rather than a number that is merely wrong. Re-run Tools > Wallstop Studios > Unity Helpers > Assign WallstopProto Subtype Tags to rewrite the file, and never hand-edit a number that has already shipped.",
+                "WallstopProto",
+                DiagnosticSeverity.Error,
+                isEnabledByDefault: true
+            );
 
         internal static readonly DiagnosticDescriptor HookSignature = new DiagnosticDescriptor(
             "WPROTO008",

@@ -332,4 +332,113 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator.Tests
         [WProtoMember(1)]
         public int Extra;
     }
+
+    /// <summary>
+    /// The same hierarchy again, with no field number written anywhere in the source.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Each subtype says only which base it is written as; the numbers come from the
+    /// <c>[assembly: WProtoSubtypeTag]</c> entries in this assembly's AssemblyInfo, which is where
+    /// the assignment tool writes them. Tag for tag it matches the <c>BaseForm</c> and
+    /// <c>SubtypeForm</c> twins, so any byte that differs is a byte the manifest caused.
+    /// </para>
+    /// <para>
+    /// protobuf-net still needs its own <c>[ProtoInclude]</c> on the base, because it has no
+    /// manifest of any kind. That is the oracle's declaration, and it is what makes this a
+    /// three-way comparison rather than two spellings agreeing with each other.
+    /// </para>
+    /// </remarks>
+    [ProtoContract]
+    [ProtoInclude(100, typeof(ManifestFormAlpha))]
+    [ProtoInclude(101, typeof(ManifestFormBeta))]
+    [WProtoContract]
+    public partial class ManifestFormRoot
+    {
+        /// <summary>A base member, written after the include.</summary>
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public int Id;
+
+        /// <summary>A length-delimited base member.</summary>
+        [ProtoMember(2)]
+        [WProtoMember(2)]
+        public string Label;
+    }
+
+    /// <summary>A leaf subtype that states no number at all.</summary>
+    [ProtoContract]
+    [WProtoContract]
+    [WProtoSubtype(typeof(ManifestFormRoot))]
+    public partial class ManifestFormAlpha : ManifestFormRoot
+    {
+        /// <summary>The subtype's own member, in its own tag space.</summary>
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public int AlphaOnly;
+
+        /// <summary>A second one, so the sub-message carries more than a marker.</summary>
+        [ProtoMember(2)]
+        [WProtoMember(2)]
+        public string AlphaText;
+    }
+
+    /// <summary>A numberless subtype that is itself a base.</summary>
+    [ProtoContract]
+    [ProtoInclude(200, typeof(ManifestFormGamma))]
+    [WProtoContract]
+    [WProtoSubtype(typeof(ManifestFormRoot))]
+    public partial class ManifestFormBeta : ManifestFormRoot
+    {
+        /// <summary>A fixed64 member at the middle level.</summary>
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public double BetaOnly;
+    }
+
+    /// <summary>The third level, numbered against the middle one by the manifest.</summary>
+    [ProtoContract]
+    [WProtoContract]
+    [WProtoSubtype(typeof(ManifestFormBeta))]
+    public partial class ManifestFormGamma : ManifestFormBeta
+    {
+        /// <summary>The deepest member.</summary>
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public bool GammaOnly;
+    }
+
+    /// <summary>
+    /// A subtype of the manifest root that nothing declares, standing in for the window between
+    /// adding a numberless subtype and the manifest gaining its entry.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately carries no <c>[WProtoContract]</c> and no <c>[WProtoSubtype]</c>, which is
+    /// exactly the shape the generator leaves an unassigned subtype in: no formatter of its own and
+    /// no place in the root's dispatch chain. Writing one has to THROW. The alternative -- falling
+    /// through and writing it under the root's own tag -- would put a value into saved data as its
+    /// base, losing the subtype with nothing to report it, and no later fix could tell those
+    /// payloads apart from ones that really were the base.
+    /// </remarks>
+    public sealed class ManifestFormUndeclared : ManifestFormRoot
+    {
+        /// <summary>A member the base has no number for.</summary>
+        public int UndeclaredOnly;
+    }
+
+    /// <summary>Holds a manifest-numbered value, so the chain sits under a length prefix.</summary>
+    [ProtoContract]
+    [WProtoContract]
+    public sealed partial class ManifestFormHolder
+    {
+        /// <summary>The polymorphic member.</summary>
+        [ProtoMember(1)]
+        [WProtoMember(1)]
+        public ManifestFormRoot Value;
+
+        /// <summary>A scalar after it.</summary>
+        [ProtoMember(2)]
+        [WProtoMember(2)]
+        public int Trailer;
+    }
 }

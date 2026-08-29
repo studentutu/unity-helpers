@@ -190,28 +190,56 @@ else
     fail "credential-helper 'get' serves github.com subdomains" "gist.github.com was declined"
 fi
 
+# The url list, captured ONCE and asserted before anything is driven by it.
+#
+# Every "for each url --hosts declares" loop below used to be a `while read` straight over
+# `$(token_script --hosts)`. The status of that substitution is not observable inside the loop, and
+# an empty list runs the body zero times -- so the accumulator stays empty and the assertion passes.
+# A broken `--hosts` therefore turned "no url is unserved" and "no url is uncovered" into
+# statements about nothing, in the two tests whose whole job is proving the list is fully covered.
+if ! declared_hosts_output="$(token_script --hosts 2>&1)"; then
+    declared_hosts_output=''
+    declared_hosts_status=1
+else
+    declared_hosts_status=0
+fi
+declared_urls=()
+while IFS= read -r declared_url; do
+    [ -n "$declared_url" ] || continue
+    declared_urls+=("$declared_url")
+done <<EOF
+$declared_hosts_output
+EOF
+
+if [ "$declared_hosts_status" = "0" ] && [ "0" -lt "${#declared_urls[@]}" ]; then
+    pass "--hosts succeeds and declares at least one url"
+else
+    fail "--hosts succeeds and declares at least one url" \
+        "status=$declared_hosts_status urls=${#declared_urls[@]}; every coverage loop below would be vacuous"
+fi
+
 # The drift that a reviewer caught rather than a test: raw.githubusercontent.com was REGISTERED by
 # the normalizer and DECLINED here, and a registered URL whose helper declines is worse than one
 # that was never registered -- the registration resets the inherited helper, so nothing is left to
 # answer it. Every URL the helper claims must therefore be one it serves.
 unserved=''
-while IFS= read -r registered_url; do
-    [ -n "$registered_url" ] || continue
+served=0
+for registered_url in ${declared_urls+"${declared_urls[@]}"}; do
     registered_host="${registered_url#*://}"
     registered_host="${registered_host%%/*}"
-    if ! grep -q '^password=' <<<"$(helper_get "protocol=https
+    if grep -q '^password=' <<<"$(helper_get "protocol=https
 host=$registered_host")"; then
+        served=$((served + 1))
+    else
         unserved="$unserved $registered_url"
     fi
-done <<EOF
-$(token_script --hosts)
-EOF
+done
 
-if [ -z "$unserved" ]; then
+if [ -z "$unserved" ] && [ "$served" = "${#declared_urls[@]}" ] && [ "0" -lt "$served" ]; then
     pass "every URL --hosts claims is a host the helper actually serves"
 else
     fail "every URL --hosts claims is a host the helper actually serves" \
-        "registered but declined:$unserved"
+        "served $served of ${#declared_urls[@]}; registered but declined:$unserved"
 fi
 
 # And the normalizer must take that list from here rather than keeping a second copy, because two
@@ -393,13 +421,96 @@ else
         "the normalizer does not install the helper"
 fi
 
-for entry in github:token github:token:bootstrap github:token:store; do
+for entry in github:token github:token:bootstrap github:token:store check:container-git-credentials; do
     if node -e "process.exit(require('$REPO_ROOT/package.json').scripts['$entry'] ? 0 : 1)"; then
         pass "package.json exposes '$entry'"
     else
         fail "package.json exposes '$entry'" "script not found"
     fi
 done
+
+# ── The wiring is verified, not assumed (#600) ──────────────────────────────
+#
+# The normalizer runs non-fatally on attach, and every read path keeps working when it does not
+# take: this script still answers, curl still works, `git fetch` still works. The first thing that
+# breaks is a `push`, hours later, as a hang plus a dialog on a human's desktop. So the container
+# needs a check that says so, and that check must cover EVERY url `--hosts` claims -- a url this
+# script claims and nothing installs is a lockout, not a gap, because the claim resets the
+# inherited helper and leaves nothing to answer.
+CREDENTIAL_CHECK="$REPO_ROOT/scripts/check-container-git-credentials.sh"
+
+if [ -f "$CREDENTIAL_CHECK" ]; then
+    pass "a postcondition check for the installed helper exists"
+else
+    fail "a postcondition check for the installed helper exists" \
+        "missing $CREDENTIAL_CHECK; a missed normalization is only visible as a hanging push"
+fi
+
+# The red half, one url at a time. For EACH url `--hosts` declares, a config that is correct
+# everywhere else but broken at that url must be reported -- otherwise the check silently covers a
+# subset and the uncovered url is the one that hangs.
+check_sandbox="$(mktemp -d)"
+: > "$check_sandbox/global"
+: > "$check_sandbox/system"
+GIT_CONFIG_GLOBAL="$check_sandbox/global" GIT_CONFIG_SYSTEM="$check_sandbox/system" \
+    git config --system --add credential.helper \
+    '!f() { /usr/bin/node /tmp/vscode-remote-containers-test.js git-credential-helper $*; }; f' 2>/dev/null
+
+run_credential_check() {
+    GIT_CONFIG_GLOBAL="$check_sandbox/global" GIT_CONFIG_SYSTEM="$check_sandbox/system" \
+        bash "$CREDENTIAL_CHECK" --quiet 2>&1
+}
+
+GIT_CONFIG_GLOBAL="$check_sandbox/global" GIT_CONFIG_SYSTEM="$check_sandbox/system" \
+    bash "$REPO_ROOT/scripts/normalize-container-git-config.sh" > /dev/null 2>&1
+
+run_credential_check > /dev/null 2>&1
+if [ "$?" = "0" ]; then
+    pass "the postcondition check passes on a freshly normalized config"
+else
+    fail "the postcondition check passes on a freshly normalized config" \
+        "it reported on the config the normalizer just wrote"
+fi
+
+# Driven by the list captured and asserted near the top of this file, not by a fresh unchecked
+# `$(bash "$SCRIPT" --hosts)`. Driven by the latter, a `--hosts` that printed nothing ran this body
+# zero times, left `uncovered_urls` empty, and PASSED -- the one test guaranteeing complete url
+# coverage could not detect the exact failure that destroys it. `exercised_urls` is the second half
+# of that fix: the assertion now states how many urls were actually broken and restored.
+uncovered_urls=''
+exercised_urls=0
+for declared_url in ${declared_urls+"${declared_urls[@]}"}; do
+    exercised_urls=$((exercised_urls + 1))
+    declared_key="credential.${declared_url}.helper"
+    saved="$(GIT_CONFIG_GLOBAL="$check_sandbox/global" GIT_CONFIG_SYSTEM="$check_sandbox/system" \
+        git config --global --get-all "$declared_key" 2>/dev/null)"
+    GIT_CONFIG_GLOBAL="$check_sandbox/global" GIT_CONFIG_SYSTEM="$check_sandbox/system" \
+        git config --global --unset-all "$declared_key" 2>/dev/null
+
+    run_credential_check > /dev/null 2>&1
+    if [ "$?" = "0" ]; then
+        uncovered_urls="${uncovered_urls}${uncovered_urls:+ }${declared_url}"
+    fi
+
+    # Restore, so each url is tested against an otherwise-healthy config.
+    GIT_CONFIG_GLOBAL="$check_sandbox/global" GIT_CONFIG_SYSTEM="$check_sandbox/system" \
+        git config --global --add "$declared_key" '' 2>/dev/null
+    while IFS= read -r saved_value; do
+        [ -n "$saved_value" ] || continue
+        GIT_CONFIG_GLOBAL="$check_sandbox/global" GIT_CONFIG_SYSTEM="$check_sandbox/system" \
+            git config --global --add "$declared_key" "$saved_value" 2>/dev/null
+    done <<< "$saved"
+done
+
+if [ -z "$uncovered_urls" ] && [ "$exercised_urls" = "${#declared_urls[@]}" ] \
+    && [ "0" -lt "$exercised_urls" ]; then
+    pass "the postcondition check covers every url --hosts declares"
+else
+    fail "the postcondition check covers every url --hosts declares" \
+        "exercised $exercised_urls of ${#declared_urls[@]} urls; these lose their helper without the check reporting: $uncovered_urls"
+fi
+
+rm -rf "$check_sandbox"
 
 # ── The empty-cache path does not reach a dialog either (#450) ──────────────
 #

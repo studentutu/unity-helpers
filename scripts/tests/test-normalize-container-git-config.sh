@@ -174,6 +174,253 @@ else
 fi
 rm -rf "$sandbox"
 
+# ── The postcondition check (#600) ──────────────────────────────────────────
+# Running the normalizer is not the same as the normalizer having taken. Every case below is a RED
+# half first: the check has to REPORT on a config that would hang a push, or it is decoration.
+CHECK="$REPO_ROOT/scripts/check-container-git-credentials.sh"
+
+run_check() {
+    local dir="$1"
+    shift
+    GIT_CONFIG_GLOBAL="$dir/global" GIT_CONFIG_SYSTEM="$dir/system" bash "$CHECK" "$@" 2>&1
+}
+
+# A sandbox whose --system helper is the Dev Containers one, recorded by a marker file so that
+# "the check never asks for a credential" is an assertion rather than a hope.
+new_devcontainer_sandbox() {
+    local dir
+    dir="$(new_sandbox)"
+    # A recorder, not a responder: this check must decide from config alone, so the helper answering
+    # nothing is exactly the fixture -- an invocation at all is the failure.
+    cat > "$dir/fake-helper.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$dir/helper-invocations"
+cat > /dev/null
+EOF
+    chmod +x "$dir/fake-helper.sh"
+    # The value carries the Dev Containers signature the check keys on, and points at the recorder.
+    cfg "$dir" --system --add credential.helper \
+        "!f() { $dir/fake-helper.sh git-credential-helper \$*; }; f"
+    printf '%s' "$dir"
+}
+
+# RED: exactly the state #600 describes -- the normalizer never ran, so only the Dev Containers
+# helper is registered. Every read still works; only a push would hang.
+sandbox="$(new_devcontainer_sandbox)"
+output="$(run_check "$sandbox")"
+status=$?
+if [ "$status" = "1" ] \
+    && grep -q 'normalize-container-git-config.sh' <<<"$output" \
+    && grep -q 'credential.https://github.com.helper' <<<"$output"; then
+    pass "the check reports a config where only the Dev Containers helper is registered"
+else
+    fail "the check reports a config where only the Dev Containers helper is registered" \
+        "status=$status output=$(printf '%s' "$output" | tr '\n' '|')"
+fi
+
+# It must not have asked anything for a credential while deciding that.
+if [ ! -f "$sandbox/helper-invocations" ]; then
+    pass "the check never invokes a credential helper"
+else
+    fail "the check never invokes a credential helper" \
+        "invocations: $(cat "$sandbox/helper-invocations")"
+fi
+
+# RED: the subtle half. Our helper IS registered, but without the empty reset the inherited
+# Dev Containers helper still runs first and still raises the dialog.
+cfg "$sandbox" --global --add 'credential.https://github.com.helper' \
+    "!$REPO_ROOT/scripts/github-token.sh"
+output="$(run_check "$sandbox")"
+status=$?
+if [ "$status" = "1" ]; then
+    pass "the check reports our helper installed WITHOUT the empty reset"
+else
+    fail "the check reports our helper installed WITHOUT the empty reset" \
+        "status=$status; the inherited helper still runs and the check called it healthy"
+fi
+
+# GREEN: the normalizer's own output satisfies it.
+run_normalizer "$sandbox"
+output="$(run_check "$sandbox")"
+status=$?
+if [ "$status" = "0" ]; then
+    pass "the check passes on a config the normalizer produced"
+else
+    fail "the check passes on a config the normalizer produced" \
+        "status=$status output=$(printf '%s' "$output" | tr '\n' '|')"
+fi
+rm -rf "$sandbox"
+
+# --fix is the on-demand half (#600 remediation 3): one command repairs and re-verifies, so a
+# missed attach costs milliseconds instead of a five-minute hang.
+sandbox="$(new_devcontainer_sandbox)"
+run_check "$sandbox" --fix > /dev/null 2>&1
+fix_status=$?
+if [ "$fix_status" = "0" ] && [ "$(run_check "$sandbox" --quiet; printf '%s' "$?")" = "0" ]; then
+    pass "--fix repairs a container that never ran the normalizer"
+else
+    fail "--fix repairs a container that never ran the normalizer" "--fix exited $fix_status"
+fi
+rm -rf "$sandbox"
+
+# Not every machine is this container. A developer's own credential manager is not a defect, and a
+# check that reported it would be ignored everywhere within a week.
+sandbox="$(new_sandbox)"
+cfg "$sandbox" --system --add credential.helper 'manager'
+output="$(run_check "$sandbox")"
+status=$?
+if [ "$status" = "0" ]; then
+    pass "the check is silent where no Dev Containers helper is registered"
+else
+    fail "the check is silent where no Dev Containers helper is registered" \
+        "status=$status output=$(printf '%s' "$output" | tr '\n' '|')"
+fi
+rm -rf "$sandbox"
+
+# ── The generic helper that still runs, and the audit that verified nothing ─
+#
+# Git does NOT keep a separate list per url. It walks the whole config in read order -- system,
+# then global, then local -- collecting `credential.helper` and every matching
+# `credential.<url>.helper` into ONE list, with an empty value resetting it. So a generic helper
+# registered AFTER the url-scoped reset still runs, and `git config --get-all
+# credential.<url>.helper` cannot see it: that reports the url-scoped section alone, which is the
+# trap the comment above this file's `git credential fill` case has warned about since #592.
+#
+# These cases COPY the scripts into the sandbox so the check's own repo root is the sandbox. That is
+# what lets a --local helper -- `.git/config` is read AFTER `~/.gitconfig`, which is precisely the
+# ordering that hides one -- be registered without touching the caller's real repository.
+new_copied_sandbox() {
+    local dir
+    dir="$(mktemp -d)"
+    : > "$dir/global"
+    : > "$dir/system"
+    mkdir -p "$dir/scripts"
+    cp "$REPO_ROOT/scripts/check-container-git-credentials.sh" \
+        "$REPO_ROOT/scripts/normalize-container-git-config.sh" \
+        "$REPO_ROOT/scripts/github-token.sh" "$dir/scripts/"
+    chmod +x "$dir/scripts"/*.sh
+    git -C "$dir" init -q > /dev/null 2>&1
+    # A recorder, not a responder: an invocation at all is the failure.
+    cat > "$dir/fake-helper.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$dir/helper-invocations"
+cat > /dev/null
+EOF
+    chmod +x "$dir/fake-helper.sh"
+    cfg "$dir" --system --add credential.helper \
+        "!f() { $dir/fake-helper.sh git-credential-helper \$*; }; f"
+    printf '%s' "$dir"
+}
+
+run_copied_check() {
+    local dir="$1"
+    shift
+    GIT_CONFIG_GLOBAL="$dir/global" GIT_CONFIG_SYSTEM="$dir/system" \
+        bash "$dir/scripts/check-container-git-credentials.sh" "$@" 2>&1
+}
+
+run_copied_normalizer() {
+    local dir="$1"
+    GIT_CONFIG_GLOBAL="$dir/global" GIT_CONFIG_SYSTEM="$dir/system" \
+        bash "$dir/scripts/normalize-container-git-config.sh" > /dev/null 2>&1
+}
+
+# GREEN control: the copied-script sandbox agrees with the uncopied one on a normalized config, so
+# the two RED cases below differ from it in exactly one registration.
+sandbox="$(new_copied_sandbox)"
+run_copied_normalizer "$sandbox"
+output="$(run_copied_check "$sandbox")"
+status=$?
+if [ "$status" = "0" ]; then
+    pass "the check passes on a normalized config whose repo root is the sandbox"
+else
+    fail "the check passes on a normalized config whose repo root is the sandbox" \
+        "status=$status output=$(printf '%s' "$output" | tr '\n' '|')"
+fi
+
+# RED: `.git/config` is read after `~/.gitconfig`, so this helper runs AFTER our url-scoped reset
+# and answers every github.com request -- in this container that second helper is the Dev Containers
+# one, i.e. the five-minute push hang plus a dialog on the owner's desktop.
+GIT_CONFIG_GLOBAL="$sandbox/global" GIT_CONFIG_SYSTEM="$sandbox/system" \
+    git -C "$sandbox" config --local --add credential.helper "!$sandbox/fake-helper.sh" 2>/dev/null
+output="$(run_copied_check "$sandbox")"
+status=$?
+if [ "$status" = "1" ] && grep -q 'credential.helper @' <<<"$output"; then
+    pass "the check reports a generic helper registered AFTER the url-scoped reset"
+else
+    fail "the check reports a generic helper registered AFTER the url-scoped reset" \
+        "status=$status output=$(printf '%s' "$output" | tr '\n' '|')"
+fi
+
+# And it decided that from config alone. A check that resolved this by asking would raise the very
+# dialog it exists to remove.
+if [ ! -f "$sandbox/helper-invocations" ]; then
+    pass "the check never invokes a credential helper while ordering the list"
+else
+    fail "the check never invokes a credential helper while ordering the list" \
+        "invocations: $(cat "$sandbox/helper-invocations")"
+fi
+rm -rf "$sandbox"
+
+# RED, same defect one scope up: within ONE file the order is line order, so a `[credential]`
+# section appended after the url blocks in ~/.gitconfig runs after the reset too.
+sandbox="$(new_copied_sandbox)"
+run_copied_normalizer "$sandbox"
+cfg "$sandbox" --global --add credential.helper "!$sandbox/fake-helper.sh"
+output="$(run_copied_check "$sandbox")"
+status=$?
+if [ "$status" = "1" ]; then
+    pass "the check reports a generic helper appended after the url blocks in --global"
+else
+    fail "the check reports a generic helper appended after the url blocks in --global" \
+        "status=$status output=$(printf '%s' "$output" | tr '\n' '|')"
+fi
+rm -rf "$sandbox"
+
+# RED: the audit is driven by `github-token.sh --hosts`, and a list that never arrives must be a
+# failure rather than an empty audit. Zero urls means the loop body never runs, `broken_urls` stays
+# empty, and the healthy message prints for a container that would hang on its next push.
+sandbox="$(new_copied_sandbox)"
+run_copied_normalizer "$sandbox"
+printf '%s\n' '#!/usr/bin/env bash' 'echo boom >&2' 'exit 7' > "$sandbox/scripts/github-token.sh"
+chmod +x "$sandbox/scripts/github-token.sh"
+output="$(run_copied_check "$sandbox")"
+status=$?
+if [ "$status" = "1" ] && grep -q -- '--hosts failed' <<<"$output"; then
+    pass "the check fails when github-token.sh --hosts exits non-zero"
+else
+    fail "the check fails when github-token.sh --hosts exits non-zero" \
+        "status=$status output=$(printf '%s' "$output" | tr '\n' '|')"
+fi
+
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$sandbox/scripts/github-token.sh"
+chmod +x "$sandbox/scripts/github-token.sh"
+output="$(run_copied_check "$sandbox")"
+status=$?
+if [ "$status" = "1" ] && grep -q 'declared no URLs' <<<"$output"; then
+    pass "the check fails when github-token.sh --hosts declares no urls"
+else
+    fail "the check fails when github-token.sh --hosts declares no urls" \
+        "status=$status output=$(printf '%s' "$output" | tr '\n' '|')"
+fi
+rm -rf "$sandbox"
+
+# git EXECUTES nothing here, but post-start and the pre-push validator both run it through `bash`,
+# and `.git` is bind-mounted from a Windows host with `filemode = false` -- which is exactly how a
+# mode regression reaches the index unnoticed.
+if [ -x "$CHECK" ]; then
+    pass "the postcondition check is executable"
+else
+    fail "the postcondition check is executable" "$CHECK is not executable"
+fi
+
+if [ "$(git -C "$REPO_ROOT" ls-files -s scripts/check-container-git-credentials.sh | cut -d' ' -f1)" = "100755" ]; then
+    pass "the postcondition check is executable in the index"
+else
+    fail "the postcondition check is executable in the index" \
+        "run: git update-index --chmod=+x scripts/check-container-git-credentials.sh"
+fi
+
 # ── The lifecycle wiring ────────────────────────────────────────────────────
 # post-start runs on every attach, which is when Dev Containers re-copies the host config. The
 # ordering assertion is the substantive one: post-start exits early when the Codex retry is
@@ -196,6 +443,51 @@ if grep -q 'normalize-container-git-config.sh' "$REPO_ROOT/.devcontainer/post-cr
     pass "post-create.sh normalizes git config after creating ~/.gitconfig"
 else
     fail "post-create.sh normalizes git config after creating ~/.gitconfig" "no call found"
+fi
+
+# The whole of #600: running the step is not the same as the step having worked, and a warn that
+# only fires when the SCRIPT fails cannot see a container where it was never called at all.
+if grep -q 'check-container-git-credentials.sh' "$post_start"; then
+    check_line="$(grep -n 'check-container-git-credentials.sh' "$post_start" | head -1 | cut -d: -f1)"
+    normalize_line="$(grep -n 'normalize-container-git-config.sh' "$post_start" | head -1 | cut -d: -f1)"
+    # Defaulted: deferred_line is assigned in the block above only when the normalizer call is
+    # found at all, and `set -u` would otherwise abort the suite instead of reporting.
+    if [ "$normalize_line" -lt "$check_line" ] && [ "$check_line" -lt "${deferred_line:-0}" ]; then
+        pass "post-start.sh verifies the postcondition after normalizing and before its early exit"
+    else
+        fail "post-start.sh verifies the postcondition after normalizing and before its early exit" \
+            "normalize=$normalize_line check=$check_line deferred_exit=$deferred_line"
+    fi
+else
+    fail "post-start.sh verifies the postcondition after normalizing and before its early exit" \
+        "post-start.sh runs the normalizer but never checks that it took"
+fi
+
+# Three states, three messages. "Skipped or failed" and "ran but did not take" need different
+# fixes, and a single non-fatal warn tells an operator neither.
+post_start_body="$(cat "$post_start")"
+if grep -q 'normalization_ran=false' <<<"$post_start_body" \
+    && grep -q 'Normalization failed but' <<<"$post_start_body" \
+    && grep -q 'does NOT resolve through' <<<"$post_start_body"; then
+    pass "post-start.sh distinguishes ran-and-holds, ran-and-broken, and did-not-run"
+else
+    fail "post-start.sh distinguishes ran-and-holds, ran-and-broken, and did-not-run" \
+        "at least one of the three outcomes has no distinct message"
+fi
+
+# The check has to be reachable without an attach, or it only helps the session that did not need
+# it. validate:prepush is the last gate before the push that would otherwise hang.
+if grep -q 'check-container-git-credentials.sh' "$REPO_ROOT/scripts/validate-git-push-config.ps1"; then
+    pass "the pre-push validator runs the postcondition check"
+else
+    fail "the pre-push validator runs the postcondition check" \
+        "scripts/validate-git-push-config.ps1 does not name the check, so nothing runs it before a push"
+fi
+
+if node -e "process.exit(require('$REPO_ROOT/package.json').scripts['check:container-git-credentials'] ? 0 : 1)"; then
+    pass "package.json exposes 'check:container-git-credentials'"
+else
+    fail "package.json exposes 'check:container-git-credentials'" "script not found"
 fi
 
 # The load-bearing one for durability. Dev Containers copies the host git config in at attach, and

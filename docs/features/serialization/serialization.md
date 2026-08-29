@@ -1098,13 +1098,27 @@ everywhere. `AbstractRandom` is the worked example: the after-deserialization wo
 needs is declared on `AbstractRandom` and dispatched through `OnAfterDeserialization`. Suppress
 `WPROTO034` at the declaration when the hook only repeats work every other path already does.
 
-`WPROTO039` and `WPROTO040` are the two errors specific to declaring a subtype **from the subtype**
-with `[WProtoSubtype]`. `WPROTO039` fires when two subtypes of one base claim the same field number,
-whichever end each was declared from, and names both types and the number. `WPROTO040` fires when a
-declaration cannot be honoured at all: it names a base that is not the annotated type's immediate
-base, one that is not a `[WProtoContract]`, one in another assembly, a field number outside the legal
-range or already taken by a member, or it sits on a type with no `[WProtoContract]` of its own. Both
-are described with the feature under [Polymorphism](#polymorphism).
+`WPROTO039`, `WPROTO040`, `WPROTO041` and `WPROTO042` are specific to declaring a subtype **from
+the subtype** with `[WProtoSubtype]`. `WPROTO039` fires when two subtypes of one base claim
+the same field number, whichever end each was declared from, and names both types and the number.
+`WPROTO040` fires when a declaration cannot be honoured at all: it names a base that is not the
+annotated type's immediate base, one that is not a `[WProtoContract]`, one in another assembly, a
+field number outside the legal range or already taken by a member, or it sits on a type with no
+`[WProtoContract]` of its own. `WPROTO041` fires when a declaration omits its field number and the
+assembly's manifest has no entry for it, and it is **the one diagnostic whose severity depends on
+the compilation**: a warning where `UNITY_EDITOR` is defined, an error where it is not.
+`WPROTO042` fires when a manifest entry cannot be read -- two numbers for one subtype, one number
+for two subtypes, a number that is retired, or one outside the legal range. All four are described
+with the feature under [Polymorphism](#polymorphism).
+
+`WPROTO041`'s split severity is what makes the numberless form work at all. The assignment tool
+finds declarations through `TypeCache`, which only indexes types in assemblies that **compiled**, so
+an error in the editor would fail the assembly, make the new type exist nowhere, and hide it from
+the one tool that can number it. Measured in editor 6000.4.6f1, a numberless subtype with no entry
+gave `compilationFailed=True` and the type was absent from every assembly in the domain. As a
+warning the assembly compiles, the editor assigns the number on the next reload, and the number
+that reaches a player is still never a guess: a compilation without `UNITY_EDITOR` gets the error,
+and `WProtoSubtypeTagBuildGate` refuses the player build separately, naming the types.
 
 `WPROTO031` warns when two assemblies declare different roots for the same type. It reports both
 roots and both assemblies, including conflicts that exist entirely between referenced packages.
@@ -1113,12 +1127,32 @@ makes assembly load order choose the adapter and wire shape. Remove one declarat
 `Serializer.RegisterProtobufRoot` claim fixes protobuf-net's root choice but cannot repair which
 WallstopProto adapter an unordered registrar replaced.
 
-There is also one **informational migration diagnostic**. `WPROTO030` marks a protobuf-net
-`[ProtoContract]` that has no `[WProtoContract]`, because that type has no generated formatter and,
-unless served another way, follows the reflective fallback path that does not work under IL2CPP. It
-is informational so upgrading the package does not break an existing consumer or a
-warnings-as-errors build. In Unity, promote it to a warning in `Assets/Default.ruleset` when you want
-a migration worklist:
+There is also one **informational migration diagnostic**. `WPROTO030` marks a protobuf-net contract
+that has no `[WProtoContract]`, because that type has no generated formatter and, unless served
+another way, follows the reflective fallback path that does not work under IL2CPP. It is
+informational so upgrading the package does not break an existing consumer or a warnings-as-errors
+build.
+
+It recognizes three contract shapes, and its message always names the one that matched, so a
+consumer who disagrees knows exactly what to suppress and why:
+
+| Shape                                             | Also requires                                                                                      |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `[ProtoBuf.ProtoContract]`                        | Nothing. It is protobuf-net's own attribute.                                                       |
+| A `ProtoContractAttribute` in any other namespace | That same namespace declares an attribute named `ProtoMemberAttribute`.                            |
+| `[DataContract]`                                  | At least one `[DataMember(Order = n)]` member **and** a protobuf-net reference on the compilation. |
+
+The second row is protobuf-net vendored under a renamed namespace, which is what a project does when
+it has to avoid an assembly conflict. A rename moves the namespace and keeps the whole vocabulary, so
+the attribute pair is the evidence; a lone type that happens to share the name is not.
+
+The third row is deliberately conservative, because `[DataContract]` is equally
+`DataContractSerializer`'s, `DataContractJsonSerializer`'s and WCF's attribute. Both discriminators
+must hold before it counts: protobuf-net requires an explicit `Order` because that is the field
+number, while WCF does not use it for wire identity and most WCF contracts omit it. A project that
+uses `[DataContract]` for WCF and never references protobuf-net stays silent.
+
+In Unity, promote it to a warning in `Assets/Default.ruleset` when you want a migration worklist:
 
 ```xml
 <?xml version="1.0" encoding="utf-8"?>
@@ -1134,7 +1168,8 @@ An IDE or standalone .NET build can set
 `dotnet_diagnostic.WPROTO030.severity = warning` in `.editorconfig` instead. Add `[WProtoContract]`
 and matching `[WProtoMember]` field numbers to port the type. If a contract is deliberately served
 through a surrogate, root marshal, or hand-written formatter, suppress `WPROTO030` around its
-`[ProtoContract]` declaration.
+declaration -- the `[ProtoContract]`, the vendored equivalent, or the `[DataContract]`, whichever the
+message named.
 
 #### Contracts that hold other contracts
 
@@ -1456,6 +1491,112 @@ each entry was declared from, and two subtypes claiming the same number is a bui
 (`WPROTO039`) naming both. That is what lets a base that already ships includes take on a new
 self-declaring subtype without moving any tag that has already shipped.
 
+##### Letting the tool pick the number
+
+Writing the number still means knowing which numbers the siblings took. Omit it and a committed
+manifest supplies it:
+
+```csharp
+[WProtoContract]
+[WProtoSubtype(typeof(Weapon))]        // no number anywhere in the source
+public partial class Thrown : Weapon
+{
+    [WProtoMember(1)]
+    public int Weight;
+}
+```
+
+The number lives in one committed file per assembly, `WProtoSubtypeTags.cs`:
+
+```csharp
+[assembly: WallstopStudios.UnityHelpers.Core.Serialization.WallstopProto.WProtoSubtypeTag(
+    "Game.Thrown",
+    typeof(Game.Weapon),
+    3
+)]
+```
+
+**You do not have to run anything.** The editor writes that entry itself, after the assembly reload
+that first sees a declaration with no number. Adding a subtype is one attribute and a recompile: the
+base is not edited, no sibling is read, and nothing is renumbered. In the window before the entry
+exists the declaration is `WPROTO041`, a **warning** in the editor -- the assembly still compiles,
+which is what lets the tool see the new type at all -- and nothing is written under a guessed number
+in the meantime, because serializing an undeclared subtype throws rather than writing it as its base.
+
+The automatic pass is idempotent: a reload with nothing to do writes no file and triggers no
+reimport. It runs only where a number is actually **missing**, never to tidy drift, and never while
+the editor is compiling, playing or building. **Tools > Wallstop Studios > Unity Helpers > Assign
+WallstopProto Subtype Tags Automatically** toggles it; turning it off leaves the warning, the menu
+item and the build gate, so an unnumbered subtype still cannot ship.
+
+**The automatic pass never retires anything.** It discovers declarations through `TypeCache`, which
+answers for the editor's own compilation, so a subtype behind `#if !UNITY_EDITOR`, behind a platform
+define, or in an assembly that failed to compile is simply absent from it -- and absent looks exactly
+like deleted. An entry whose declaration it cannot see therefore **keeps its number**: nothing else
+can be handed that number, and the type that still exists in the player keeps its entry. Turning one
+into a retirement is the menu item's job, where a human reads the diff before committing it.
+
+Two gates stand between an unnumbered subtype and a player, and neither depends on anybody
+remembering the tool. A compilation without `UNITY_EDITOR` -- which is every assembly Unity compiles
+into a player -- gets `WPROTO041` as an **error**, and `WProtoSubtypeTagBuildGate`, an
+`IPreprocessBuildWithReport`, refuses the build outright and names the types.
+
+**Commit the manifest.** It is the wire contract, exactly as a `[WProtoMember]` number is, and it has
+to survive a clean checkout and a different machine. Three rules make add / remove / re-add safe, and
+the tool enforces all three:
+
+- **A number is never reassigned.** An entry already in the file keeps its number even when a smaller
+  one is free.
+- **A removed subtype's number is retired, not freed.** The tool moves it to a
+  `[assembly: WProtoRetiredSubtypeTag("Game.Thrown", typeof(Game.Weapon), 3)]` entry. Nothing else may
+  take that number, so a payload saved before the deletion cannot come back as some later type.
+- **Re-adding the type restores its own number.** The retired entry is matched by name and turned
+  back into an assignment.
+
+**The subtype half of an entry is a string, not a `typeof`, and that is what makes retirement
+possible.** A `typeof` stops compiling the moment the subtype is deleted, and the only cheap repair
+-- deleting the line -- silently frees the number for the next subtype added, which is precisely the
+reuse retirement exists to forbid. A string keeps the assembly compiling with an entry that names
+nothing, so the tool sees the orphan and retires it. The base stays a `typeof` because the base is
+never the half that disappears. Names are compared as ordinal strings, so a rename reads as a delete plus
+add: it retires the old number and assigns a new one, and shows up as a manifest diff in review
+rather than as silent data loss.
+
+The numbers handed out are the smallest free ones, so a tag stays inside protobuf's one- or two-byte
+range. Measured against this package's own `AbstractRandom`, whose five members hold 1-5 and whose 21
+generators hold 100-120, a new numberless subtype is assigned **6**.
+
+Each assembly gets its own manifest, beside its `.asmdef`. Unity's four predefined assemblies have no
+`.asmdef` to sit beside and are compiled from four disjoint directory sets, so each gets the one path
+that compiles into it -- `Assembly-CSharp` to `Assets/`, `Assembly-CSharp-Editor` to `Assets/Editor/`,
+`Assembly-CSharp-firstpass` to `Assets/Plugins/`, and `Assembly-CSharp-Editor-firstpass` to
+`Assets/Plugins/Editor/`. An assembly with neither an `.asmdef` nor a predefined home fails loudly
+and says so, because a manifest written anywhere else compiles into a different assembly and its
+entries are simply never read.
+
+Those four paths are only the right paths while **no `.asmdef` sits at or above them**. Unity binds a
+script to its nearest ancestor `.asmdef` and falls back to a predefined assembly only when there is
+none, so an `.asmdef` in `Assets/Editor/` -- or anywhere above it -- would take the manifest into its
+own assembly, where `Assembly-CSharp-Editor` never sees the entries, `WPROTO041` keeps firing, and
+every later pass reads the on-disk file as already current. The tool refuses to write in that case
+and names the `.asmdef` that took the directory, so the situation stays recoverable: move that
+`.asmdef`, give the unnumbered types an `.asmdef` of their own, or add the entries by hand.
+
+Running the tool twice produces the same file byte for byte, and it never renumbers or reuses. For CI
+and for a project that prefers the explicit act, the same work runs from the menu item or headless:
+
+```text
+Unity -batchmode -projectPath <project> \
+  -executeMethod WallstopStudios.UnityHelpers.Editor.Tools.WProtoSubtypeTagAssigner.AssignFromCommandLine
+```
+
+`WProtoSubtypeTagAssigner.VerifyFromCommandLine` is the drift gate: it writes nothing and exits
+non-zero when a manifest is out of date.
+
+**Writing the number yourself still works and still wins.** `[WProtoSubtype(typeof(Weapon), 100)]`
+overrides any manifest entry for that pair, which is what everything already published uses. The two
+forms are the same declaration and produce identical bytes.
+
 A `[WProtoSubtype]` must name the annotated type's **immediate** base, which must itself be a
 `[WProtoContract]` **in the same assembly**, with a field number that is free. Neither type may be
 generic: one formatter serves every closure of a generic definition, and one field number cannot
@@ -1463,8 +1604,11 @@ identify a type that is really as many types as it has closures. Anything else i
 (`WPROTO040`) naming the type, the base and what is wrong. The same-assembly rule is
 where this feature stops: the base's dispatch chain is generated when the base's own assembly is
 compiled, and a declaration made afterwards, in a package that references it, could never appear
-there. Declaring polymorphism across an assembly boundary needs a runtime registry this package does
-not yet have; until then, keep a hierarchy inside one assembly, or hold the foreign type behind a
+there. **The manifest does not change this.** A number is only half the problem: two packages that
+never see each other cannot coordinate one, Unity's registrars run unordered so a serialize before
+every registrar has run would write under the wrong number or none, and a registry lookup has to
+stay IL2CPP-safe. That is a different mechanism with a different failure mode, and it is tracked
+separately. Until then, keep a hierarchy inside one assembly, or hold the foreign type behind a
 contract of its own rather than as its base.
 
 #### Surrogates

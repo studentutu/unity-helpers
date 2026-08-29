@@ -356,9 +356,11 @@ Lint-error-code prefixes (`^[A-Z]{2,}\d{3}$` tokens like `UNH001`, `PWS002`) mus
   answered yet, and three sessions read that truncated empty output as "no credential exists" and
   handed a finished branch back unpushed. A `git push` that hangs means this helper is **missing**,
   not that the network is: `github-token.sh` answering and `curl` working prove nothing, because
-  reads use the cache. If `git config --get-all credential.https://github.com.helper` is empty, only
-  the Dev Containers helper is registered; run `bash scripts/normalize-container-git-config.sh`,
-  which `post-start.sh` runs but swallows on failure
+  reads use the cache. **Do not wait for the hang to find out:
+  `npm run check:container-git-credentials` answers in ~0.1 s, names the state, and
+  `-- --fix` repairs it** -- `post-start.sh` and `validate:prepush` both run it now, and it reports
+  when `credential.https://github.com.helper` is missing the empty reset plus
+  `scripts/github-token.sh` for any of the six URLs `github-token.sh --hosts` claims
   ([#600](https://github.com/Ambiguous-Interactive/unity-helpers/issues/600)).
 
   Never echo the token, never write it to a file in the working tree, and pass it to a subprocess
@@ -386,7 +388,10 @@ directory had already answered. CI runs those exact gates on the push. Spending 
 locally what the matrix will prove anyway buys nothing and costs the next issue.
 
 - **The edit loop is `npm run agent:preflight` (2.9 s) plus the targeted check for what you touched.**
-  Run the aggregate ONCE, before the push, not after each commit.
+  Run the aggregate ONCE, before the push, not after each commit. **It inspects only CHANGED files,
+  so after you commit it prints "No changed files detected. Nothing to validate." and exits 0 --
+  which is "looked at nothing", not "passed".** Session 236 read that as a pass and pushed an
+  `out-parameters` violation CI caught. Name the targeted gates instead.
 - **Prefer the cheap instrument that answers the question.** A `rg` for the shape, a single
   `--only <id>`, one `dotnet test --filter` -- before a whole-tree rebuild. Reach for the expensive
   one when the cheap one is genuinely inconclusive, and say which you used.
@@ -417,24 +422,25 @@ deliberate act, not the tail of every commit.
     here; anything resolved out of Unity's own metadata (attribute targets, defaults, serialization
     behaviour) has to be confirmed in a real editor, because the failure mode is a confident answer
     for a Unity nobody ships ([#553](https://github.com/Ambiguous-Interactive/unity-helpers/issues/553)).
-    It is also more permissive than Unity about **references**: four of the eight assemblies
-    `TestCheck` names are declared by NONE of the 35 test asmdefs, whose `overrideReferences` list is
-    what Unity compiles against -- so `JsonEncodedText` and friends compile green here and fail Unity
-    with a `CS0012` that never reaches the console
+    It compiles several asmdefs into ONE assembly with one reference list, where Unity compiles each
+    against its own `overrideReferences`, so it CAN be more permissive about **references**:
+    `JsonEncodedText.Encode` needs `System.Text.Encodings.Web`, which `TestCheck` holds for
+    `Runtime/**` and no test asmdef declares, and it failed Unity with 25 x `CS0012`.
+    `npm run lint:typecheck-asmdef-references` holds that statically, and `typecheck:tests` ends
+    with a `--probe` leg rebuilding without the Runtime-only references so such a fixture fails HERE
     ([#598](https://github.com/Ambiguous-Interactive/unity-helpers/issues/598)).
     It builds each of the three source trees four ways (`typecheck:unity:*`, `typecheck:editor:*`,
     `typecheck:tests:*`), because four different branches ship: the `WALLSTOP_PROTO` default, the legacy
     define-off fallback, `WALLSTOP_UNITY_HELPERS_ODIN_INSPECTOR` (`:odin`) and `SINGLE_THREADED`.
-    `SINGLE_THREADED` is guarded for the same reason as Odin and was found the same way (#533): it
-    swaps declarations, not just call sites -- `ReflectionHelpers` alone moves five caches between
-    `ConcurrentDictionary` and `Dictionary` under it -- and CI runs two `SINGLE_THREADED` legs, so a
-    cache added without the matching branch passed every local gate and cost a full matrix run.
-    The Odin configuration exists because Odin changes the **base class** of `RuntimeSingleton<T>`,
-    `ScriptableObjectSingleton<T>` and `AttributeEffect`, and that branch compiled nowhere in automation
-    until #347 -- which is how #275 shipped a compile break to consumers. Odin is paid and has no NuGet
-    package, so each shim declares only the base classes the sources alias. `typecheck:editor` adds 132 of
-    the 139 files under `Editor/`, its `:odin` leg the only thing anywhere that compiles the nine editor
-    drawers and three inspectors (#347). **Its `UnityEditor` half is `Unity3D.SDK` 2021.1.14 -- two minor
+    Both `SINGLE_THREADED` (#533) and Odin swap **declarations**, not just call sites --
+    `ReflectionHelpers` alone moves five caches between `ConcurrentDictionary` and `Dictionary`, and
+    Odin changes the base class of `RuntimeSingleton<T>`, `ScriptableObjectSingleton<T>` and
+    `AttributeEffect` -- so a change without the matching branch passes every unguarded local gate
+    and costs a full matrix run. That branch compiled nowhere until #347, which is how #275 shipped a
+    compile break to consumers. Odin is paid with no NuGet package, so each shim declares only the
+    base classes the sources alias. `typecheck:editor` adds 132 of the 139 files under `Editor/`, its
+    `:odin` leg the only thing anywhere that compiles the nine editor drawers and three inspectors
+    (#347). **Its `UnityEditor` half is `Unity3D.SDK` 2021.1.14 -- two minor
     versions BELOW the 2021.3 floor, and the newest ever published** -- so a 2021.2/2021.3 member reads as
     absent: #553 one notch worse. Exclude such a file rather than "fixing" the source. The seven already
     excluded, and the `Utils/ValidationShared` shim that stands in for one, are enumerated in the csproj.

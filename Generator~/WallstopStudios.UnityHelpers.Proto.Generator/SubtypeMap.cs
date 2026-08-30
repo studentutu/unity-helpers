@@ -383,6 +383,19 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 )
             )
             {
+                // A per-assembly generator emits the base's dispatch chain when the base's assembly
+                // compiles, so a subtype declared afterwards in a referencing assembly is not late
+                // to a list -- it is outside the compilation that built the list. That is a fact
+                // about THIS mechanism, and the message says only that.
+                //
+                // A runtime registry would close the gap and is refused: unordered registrars, two
+                // packages claiming one tag, and a lookup stripping under IL2CPP are all silent
+                // data corruption rather than build errors
+                // (https://github.com/Ambiguous-Interactive/unity-helpers/issues/603). Emitting the
+                // base's chain in the EXTENDING assembly instead is neither a registry nor
+                // refused, and is tracked on
+                // https://github.com/Ambiguous-Interactive/unity-helpers/issues/612 -- so the
+                // message must not tell a developer the feature can never exist.
                 problem =
                     "'"
                     + baseType.Name
@@ -392,13 +405,20 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                     + subType.Name
                     + "' into '"
                     + (subType.ContainingAssembly == null ? "?" : subType.ContainingAssembly.Name)
-                    + "'. The base's dispatch chain was generated when its own assembly was compiled "
-                    + "and nothing added later can appear in it, so this subtype would compile and "
-                    + "then throw on the first save. Move '"
+                    + "'. The base's dispatch chain is generated when its own assembly is compiled, "
+                    + "so a subtype declared afterwards in an assembly that references it cannot "
+                    + "appear in that chain, and accepting the declaration would compile and then "
+                    + "throw on the first save. Either move '"
                     + subType.Name
                     + "' into '"
                     + (baseType.ContainingAssembly == null ? "?" : baseType.ContainingAssembly.Name)
-                    + "', or hold it behind a contract of its own rather than as its base";
+                    + "', or give '"
+                    + subType.Name
+                    + "' a [WProtoContract] of its own and hold a '"
+                    + baseType.Name
+                    + "' in it as a [WProtoMember] instead of deriving from it -- a member of a "
+                    + "type from another assembly is generated normally, and the base writes its "
+                    + "own subtypes through its own chain";
                 return true;
             }
 
@@ -422,9 +442,46 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                     "field number "
                     + tag
                     + " is outside 1-536870911 or inside the reserved 19000-19999 range";
+                return true;
+            }
+
+            // A hand-written number is checked against the retirement record, and a manifest one is
+            // not: an entry that collides with a retirement is WPROTO042 at the manifest line that
+            // holds it, and reporting the same collision twice sends the developer to the
+            // declaration rather than to the file the number actually lives in. The name is what
+            // decides, not the number -- re-adding the type the number belonged to is the case
+            // retirement exists to serve (#606).
+            if (
+                !tagless
+                && manifest.TryRetired(baseType, tag, out string retiredBy)
+                && retiredBy != subType.ToDisplayString()
+            )
+            {
+                problem = RetiredProblem(tag, baseType, retiredBy);
             }
 
             return true;
+        }
+
+        /// <summary>
+        /// Explains why a retired field number cannot be handed to another subtype.
+        /// </summary>
+        /// <param name="tag">The field number being claimed.</param>
+        /// <param name="baseType">The base it lives on.</param>
+        /// <param name="retiredBy">The fully qualified name of the type that held it.</param>
+        /// <returns>The clause a subtype or include diagnostic appends.</returns>
+        internal static string RetiredProblem(int tag, INamedTypeSymbol baseType, string retiredBy)
+        {
+            return "field number "
+                + tag
+                + " on '"
+                + (baseType == null ? "?" : baseType.Name)
+                + "' is retired, having belonged to '"
+                + retiredBy
+                + "'. Payloads written before that type was removed still carry it under this "
+                + "number, so handing it to another type reads those saves back as the wrong "
+                + "type. Give this one a free number, or restore the deleted type under its own "
+                + "name";
         }
 
         /// <summary>

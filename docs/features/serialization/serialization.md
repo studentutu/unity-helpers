@@ -459,7 +459,7 @@ In your `Assets` folder (or any subfolder), create `link.xml` to preserve your P
   </assembly>
 
   <!-- Preserve Unity Helpers if needed -->
-  <assembly fullname="WallstopStudios.UnityHelpers.Runtime">
+  <assembly fullname="WallstopStudios.UnityHelpers">
     <!-- Usually not needed, but if you see errors: -->
     <type fullname="WallstopStudios.UnityHelpers.Core.Serialization.Serializer" preserve="all"/>
   </assembly>
@@ -1098,6 +1098,9 @@ everywhere. `AbstractRandom` is the worked example: the after-deserialization wo
 needs is declared on `AbstractRandom` and dispatched through `OnAfterDeserialization`. Suppress
 `WPROTO034` at the declaration when the hook only repeats work every other path already does.
 
+`WPROTO043` fires when a member takes a field number, or a name, that the contract reserved. See
+[Retiring a member](#retiring-a-member).
+
 `WPROTO039`, `WPROTO040`, `WPROTO041` and `WPROTO042` are specific to declaring a subtype **from
 the subtype** with `[WProtoSubtype]`. `WPROTO039` fires when two subtypes of one base claim
 the same field number, whichever end each was declared from, and names both types and the number.
@@ -1552,6 +1555,12 @@ the tool enforces all three:
   take that number, so a payload saved before the deletion cannot come back as some later type.
 - **Re-adding the type restores its own number.** The retired entry is matched by name and turned
   back into an assignment.
+- **A number you wrote by hand is recorded too.** `[WProtoSubtype(typeof(Weapon), 3)]` gets an
+  entry beside the assigned ones, because the declaration is otherwise the only record that 3
+  was ever spent -- and it is deleted along with the type that carries it. With the entry, the
+  deletion is seen and 3 is retired; without it, the next subtype added is handed 3 and every
+  payload written by an older build reads that field back as the wrong type. `[WProtoInclude]`
+  is the same declaration written on the base and is covered the same way.
 
 **The subtype half of an entry is a string, not a `typeof`, and that is what makes retirement
 possible.** A `typeof` stops compiling the moment the subtype is deleted, and the only cheap repair
@@ -1601,15 +1610,102 @@ A `[WProtoSubtype]` must name the annotated type's **immediate** base, which mus
 `[WProtoContract]` **in the same assembly**, with a field number that is free. Neither type may be
 generic: one formatter serves every closure of a generic definition, and one field number cannot
 identify a type that is really as many types as it has closures. Anything else is a build error
-(`WPROTO040`) naming the type, the base and what is wrong. The same-assembly rule is
-where this feature stops: the base's dispatch chain is generated when the base's own assembly is
-compiled, and a declaration made afterwards, in a package that references it, could never appear
-there. **The manifest does not change this.** A number is only half the problem: two packages that
-never see each other cannot coordinate one, Unity's registrars run unordered so a serialize before
-every registrar has run would write under the wrong number or none, and a registry lookup has to
-stay IL2CPP-safe. That is a different mechanism with a different failure mode, and it is tracked
-separately. Until then, keep a hierarchy inside one assembly, or hold the foreign type behind a
-contract of its own rather than as its base.
+(`WPROTO040`) naming the type, the base and what is wrong.
+
+##### Why a hierarchy cannot cross an assembly boundary
+
+The same-assembly rule is where this feature stops today. The base's dispatch chain is generated when
+the base's own assembly is compiled, so a subtype declared afterwards, in an assembly that references
+it, is not late to a list -- it is outside the compilation that built the list. **The manifest does
+not change this**: a number was never the obstacle, and writing one by hand does not help.
+
+One way of closing the gap is refused outright. A **runtime registry** has failure modes that are all
+silent data corruption rather than build errors: Unity's registrars run unordered, so a serialize
+before every registrar has run writes under the wrong number or none; two unrelated packages picking
+the same number on a shared base is undetectable at build time and type-confusing at read time; and
+the lookup has to stay IL2CPP-safe through managed stripping. A build error you can see is a better
+trade than a player that writes an unreadable save.
+
+A second way is **not** refused, and is tracked on
+[issue 612](https://github.com/Ambiguous-Interactive/unity-helpers/issues/612): the extending
+assembly emits the base's whole dispatch chain itself, package subtypes included, and registers it in
+place of the shipped one. Its compilation can already read every field number the base spends, so a
+collision is a build error rather than a runtime surprise, and the dispatch stays the same static
+code. Until that exists, `WPROTO040` refuses the declaration.
+
+Two shapes work instead. Keep the hierarchy inside one assembly -- or, when the base belongs to
+somebody else, **compose rather than derive**:
+
+```csharp
+// Refused: Sub is in your assembly, Weapon is in the package's.
+[WProtoContract]
+[WProtoSubtype(typeof(Weapon), 100)]
+public partial class PlasmaCutter : Weapon { }
+
+// Supported: your type is its own contract and holds a Weapon.
+[WProtoContract]
+public partial class PlasmaCutter
+{
+    [WProtoMember(1)]
+    public Weapon Base;
+
+    [WProtoMember(2)]
+    public float ChargeSeconds;
+}
+```
+
+A member whose type comes from another assembly is generated normally, and `Weapon` still writes its
+own subtypes through the chain that was emitted with it -- so a `Weapon` field holding a package
+subtype round-trips as that subtype. What you give up is being _dispatched as_ a `Weapon`: a
+collection declared `List<Weapon>` cannot hold a `PlasmaCutter`. Declare the collection as your own
+type instead.
+
+#### Retiring a member
+
+A field number is a durable wire contract, and the declaration that spends one is deleted along with
+the member it sits on. `WPROTO002` refuses two members claiming one number at the same **time**, so
+it cannot see a number a deletion freed: delete `Health`, add something else at 3, and every payload
+written by an older build reads that field back as the wrong thing, with no diagnostic anywhere.
+
+Record the removal where the next author is already reading:
+
+```csharp
+[WProtoContract]
+[WProtoReserved(3)]                   // Health, removed in 4.0
+[WProtoReserved(7, 9)]                // several at once
+[WProtoReserved("Health")]            // and the name it went by
+public partial class Player
+{
+    [WProtoMember(1)]
+    public string Name;
+}
+```
+
+A member that takes a reserved number or a reserved name is `WPROTO043`. **Names are reserved as
+well as numbers**, for the reason protobuf reserves both: a re-added `Health` at a _different_ number
+still breaks anything matching by name -- a JSON projection, a generated `.proto` consumer, a schema
+registry -- while carrying data that means something else. The check reads the name a consumer
+actually sees, so `[WProtoMember(9, Name = "Health")]` is refused whatever the C# member is
+called, and a C# `Health` presenting itself as something else is not.
+
+A reservation is a record, not a permanent ban. If the removed member really is coming back
+unchanged, delete the matching `[WProtoReserved]` in the same commit; `WPROTO043`'s message says so,
+because from the compiler's side "a new member took a dead number" and "a reservation contradicts a
+live member" are the same state and nothing there can tell them apart.
+
+A reservation binds **subtype discriminators too**, not only members. A base's `[WProtoInclude]` and
+`[WProtoSubtype]` numbers share one space with its members, so a rule covering half of it would be
+one you step around by writing the number on the other half. **Assign WallstopProto Subtype Tags**
+knows this as well, and assigns around reserved numbers rather than handing out one the next compile
+would reject.
+
+Reservations are per contract. A base's reservation does not bind its subtypes' OWN members: those
+numbers live in a different space, so inheriting one would refuse a member for a collision that
+cannot happen.
+
+The [schema exporter](#exporting-a-proto3-schema) writes them out as proto3 `reserved` lines. Without
+that, the exported schema would permit, in a consumer's own toolchain, exactly the reuse this
+refuses.
 
 #### Surrogates
 

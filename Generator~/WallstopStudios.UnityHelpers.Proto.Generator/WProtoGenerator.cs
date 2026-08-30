@@ -2903,6 +2903,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
         {
             List<Include> includes = new List<Include>();
             HashSet<int> claimed = new HashSet<int>();
+            ReservedMap reserved = ReservedMap.Build(contract);
             foreach (Member member in members)
             {
                 claimed.Add(member.Tag);
@@ -2956,6 +2957,22 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                         + tag
                         + " is outside 1-536870911 or inside the reserved 19000-19999 range";
                 }
+                else if (
+                    subtypes.Manifest.TryRetired(contract, tag, out string retiredBy)
+                    && retiredBy != subType.ToDisplayString()
+                )
+                {
+                    // The two declaration forms share one field-number space, so a rule that
+                    // covered only [WProtoSubtype] would be one an author steps around by
+                    // accident (#606).
+                    problem = SubtypeMap.RetiredProblem(tag, contract, retiredBy);
+                }
+                else if (reserved.ReservesNumber(tag))
+                {
+                    // Checked before claimed.Add so a refused include does not spend the number it
+                    // was refused for.
+                    problem = ReservedMap.ReservedProblem(tag, contract.Name);
+                }
                 else if (!claimed.Add(tag))
                 {
                     problem =
@@ -2994,6 +3011,21 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                             taken.Name,
                             declared.Tag,
                             contract.Name
+                        )
+                    );
+                    failed = true;
+                    continue;
+                }
+
+                if (reserved.ReservesNumber(declared.Tag))
+                {
+                    context.ReportDiagnostic(
+                        Diagnostic.Create(
+                            WProtoDiagnostics.BadSubtype,
+                            declared.SubType.Locations.FirstOrDefault(),
+                            declared.SubType.Name,
+                            SubtypeMap.Written(contract, declared.Tag, declared.TagFromManifest),
+                            ReservedMap.ReservedProblem(declared.Tag, contract.Name)
                         )
                     );
                     failed = true;
@@ -3123,6 +3155,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
         {
             List<Member> members = new List<Member>();
             Dictionary<int, string> claimed = new Dictionary<int, string>();
+            ReservedMap reserved = ReservedMap.Build(contract);
             bool failed = false;
 
             foreach (ISymbol symbol in contract.GetMembers())
@@ -3178,6 +3211,35 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                         other,
                         symbol.Name,
                         tag
+                    );
+                    failed = true;
+                    continue;
+                }
+
+                // Checked after the duplicate, because a member colliding with a LIVE sibling has a
+                // fix the author can see in front of them; a collision with something deleted needs
+                // the reservation explained.
+                //
+                // The name a CONSUMER sees, and only that. A generated schema, a payload dump and
+                // anything matching by name all read [WProtoMember(Name = ...)] where it is set and
+                // the member's own name where it is not, so that is the identity a reservation
+                // protects. Reading the C# identifier as well would refuse a member presenting a
+                // free name, which is the decoupling Name exists for.
+                string schemaName = SchemaNameOf(attribute) ?? symbol.Name;
+                bool reservedName = reserved.ReservesName(schemaName);
+                if (reserved.ReservesNumber(tag) || reservedName)
+                {
+                    Report(
+                        context,
+                        WProtoDiagnostics.ReservedTag,
+                        symbol,
+                        contract.Name,
+                        symbol.Name,
+                        reserved.ReservesNumber(tag)
+                            ? reservedName
+                                ? "field number " + tag + " and the name '" + schemaName + "'"
+                                : "field number " + tag
+                            : "the name '" + schemaName + "'"
                     );
                     failed = true;
                     continue;
@@ -3333,6 +3395,29 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             context.ReportDiagnostic(
                 Diagnostic.Create(descriptor, symbol.Locations.FirstOrDefault(), arguments)
             );
+        }
+
+        /// <summary>
+        /// The schema name a member declared for itself, or <c>null</c> when it declared none.
+        /// </summary>
+        /// <param name="attribute">The member's <c>[WProtoMember]</c>.</param>
+        /// <returns>The declared name, or <c>null</c>.</returns>
+        /// <remarks>
+        /// Never written to the wire -- protobuf identifies fields by number -- but it is what a
+        /// generated schema, a payload dump and anything matching by name see, which is exactly
+        /// what a reserved name protects.
+        /// </remarks>
+        private static string SchemaNameOf(AttributeData attribute)
+        {
+            foreach (KeyValuePair<string, TypedConstant> argument in attribute.NamedArguments)
+            {
+                if (argument.Key == "Name" && argument.Value.Value is string declared)
+                {
+                    return string.IsNullOrEmpty(declared) ? null : declared;
+                }
+            }
+
+            return null;
         }
 
         /// <summary>

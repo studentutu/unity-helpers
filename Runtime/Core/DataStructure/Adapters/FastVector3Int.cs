@@ -36,7 +36,8 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
             IComparable<FastVector2Int>,
             IComparable<Vector3Int>,
             IComparable<Vector2Int>,
-            IComparable
+            IComparable,
+            IUnderlyingValueProvider
     {
         /// <summary>
         /// Represents the origin vector <c>(0, 0, 0)</c>, useful as a default without allocating new instances.
@@ -424,10 +425,30 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
         /// <returns><c>true</c> when X and Y match.</returns>
         /// <example>
         /// <code>
-        /// bool shareCell = current.Equals(new Vector2Int(7, 1));
+        /// bool shareCell = current.HasSameXY(new Vector2Int(7, 1));
         /// </code>
         /// </example>
+        [Obsolete(
+            "Equals across dimensions ignores Z, which breaks transitivity and equal-implies-same-hash. Use HasSameXY(Vector2Int) instead. This overload is removed in 4.0."
+        )]
         public bool Equals(Vector2Int other)
+        {
+            return HasSameXY(other);
+        }
+
+        /// <summary>
+        /// Determines whether this fast vector shares the planar coordinates of a Unity
+        /// <see cref="Vector2Int"/>. The Z component is deliberately ignored, which is why this is
+        /// not spelled <c>Equals</c>.
+        /// </summary>
+        /// <param name="other">The Unity vector.</param>
+        /// <returns><c>true</c> when X and Y match.</returns>
+        /// <example>
+        /// <code>
+        /// bool shareCell = current.HasSameXY(new Vector2Int(7, 1));
+        /// </code>
+        /// </example>
+        public bool HasSameXY(Vector2Int other)
         {
             return x == other.x && y == other.y;
         }
@@ -439,9 +460,12 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
         /// <returns>A signed integer describing the ordering.</returns>
         /// <example>
         /// <code>
-        /// bool comesAfter = current.CompareTo(new Vector2Int(5, 0)) &gt; 0;
+        /// bool comesAfter = current.FastVector2Int().CompareTo(new Vector2Int(5, 0)) &gt; 0;
         /// </code>
         /// </example>
+        [Obsolete(
+            "Comparing across dimensions ignores Z, so it answers 0 for a pair Equals(object) refuses. Compare the planar coordinates explicitly with FastVector2Int().CompareTo(other) instead. This overload is removed in 4.0."
+        )]
         public int CompareTo(Vector2Int other)
         {
             int comparison = x.CompareTo(other.x);
@@ -482,27 +506,30 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
         }
 
         /// <summary>
-        /// Determines equality against any supported vector representation.
+        /// Determines equality against another boxed <see cref="FastVector3Int"/>. No other type is
+        /// accepted: none of them answers <c>true</c> for a boxed fast vector in return, and a
+        /// two-dimensional vector matched on X and Y alone would hash differently.
+        /// Compare against Unity's vector through <see cref="Equals(Vector3Int)"/>, and against a
+        /// two-dimensional vector through <see cref="HasSameXY(Vector2Int)"/>.
         /// </summary>
         /// <param name="obj">The candidate vector.</param>
-        /// <returns><c>true</c> when <paramref name="obj"/> represents the same coordinates.</returns>
+        /// <returns><c>true</c> when <paramref name="obj"/> is a fast vector with the same coordinates.</returns>
         /// <example>
         /// <code>
-        /// object candidate = new Vector3Int(4, 2, 6);
+        /// object candidate = new FastVector3Int(4, 2, 6);
         /// bool matches = current.Equals(candidate);
         /// </code>
         /// </example>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public override bool Equals(object obj)
         {
-            return obj switch
-            {
-                FastVector3Int vector => Equals(vector),
-                Vector3Int vector => Equals(vector),
-                FastVector2Int vector => Equals(vector),
-                Vector2Int vector => Equals(vector),
-                _ => false,
-            };
+            return obj is FastVector3Int vector && Equals(vector);
+        }
+
+        bool IUnderlyingValueProvider.TryGetUnderlyingValue(out object value)
+        {
+            value = (Vector3Int)this;
+            return true;
         }
 
         /// <summary>
@@ -544,11 +571,32 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
         /// <returns><c>true</c> when the planar components match.</returns>
         /// <example>
         /// <code>
-        /// bool overlaps = current.Equals(new FastVector2Int(5, 3));
+        /// bool overlaps = current.HasSameXY(new FastVector2Int(5, 3));
+        /// </code>
+        /// </example>
+        [Obsolete(
+            "Equals across dimensions ignores Z, which breaks transitivity and equal-implies-same-hash. Use HasSameXY(FastVector2Int) instead. This overload is removed in 4.0."
+        )]
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public bool Equals(FastVector2Int other)
+        {
+            return HasSameXY(other);
+        }
+
+        /// <summary>
+        /// Determines whether this fast vector shares the planar coordinates of a
+        /// <see cref="FastVector2Int"/>. The Z component is deliberately ignored, which is why this
+        /// is not spelled <c>Equals</c>.
+        /// </summary>
+        /// <param name="other">The two-dimensional fast vector.</param>
+        /// <returns><c>true</c> when the planar components match.</returns>
+        /// <example>
+        /// <code>
+        /// bool overlaps = current.HasSameXY(new FastVector2Int(5, 3));
         /// </code>
         /// </example>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool Equals(FastVector2Int other)
+        public bool HasSameXY(FastVector2Int other)
         {
             return x == other.x && y == other.y;
         }
@@ -588,9 +636,12 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
         /// <returns>A signed integer describing the ordering.</returns>
         /// <example>
         /// <code>
-        /// bool precedes = current.CompareTo(new FastVector2Int(1, 4)) &lt; 0;
+        /// bool precedes = current.FastVector2Int().CompareTo(new FastVector2Int(1, 4)) &lt; 0;
         /// </code>
         /// </example>
+        [Obsolete(
+            "Comparing across dimensions ignores Z, so it answers 0 for a pair Equals(object) refuses. Compare the planar coordinates explicitly with FastVector2Int().CompareTo(other) instead. This overload is removed in 4.0."
+        )]
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public int CompareTo(FastVector2Int other)
         {
@@ -604,13 +655,17 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
         }
 
         /// <summary>
-        /// Compares this fast vector to any supported vector representation.
+        /// Compares this fast vector to another boxed <see cref="FastVector3Int"/>. No other type is
+        /// accepted, for the same reason <see cref="Equals(object)"/> accepts none: a
+        /// <c>CompareTo</c> that answers <c>0</c> where <c>Equals</c> answers <c>false</c> breaks
+        /// the ordering <c>Array.Sort(object[])</c> and every sorted collection assume. Compare
+        /// against Unity's vector through <see cref="CompareTo(Vector3Int)"/>.
         /// </summary>
         /// <param name="other">The candidate vector.</param>
-        /// <returns>A signed integer describing the ordering, or <c>-1</c> when unsupported.</returns>
+        /// <returns>A signed integer describing the ordering, <c>1</c> for <c>null</c>, or <c>-1</c> when the type is unsupported.</returns>
         /// <example>
         /// <code>
-        /// int ordering = current.CompareTo((object)new Vector3Int(8, 0, 2));
+        /// int ordering = current.CompareTo((object)new FastVector3Int(8, 0, 2));
         /// </code>
         /// </example>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -619,9 +674,6 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
             return other switch
             {
                 FastVector3Int vector => CompareTo(vector),
-                Vector3Int vector => CompareTo(vector),
-                FastVector2Int vector => CompareTo(vector),
-                Vector2Int vector => CompareTo(vector),
                 null => 1,
                 _ => -1,
             };

@@ -136,12 +136,12 @@ namespace WallstopStudios.UnityHelpers.Core.Random
             _bitCount = bitCount;
             _byteBuffer = byteBuffer;
             _byteCount = byteCount;
-            _hashCode = Objects.HashCode(
+            _hashCode = ComputeHashCode(
                 _state1,
                 _state2,
                 _hasGaussian,
                 _gaussian,
-                _payload?.Length,
+                _payload,
                 _bitBuffer,
                 _bitCount,
                 _byteBuffer,
@@ -161,12 +161,12 @@ namespace WallstopStudios.UnityHelpers.Core.Random
             _bitCount = 0;
             _byteBuffer = 0;
             _byteCount = 0;
-            _hashCode = Objects.HashCode(
+            _hashCode = ComputeHashCode(
                 _state1,
                 _state2,
                 _hasGaussian,
                 _gaussian,
-                _payload?.Length,
+                _payload,
                 _bitBuffer,
                 _bitCount,
                 _byteBuffer,
@@ -213,9 +213,87 @@ namespace WallstopStudios.UnityHelpers.Core.Random
             return _payload.AsSpan().SequenceEqual(other._payload);
         }
 
+        /// <summary>
+        /// Returns a hash derived from the members <see cref="Equals(RandomState)"/> compares.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Computed rather than read from the stored field: that field travels on the wire, so a
+        /// payload may carry any value at all, and a zero-initialized state -- <c>default</c>, an
+        /// array element, an instance a deserializer allocated without a constructor -- carries zero
+        /// while <see cref="Equals(RandomState)"/> reports it equal to <c>new RandomState(0)</c>.
+        /// </para>
+        /// <para>
+        /// The gaussian reservoir contributes only when the state says it holds one, exactly as
+        /// <see cref="Equals(RandomState)"/> reads it: the flag and the value are separate wire
+        /// fields, so a payload may claim no reservoir while carrying a value in the slot.
+        /// </para>
+        /// </remarks>
+        /// <returns>A hash code for this state.</returns>
         public override int GetHashCode()
         {
-            return _hashCode;
+            return ComputeHashCode(
+                _state1,
+                _state2,
+                _hasGaussian,
+                _gaussian,
+                _payload,
+                _bitBuffer,
+                _bitCount,
+                _byteBuffer,
+                _byteCount
+            );
+        }
+
+        internal static int ComputeHashCode(
+            ulong state1,
+            ulong state2,
+            bool hasGaussian,
+            double gaussian,
+            byte[] payload,
+            uint bitBuffer,
+            int bitCount,
+            uint byteBuffer,
+            int byteCount
+        )
+        {
+            return Objects.HashCode(
+                state1,
+                state2,
+                hasGaussian,
+                GaussianHashContribution(hasGaussian, gaussian),
+                payload?.Length,
+                bitBuffer,
+                bitCount,
+                byteBuffer,
+                byteCount
+            );
+        }
+
+        private static double GaussianHashContribution(bool hasGaussian, double gaussian)
+        {
+            if (!hasGaussian)
+            {
+                return 0d;
+            }
+
+            if (double.IsNaN(gaussian))
+            {
+                return double.NaN;
+            }
+
+            /*
+                WallMath.TotalEquals reports every NaN equal to every other NaN and negative zero
+                equal to positive zero, so both are folded to one representative here rather than
+                left to whatever bits a payload happened to carry.
+            */
+            // ReSharper disable once CompareOfFloatsByEqualityOperator
+            if (gaussian == 0d)
+            {
+                return 0d;
+            }
+
+            return gaussian;
         }
 
         public override string ToString()

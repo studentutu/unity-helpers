@@ -560,15 +560,74 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
                 return false;
             }
 
-            // Try to read the boxed value from the property and compare
             object boxedValue = GetBoxedPropertyValue(property, valueType);
             if (boxedValue == null)
             {
                 return false;
             }
 
-            // Use Equals for proper comparison (relies on IEquatable<T> or Equals override)
-            return boxedValue.Equals(option);
+            return MatchesAuthoredOption(boxedValue, option);
+        }
+
+        /*
+            A drawer matches an AUTHORED option against a SERIALIZED value, and the two are allowed
+            to be different-but-convertible types -- which Equals(object) is no longer allowed to be,
+            because a foreign type it accepts cannot reciprocate and breaks transitivity for
+            everything else (#639). Both sides are reduced to the standard-library value the package
+            type stands in for, so nothing here decides more than that type's own conversion
+            operator already does.
+        */
+        private static bool MatchesAuthoredOption(object serializedValue, object option)
+        {
+            if (serializedValue.Equals(option))
+            {
+                return true;
+            }
+
+            object serializedUnderlying = UnderlyingValueOf(serializedValue);
+            object optionUnderlying = UnderlyingValueOf(option);
+            if (serializedUnderlying == null || optionUnderlying == null)
+            {
+                return false;
+            }
+
+            if (serializedUnderlying.Equals(optionUnderlying))
+            {
+                return true;
+            }
+
+            return SharePlanarCoordinates(serializedUnderlying, optionUnderlying);
+        }
+
+        private static object UnderlyingValueOf(object value)
+        {
+            if (value is not IUnderlyingValueProvider provider)
+            {
+                return value;
+            }
+
+            return provider.TryGetUnderlyingValue(out object underlying) ? underlying : null;
+        }
+
+        /*
+            A grid cell authored in two dimensions and one stored in three name the same cell, which
+            is what the cross-dimensional Equals overloads answered before #639 obsoleted them for
+            breaking transitivity. Ordinary Unity vectors never reach here -- they have their own
+            SerializedPropertyType -- so this only fires for a fast vector on one side or the other.
+        */
+        private static bool SharePlanarCoordinates(object left, object right)
+        {
+            if (left is Vector2Int leftPlanar && right is Vector3Int rightSpatial)
+            {
+                return leftPlanar.x == rightSpatial.x && leftPlanar.y == rightSpatial.y;
+            }
+
+            if (left is Vector3Int leftSpatial && right is Vector2Int rightPlanar)
+            {
+                return leftSpatial.x == rightPlanar.x && leftSpatial.y == rightPlanar.y;
+            }
+
+            return false;
         }
 
         private static object GetBoxedPropertyValue(SerializedProperty property, Type valueType)
@@ -2221,6 +2280,11 @@ namespace WallstopStudios.UnityHelpers.Editor.CustomDrawers
             )
             {
                 return WValueDropDownDrawer.ResolveSelectedIndex(property, valueType, options);
+            }
+
+            public static bool MatchesAuthoredOption(object serializedValue, object option)
+            {
+                return WValueDropDownDrawer.MatchesAuthoredOption(serializedValue, option);
             }
 
             public static string FormatOptionCached(object option)

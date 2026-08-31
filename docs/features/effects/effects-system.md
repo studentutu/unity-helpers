@@ -944,6 +944,10 @@ public sealed class PlayerHealth : AttributesComponent
   - `Ignore` rejects duplicate applications.
 - Use `stackGroup = CustomKey` with a shared `stackGroupKey` when different assets should share a stack identity.
 - Inspect active stacks with `EffectHandler.GetEffectStackCount(effect)` or tag counts for debugging and UI.
+- An `OnEffectRemoved` subscriber that re-applies the same effect can leave a `Stack` eviction no
+  smaller than it started. `ApplyEffect` then returns `null` and logs a warning rather than
+  registering a handle past `maximumStacks`, so a `Stack` application is one of the two cases where
+  a non-instant effect answers `null`.
 
 ### 6) Shared vs. Instanced Cosmetics
 
@@ -963,6 +967,50 @@ public sealed class PlayerHealth : AttributesComponent
 - The system clones behaviours on application and calls `OnApply`, `OnTick` (each frame), `OnPeriodicTick` (after periodic payloads fire), and `OnRemove`.
 - Behaviours are ideal for integrating bespoke systems (e.g., camera shakes, AI hooks, quest tracking) while keeping designer-authored effects data-driven.
 - Keep behaviours stateless or store per-handle state on the cloned instance; clean up in `OnRemove`.
+
+### Removal Is Two-Phase
+
+Removing an effect happens in two steps, and callbacks only ever run in the second.
+
+1. **Detach.** The handle leaves every index the handler keeps -- active effects, stack group,
+   expiration, periodic schedule, behaviours and cosmetics -- before a single line of your code runs.
+2. **Notify and release.** Attribute modifications are removed, then tags, then cosmetics, then
+   `OnEffectRemoved`, then `EffectBehavior.OnRemove` on each cloned behaviour.
+
+What that buys you:
+
+- **Queries tell the truth from inside teardown.** `IsEffectActive`, `GetEffectStackCount` and
+  `GetActiveEffects` all report the handle as gone by the time your first callback runs.
+- **Removing twice is a no-op**, and so is removing a handle that was never applied. A callback that
+  calls `RemoveEffect` on its own handle -- directly, or through `RemoveAllEffects` -- returns
+  immediately instead of recursing.
+- **Re-applying during teardown gives you a new, independent handle.** The old one stays removed,
+  and `RemoveAllEffects` leaves the new effect active rather than silently forgetting it.
+- **Self-removal stops the rest of the pass.** A behaviour that removes its own handle from `OnTick`
+  or `OnPeriodicTick` gets no further tick callbacks for that handle this frame, and neither do the
+  other behaviours cloned alongside it.
+- **A callback that throws still leaves the handler consistent.** The remaining phases run, every
+  behaviour clone and cosmetic instance is destroyed, and the first exception is rethrown afterwards.
+  The same holds while applying: if a callback throws during `ApplyEffect`, the partial application
+  is unwound before the exception reaches you.
+- **One throwing subscriber does not strand its siblings.** Removal isolates per unit of work: per
+  `AttributesComponent`, per attribute modification, per tag, per cosmetic component and per
+  behaviour. Every modification comes off and every tag's count drops even when the first
+  notification throws, because the handle has already left every index and nothing could remove them
+  on a retry. Application and ticking are the other way round -- the first exception abandons the
+  rest of that pass, because an application unwinds to nothing and a tick runs again next frame.
+
+```csharp
+public override void OnPeriodicTick(EffectBehaviorContext context, PeriodicEffectTickContext tick)
+{
+    if (3 <= tick.executedTicks)
+    {
+        // Safe from inside the callback. This behaviour and its siblings receive OnRemove before
+        // control returns here, and no further ticks are delivered for this handle.
+        context.handler.RemoveEffect(context.handle);
+    }
+}
+```
 
 ## Best Practices
 
@@ -1319,6 +1367,10 @@ Q: Do modifications stack across multiple effects?
 Q: How do I remove just one instance of an effect?
 
 - Keep the `EffectHandle` returned from `ApplyEffect` and pass it to `RemoveEffect(handle)`.
+
+Q: Can a callback remove or re-apply an effect while that effect is being removed?
+
+- Yes. See [Removal Is Two-Phase](#removal-is-two-phase) above. The handle is detached before any callback runs, so removing it again is a no-op, queries report it inactive, and re-applying produces a new independent handle.
 
 Q: Two systems apply the same tag. Who owns removal?
 

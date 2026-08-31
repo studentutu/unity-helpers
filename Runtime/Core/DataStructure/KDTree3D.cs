@@ -29,6 +29,10 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
     /// minimum node-size enforcement, and tie-handling on split planes), KdTree3D (balanced and unbalanced)
     /// may return different edge-case results compared to OctTree3D for identical inputs/queries—especially for
     /// points lying exactly on query boundaries or split planes. See docs/features/spatial/spatial-tree-semantics.md for details.</para>
+    /// <para><b>A null destination throws <see cref="System.ArgumentNullException"/>.</b> That is a
+    /// bug in the calling code rather than data the caller was handed, and the alternative is a bare
+    /// <see cref="System.NullReferenceException"/> raised from inside the traversal, naming nothing.
+    /// Do not "fix" it into a silent return.</para>
     /// </remarks>
     [Serializable]
     public sealed class KdTree3D<T> : ISpatialTree3D<T>
@@ -538,6 +542,16 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
             return dx * dx + dy * dy + dz * dz;
         }
 
+        /// <summary>
+        /// Finds all elements within distance <paramref name="range"/> of <paramref name="position"/>.
+        /// </summary>
+        /// <param name="position">Query center. A non-finite center returns no results.</param>
+        /// <param name="range">Query radius. Zero returns only exact matches; a negative or NaN
+        /// radius returns nothing.</param>
+        /// <param name="elementsInRange">Destination list, cleared exactly once before use.</param>
+        /// <param name="minimumRange">Optional inner exclusion radius.</param>
+        /// <returns>The destination list, for chaining. Results are a multiset.</returns>
+        /// <exception cref="ArgumentNullException">Thrown when <paramref name="elementsInRange"/> is null.</exception>
         public List<T> GetElementsInRange(
             Vector3 position,
             float range,
@@ -545,9 +559,19 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
             float minimumRange = 0
         )
         {
+            if (elementsInRange == null)
+            {
+                throw new ArgumentNullException(nameof(elementsInRange));
+            }
+
             elementsInRange.Clear();
             // Allow zero range to return only exact matches (distance == 0)
-            if (range < 0f || _head._count <= 0)
+            if (
+                float.IsNaN(range)
+                || range < 0f
+                || _head._count <= 0
+                || !SpatialQueryMath.IsFinite(position)
+            )
             {
                 return elementsInRange;
             }
@@ -675,9 +699,27 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
             return elementsInRange;
         }
 
+        /// <summary>
+        /// Finds all elements whose positions lie within the specified bounds.
+        /// </summary>
+        /// <param name="bounds">Axis-aligned query bounds, max face inclusive. A box with a NaN
+        /// edge returns nothing.</param>
+        /// <param name="elementsInBounds">Destination list, cleared exactly once before use.</param>
+        /// <returns>The destination list, for chaining. Results are a multiset.</returns>
+        /// <exception cref="ArgumentNullException">Thrown when <paramref name="elementsInBounds"/> is null.</exception>
         public List<T> GetElementsInBounds(Bounds bounds, List<T> elementsInBounds)
         {
+            if (elementsInBounds == null)
+            {
+                throw new ArgumentNullException(nameof(elementsInBounds));
+            }
+
             elementsInBounds.Clear();
+            if (SpatialQueryMath.IsInvalidQueryBounds(bounds))
+            {
+                return elementsInBounds;
+            }
+
             if (_head._count <= 0)
             {
                 return elementsInBounds;
@@ -744,15 +786,39 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
             return elementsInBounds;
         }
 
+        /// <summary>
+        /// Returns an approximate set of the nearest <paramref name="count"/> neighbors to <paramref name="position"/>.
+        /// </summary>
+        /// <param name="position">Query center. A non-finite center returns no results.</param>
+        /// <param name="count">How many neighbors to return. Zero or fewer returns nothing.</param>
+        /// <param name="nearestNeighbors">Destination list, cleared exactly once before use.</param>
+        /// <returns>The destination list, for chaining.</returns>
+        /// <remarks>
+        /// <para>Returns exactly <c>min(count, elementCount)</c> entries. Equal-valued elements stay
+        /// distinct: identity is the element's insertion index, not its value. What comes back is
+        /// ordered by ascending distance and then by ascending insertion index.</para>
+        /// <para><b>Which</b> equidistant elements come back is a separate question, and it is not
+        /// specified. This tree stages every entry the descent reaches and then sorts, so among
+        /// equidistant elements the lowest insertion indices survive the trim -- but the descent
+        /// stops as soon as it holds enough candidates, so it can miss a nearer element in a leaf it
+        /// never opened. The best-first trees (<see cref="OctTree3D{T}"/>, <see cref="RTree3D{T}"/>) resolve the same tie the other way, by whichever
+        /// element the traversal reached first.</para>
+        /// </remarks>
+        /// <exception cref="ArgumentNullException">Thrown when <paramref name="nearestNeighbors"/> is null.</exception>
         public List<T> GetApproximateNearestNeighbors(
             Vector3 position,
             int count,
             List<T> nearestNeighbors
         )
         {
+            if (nearestNeighbors == null)
+            {
+                throw new ArgumentNullException(nameof(nearestNeighbors));
+            }
+
             nearestNeighbors.Clear();
 
-            if (count <= 0 || _head._count == 0)
+            if (count <= 0 || _head._count == 0 || !SpatialQueryMath.IsFinite(position))
             {
                 return nearestNeighbors;
             }
@@ -760,8 +826,8 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
             using PooledResource<Stack<KdTreeNode>> nodeBufferResource =
                 Buffers<KdTreeNode>.Stack.Get(out Stack<KdTreeNode> nodeBuffer);
             nodeBuffer.Push(_head);
-            using PooledResource<HashSet<T>> nearestNeighborBufferResource = Buffers<T>.HashSet.Get(
-                out HashSet<T> nearestNeighborBuffer
+            using PooledResource<HashSet<int>> stagedIndicesResource = Buffers<int>.HashSet.Get(
+                out HashSet<int> stagedIndices
             );
             using PooledResource<List<Neighbor>> neighborCandidatesResource =
                 Buffers<Neighbor>.List.Get(out List<Neighbor> neighborCandidates);
@@ -836,9 +902,7 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
                 }
             }
 
-            while (
-                nearestNeighborBuffer.Count < count && nodeBuffer.TryPop(out KdTreeNode selected)
-            )
+            while (neighborCandidates.Count < count && nodeBuffer.TryPop(out KdTreeNode selected))
             {
                 if (selected is null || selected._count <= 0)
                 {
@@ -850,8 +914,11 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
                 for (int i = startIndex; i < endIndex; ++i)
                 {
                     int elementIndex = indices[i];
-                    T value = values[elementIndex];
-                    if (!nearestNeighborBuffer.Add(value))
+                    /*
+                        Dedup on the entry index, never the value. A popped node can be an ancestor
+                        of one already drained, but two equal values are still two entries.
+                    */
+                    if (!stagedIndices.Add(elementIndex))
                     {
                         continue;
                     }
@@ -866,8 +933,8 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
                 neighborCandidates.Sort(NeighborComparer.Instance);
             }
 
-            nearestNeighbors.Clear();
-            for (int i = 0; i < neighborCandidates.Count && i < count; ++i)
+            int resultCount = Math.Min(count, neighborCandidates.Count);
+            for (int i = 0; i < resultCount; ++i)
             {
                 nearestNeighbors.Add(values[neighborCandidates[i].index]);
             }
@@ -881,7 +948,8 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
 
             public int Compare(Neighbor x, Neighbor y)
             {
-                return x.sqrDistance.CompareTo(y.sqrDistance);
+                int byDistance = x.sqrDistance.CompareTo(y.sqrDistance);
+                return byDistance == 0 ? x.index.CompareTo(y.index) : byDistance;
             }
         }
 

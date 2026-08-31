@@ -41,7 +41,8 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
     [WProtoContract]
     public partial struct SerializableValueTuple<T1, T2>
         : IEquatable<SerializableValueTuple<T1, T2>>,
-            IEquatable<ValueTuple<T1, T2>>
+            IEquatable<ValueTuple<T1, T2>>,
+            IUnderlyingValueProvider
     {
         /// <summary>The first component.</summary>
         [ProtoMember(1, IsRequired = true)]
@@ -121,15 +122,23 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
                 && EqualityComparer<T2>.Default.Equals(Item2, other.Item2);
         }
 
-        /// <inheritdoc/>
+        /// <summary>
+        /// Determines whether this tuple equals another boxed
+        /// <see cref="SerializableValueTuple{T1, T2}"/>. A boxed <see cref="ValueTuple{T1, T2}"/> is
+        /// not accepted: it answers <c>false</c> for this type in return and hashes differently.
+        /// Compare against one through <see cref="Equals(ValueTuple{T1, T2})"/>.
+        /// </summary>
+        /// <param name="obj">The candidate value.</param>
+        /// <returns><c>true</c> when <paramref name="obj"/> is a serializable tuple with equal components.</returns>
         public override bool Equals(object obj)
         {
-            if (obj is SerializableValueTuple<T1, T2> serializable)
-            {
-                return Equals(serializable);
-            }
+            return obj is SerializableValueTuple<T1, T2> serializable && Equals(serializable);
+        }
 
-            return obj is ValueTuple<T1, T2> tuple && Equals(tuple);
+        bool IUnderlyingValueProvider.TryGetUnderlyingValue(out object value)
+        {
+            value = new ValueTuple<T1, T2>(Item1, Item2);
+            return true;
         }
 
         /// <inheritdoc/>
@@ -160,7 +169,8 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
     [WProtoContract]
     public partial struct SerializableValueTuple<T1, T2, T3>
         : IEquatable<SerializableValueTuple<T1, T2, T3>>,
-            IEquatable<ValueTuple<T1, T2, T3>>
+            IEquatable<ValueTuple<T1, T2, T3>>,
+            IUnderlyingValueProvider
     {
         /// <summary>The first component.</summary>
         [ProtoMember(1, IsRequired = true)]
@@ -255,15 +265,24 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure.Adapters
                 && EqualityComparer<T3>.Default.Equals(Item3, other.Item3);
         }
 
-        /// <inheritdoc/>
+        /// <summary>
+        /// Determines whether this tuple equals another boxed
+        /// <see cref="SerializableValueTuple{T1, T2, T3}"/>. A boxed
+        /// <see cref="ValueTuple{T1, T2, T3}"/> is not accepted: it answers <c>false</c> for this
+        /// type in return and hashes differently. Compare against one through
+        /// <see cref="Equals(ValueTuple{T1, T2, T3})"/>.
+        /// </summary>
+        /// <param name="obj">The candidate value.</param>
+        /// <returns><c>true</c> when <paramref name="obj"/> is a serializable tuple with equal components.</returns>
         public override bool Equals(object obj)
         {
-            if (obj is SerializableValueTuple<T1, T2, T3> serializable)
-            {
-                return Equals(serializable);
-            }
+            return obj is SerializableValueTuple<T1, T2, T3> serializable && Equals(serializable);
+        }
 
-            return obj is ValueTuple<T1, T2, T3> tuple && Equals(tuple);
+        bool IUnderlyingValueProvider.TryGetUnderlyingValue(out object value)
+        {
+            value = new ValueTuple<T1, T2, T3>(Item1, Item2, Item3);
+            return true;
         }
 
         /// <inheritdoc/>

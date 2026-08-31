@@ -91,31 +91,51 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
         }
 
         [Test]
-        public void EqualsVector2IntIgnoresZ()
+        public void HasSameXYIgnoresVector2IntZ()
         {
             FastVector3Int vector3 = new(3, 4, 100);
             Vector2Int vector2 = new(3, 4);
-            Assert.IsTrue(vector3.Equals(vector2));
+            Assert.IsTrue(vector3.HasSameXY(vector2));
         }
 
         [Test]
-        public void EqualsFastVector2IntIgnoresZ()
+        public void HasSameXYIgnoresFastVector2IntZ()
         {
             FastVector3Int vector3 = new(5, 6, 999);
             FastVector2Int vector2 = new(5, 6);
-            Assert.IsTrue(vector3.Equals(vector2));
+            Assert.IsTrue(vector3.HasSameXY(vector2));
         }
 
         [Test]
-        public void EqualsObjectHandlesMultipleTypes()
+        public void EqualsObjectAcceptsOnlyAnotherFastVector3Int()
         {
             FastVector3Int vector = new(1, 2, 3);
             Assert.IsTrue(vector.Equals((object)new FastVector3Int(1, 2, 3)));
-            Assert.IsTrue(vector.Equals((object)new Vector3Int(1, 2, 3)));
-            Assert.IsTrue(vector.Equals((object)new FastVector2Int(1, 2)));
-            Assert.IsTrue(vector.Equals((object)new Vector2Int(1, 2)));
+            Assert.IsFalse(vector.Equals((object)new Vector3Int(1, 2, 3)));
+            Assert.IsFalse(vector.Equals((object)new FastVector2Int(1, 2)));
+            Assert.IsFalse(vector.Equals((object)new Vector2Int(1, 2)));
             Assert.IsFalse(vector.Equals(null));
             Assert.IsFalse(vector.Equals("not a vector"));
+        }
+
+        [Test]
+        public void HasSameXYIsNotEqualityAcrossDimensions()
+        {
+            FastVector3Int deep = new(1, 2, 3);
+            FastVector2Int planar = new(1, 2);
+            FastVector3Int shallow = new(1, 2, 9);
+
+            Assert.IsTrue(deep.HasSameXY(planar));
+            Assert.IsTrue(shallow.HasSameXY(planar));
+
+            /*
+                Sharing X and Y is not equality: it is not transitive, and the two three-dimensional
+                vectors hash apart. Equals(object) refusing the planar vector is what keeps the
+                relation the boxed path exposes an equivalence.
+            */
+            Assert.IsFalse(deep.Equals(shallow));
+            Assert.IsFalse(deep.Equals((object)planar));
+            Assert.IsFalse(shallow.Equals((object)planar));
         }
 
         [Test]
@@ -154,13 +174,37 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
         }
 
         [Test]
-        public void CompareToObjectHandlesMultipleTypes()
+        public void CompareToObjectAgreesWithEqualsObject()
         {
             FastVector3Int vector = new(5, 5, 5);
+            object[] candidates =
+            {
+                new FastVector3Int(5, 5, 5),
+                new Vector3Int(5, 5, 5),
+                new FastVector2Int(5, 5),
+                new Vector2Int(5, 5),
+                "invalid",
+            };
+
+            /*
+                A CompareTo that answers 0 where Equals answers false breaks the ordering
+                Array.Sort(object[]) and every sorted collection assume, so the two accept exactly
+                the same types.
+            */
+            foreach (object candidate in candidates)
+            {
+                Assert.AreEqual(
+                    vector.Equals(candidate),
+                    vector.CompareTo(candidate) == 0,
+                    $"CompareTo and Equals disagree about {candidate.GetType().Name}"
+                );
+            }
+
             Assert.AreEqual(0, vector.CompareTo((object)new FastVector3Int(5, 5, 5)));
-            Assert.AreEqual(0, vector.CompareTo((object)new Vector3Int(5, 5, 5)));
-            Assert.Less(vector.CompareTo((object)new FastVector2Int(6, 0)), 0);
+            Assert.AreEqual(-1, vector.CompareTo((object)new Vector3Int(5, 5, 5)));
+            Assert.AreEqual(-1, vector.CompareTo((object)new FastVector2Int(5, 5)));
             Assert.AreEqual(-1, vector.CompareTo("invalid"));
+            Assert.AreEqual(1, vector.CompareTo(null));
         }
 
         [Test]

@@ -4,6 +4,7 @@
 namespace WallstopStudios.UnityHelpers.Tags
 {
     using System;
+    using System.Runtime.CompilerServices;
     using WallstopStudios.UnityHelpers.Core.Helper;
 
     /// <summary>
@@ -71,6 +72,13 @@ namespace WallstopStudios.UnityHelpers.Tags
         /// </summary>
         /// <param name="other">The other key to compare.</param>
         /// <returns><c>true</c> when both keys represent the same stack group; otherwise, <c>false</c>.</returns>
+        /// <remarks>
+        /// A group with no payload -- <see cref="EffectStackGroup.None"/>, which is what
+        /// <c>default(EffectStackKey)</c> carries -- is decided by the group alone. Answering
+        /// <c>false</c> there would leave a default key unequal to itself while
+        /// <see cref="GetHashCode"/> stayed put, so a dictionary handed one would collect copies it
+        /// could never resolve.
+        /// </remarks>
         public bool Equals(EffectStackKey other)
         {
             if (_group != other._group)
@@ -86,7 +94,7 @@ namespace WallstopStudios.UnityHelpers.Tags
                     other._customKey,
                     StringComparison.Ordinal
                 ),
-                _ => false,
+                _ => true,
             };
         }
 
@@ -103,12 +111,21 @@ namespace WallstopStudios.UnityHelpers.Tags
         /// <summary>
         /// Generates a hash code consistent with <see cref="Equals(EffectStackKey)"/>.
         /// </summary>
+        /// <remarks>
+        /// A reference key hashes the managed identity of the effect, because that is what its
+        /// equality compares. Hashing the effect through Unity's own <c>GetHashCode</c> would move
+        /// the key the moment the asset was destroyed, stranding every handle already bucketed
+        /// under it.
+        /// </remarks>
         /// <returns>A hash code for use in dictionaries and sets.</returns>
         public override int GetHashCode()
         {
             return _group switch
             {
-                EffectStackGroup.Reference => Objects.HashCode(_group, _effect),
+                EffectStackGroup.Reference => Objects.HashCode(
+                    _group,
+                    RuntimeHelpers.GetHashCode(_effect)
+                ),
                 EffectStackGroup.CustomKey => Objects.HashCode(
                     _group,
                     _customKey != null ? StringComparer.Ordinal.GetHashCode(_customKey) : 0

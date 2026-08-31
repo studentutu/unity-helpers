@@ -666,15 +666,78 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
         }
 
         [Test]
-        public void EqualsHandlesNearlyIdenticalCircles()
+        public void EqualsIsExactSoNearlyIdenticalCirclesDiffer()
         {
             Circle circle1 = new(new Vector2(5f, 10f), 3f);
-            // Mathf.Approximately uses Mathf.Epsilon * 8 and considers magnitude
-            // For values around 3.0, the tolerance is approximately 1e-5
             Circle circle2 = new(new Vector2(5f, 10f), 3f + 1e-6f);
 
-            // Should use Mathf.Approximately for radius comparison
-            Assert.IsTrue(circle1.Equals(circle2));
+            /*
+                These radii used to compare equal through Mathf.Approximately while hashing on their
+                exact bits, so the pair landed in different buckets of the same set. Equality is now
+                exact, and a tolerance is something the caller states.
+            */
+            Assert.IsFalse(circle1.Equals(circle2));
+            Assert.IsTrue(circle1 != circle2);
+            Assert.IsTrue(circle1.ApproximatelyEquals(circle2, 1e-5f));
+        }
+
+        [Test]
+        public void ApproximatelyEqualsComparesCentresAndRadius()
+        {
+            Circle circle = new(new Vector2(5f, 10f), 3f);
+
+            Assert.IsTrue(
+                circle.ApproximatelyEquals(new Circle(new Vector2(5.001f, 10f), 3f), 0.01f)
+            );
+            Assert.IsFalse(
+                circle.ApproximatelyEquals(new Circle(new Vector2(5.1f, 10f), 3f), 0.01f)
+            );
+            Assert.IsFalse(
+                circle.ApproximatelyEquals(new Circle(new Vector2(5f, 10f), 3.1f), 0.01f)
+            );
+        }
+
+        [Test]
+        [TestCase(-1f, TestName = "Tolerance.Negative.ReturnsFalse")]
+        [TestCase(float.NaN, TestName = "Tolerance.NotANumber.ReturnsFalse")]
+        [TestCase(float.PositiveInfinity, TestName = "Tolerance.Infinite.ReturnsFalse")]
+        public void ApproximatelyEqualsRefusesAnInvalidTolerance(float tolerance)
+        {
+            Circle circle = new(new Vector2(5f, 10f), 3f);
+
+            Assert.IsFalse(circle.ApproximatelyEquals(circle, tolerance));
+        }
+
+        [Test]
+        public void ApproximatelyEqualsAdmitsNothingBeyondTheToleranceAtALargeMagnitude()
+        {
+            Circle circle = new(new Vector2(1_000_000f, 10f), 3f);
+            Circle nudged = new(new Vector2(1_000_000.5f, 10f), 3f);
+
+            /*
+                WallMath.Approximately admits an extra 1e-6 of the larger magnitude, which is one
+                whole unit out here -- so a caller asking for no tolerance at all used to get half a
+                unit of it. The documented tolerance is the whole of the permitted difference.
+            */
+            Assert.IsFalse(circle.ApproximatelyEquals(nudged, 0f));
+            Assert.IsFalse(circle.ApproximatelyEquals(nudged, 0.25f));
+            Assert.IsTrue(circle.ApproximatelyEquals(nudged, 0.5f));
+        }
+
+        [Test]
+        public void ApproximatelyEqualsComparesANonFiniteComponentExactly()
+        {
+            Circle infinite = new(new Vector2(5f, 10f), float.PositiveInfinity);
+            Circle notANumber = new(new Vector2(5f, 10f), float.NaN);
+            Circle negativelyInfinite = new(new Vector2(5f, 10f), float.NegativeInfinity);
+
+            Assert.IsTrue(
+                infinite.ApproximatelyEquals(infinite, 1f),
+                "A circle must be approximately equal to itself whatever it holds"
+            );
+            Assert.IsTrue(notANumber.ApproximatelyEquals(notANumber, 1f));
+            Assert.IsFalse(infinite.ApproximatelyEquals(negativelyInfinite, 1f));
+            Assert.IsFalse(infinite.ApproximatelyEquals(new Circle(new Vector2(5f, 10f), 3f), 1f));
         }
 
         [Test]

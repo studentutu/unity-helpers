@@ -437,15 +437,41 @@ namespace WallstopStudios.UnityHelpers.Core.Math
 
         /// <summary>
         /// Checks if this line is equal to another line.
-        /// Two lines are equal if they have the same endpoints (in the same order).
+        /// Two lines are equal when their endpoints match exactly, in the same order. Unity's
+        /// <c>Vector3</c> <c>==</c> is an approximate comparison and its hash is not, so exact
+        /// comparison is what keeps equal lines in the same hash bucket.
         /// </summary>
         public bool Equals(Line3D other)
         {
-            return from == other.from && to == other.to;
+            return from.Equals(other.from) && to.Equals(other.to);
         }
 
         /// <summary>
-        /// Checks if this line is equal to another object.
+        /// Checks whether both endpoints sit within <paramref name="tolerance"/> of another line's,
+        /// in the same order.
+        /// </summary>
+        /// <param name="other">The other line to compare.</param>
+        /// <param name="tolerance">Maximum permitted per-component difference, and the whole of it: nothing relative to the magnitudes is added. Must be finite and non-negative.</param>
+        /// <returns>
+        /// True when both endpoints agree within <paramref name="tolerance"/>; false when
+        /// <paramref name="tolerance"/> is negative, infinite, or not a number. A non-finite
+        /// coordinate compares exactly, so two identical infinite endpoints are approximately equal
+        /// and this stays reflexive for every line.
+        /// </returns>
+        public bool ApproximatelyEquals(Line3D other, float tolerance)
+        {
+            if (float.IsNaN(tolerance) || float.IsInfinity(tolerance) || tolerance < 0f)
+            {
+                return false;
+            }
+
+            return WallMath.WithinTolerance(from, other.from, tolerance)
+                && WallMath.WithinTolerance(to, other.to, tolerance);
+        }
+
+        /// <summary>
+        /// Checks if this line is equal to another object. Only another <see cref="Line3D"/> can be
+        /// equal to a line.
         /// </summary>
         public override bool Equals(object obj)
         {
@@ -453,7 +479,8 @@ namespace WallstopStudios.UnityHelpers.Core.Math
         }
 
         /// <summary>
-        /// Gets the hash code for this line.
+        /// Gets the hash code for this line, derived from exactly the members
+        /// <see cref="Equals(Line3D)"/> compares.
         /// </summary>
         public override int GetHashCode()
         {

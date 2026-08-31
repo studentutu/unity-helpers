@@ -403,14 +403,69 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
         }
 
         [Test]
-        public void EqualsHandlesNearlyIdenticalSpheres()
+        public void EqualsIsExactSoNearlyIdenticalSpheresDiffer()
         {
             Sphere sphere1 = new(new Vector3(5f, 10f, 15f), 3f);
-            // Mathf.Approximately uses very tight tolerance
             Sphere sphere2 = new(new Vector3(5f, 10f, 15f), 3f + 1e-6f);
 
-            // Should use Mathf.Approximately for radius comparison
-            Assert.IsTrue(sphere1.Equals(sphere2));
+            /*
+                These radii used to compare equal through Mathf.Approximately while hashing on their
+                exact bits, so the pair landed in different buckets of the same set.
+            */
+            Assert.IsFalse(sphere1.Equals(sphere2));
+            Assert.IsTrue(sphere1 != sphere2);
+            Assert.IsTrue(sphere1.ApproximatelyEquals(sphere2, 1e-5f));
+        }
+
+        [Test]
+        public void ApproximatelyEqualsComparesCentresAndRadius()
+        {
+            Sphere sphere = new(new Vector3(5f, 10f, 15f), 3f);
+
+            Assert.IsTrue(
+                sphere.ApproximatelyEquals(new Sphere(new Vector3(5f, 10f, 15.001f), 3f), 0.01f)
+            );
+            Assert.IsFalse(
+                sphere.ApproximatelyEquals(new Sphere(new Vector3(5f, 10f, 15.1f), 3f), 0.01f)
+            );
+            Assert.IsFalse(
+                sphere.ApproximatelyEquals(new Sphere(new Vector3(5f, 10f, 15f), 3.1f), 0.01f)
+            );
+        }
+
+        [Test]
+        [TestCase(-1f, TestName = "Tolerance.Negative.ReturnsFalse")]
+        [TestCase(float.NaN, TestName = "Tolerance.NotANumber.ReturnsFalse")]
+        [TestCase(float.PositiveInfinity, TestName = "Tolerance.Infinite.ReturnsFalse")]
+        public void ApproximatelyEqualsRefusesAnInvalidTolerance(float tolerance)
+        {
+            Sphere sphere = new(new Vector3(5f, 10f, 15f), 3f);
+
+            Assert.IsFalse(sphere.ApproximatelyEquals(sphere, tolerance));
+        }
+
+        [Test]
+        public void ApproximatelyEqualsAdmitsNothingBeyondTheToleranceAtALargeMagnitude()
+        {
+            Sphere sphere = new(new Vector3(5f, 10f, 1_000_000f), 3f);
+            Sphere nudged = new(new Vector3(5f, 10f, 1_000_000.5f), 3f);
+
+            Assert.IsFalse(sphere.ApproximatelyEquals(nudged, 0f));
+            Assert.IsFalse(sphere.ApproximatelyEquals(nudged, 0.25f));
+            Assert.IsTrue(sphere.ApproximatelyEquals(nudged, 0.5f));
+        }
+
+        [Test]
+        public void ApproximatelyEqualsComparesANonFiniteComponentExactly()
+        {
+            Sphere infinite = new(new Vector3(5f, 10f, 15f), float.PositiveInfinity);
+            Sphere negativelyInfinite = new(new Vector3(5f, 10f, 15f), float.NegativeInfinity);
+
+            Assert.IsTrue(
+                infinite.ApproximatelyEquals(infinite, 1f),
+                "A sphere must be approximately equal to itself whatever it holds"
+            );
+            Assert.IsFalse(infinite.ApproximatelyEquals(negativelyInfinite, 1f));
         }
 
         [Test]

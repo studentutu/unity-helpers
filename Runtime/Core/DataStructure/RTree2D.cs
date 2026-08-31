@@ -28,6 +28,10 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
     /// Cons: Immutable; rebuild when element bounds change.
     /// Semantics: RTree2D indexes rectangles (AABBs) rather than points; as such its query results intentionally
     /// differ from point-based structures like QuadTree2D/KdTree2D for the same scene when elements have size.
+    /// <para><b>A null destination throws <see cref="System.ArgumentNullException"/>.</b> That is a
+    /// bug in the calling code rather than data the caller was handed, and the alternative is a bare
+    /// <see cref="System.NullReferenceException"/> raised from inside the traversal, naming nothing.
+    /// Do not "fix" it into a silent return.</para>
     /// </remarks>
     [Serializable]
     public sealed class RTree2D<T> : ISpatialTree2D<T>
@@ -92,6 +96,7 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
                 data._value = element;
                 data._bounds = elementBounds;
                 data._center = elementBounds.center;
+                data._insertionIndex = i;
                 elementData[i] = data;
                 Vector3 min = elementBounds.min;
                 Vector3 max = elementBounds.max;
@@ -156,10 +161,9 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
 
             if (0 < elementCount)
             {
-                ref ElementData elementRef = ref elementData[0];
                 for (int i = 0; i < elementCount; ++i)
                 {
-                    ref ElementData data = ref Unsafe.Add(ref elementRef, i);
+                    ref ElementData data = ref elementData[i];
                     Vector2 center = data._center;
                     float normalizedX = (center.x - minX) * inverseRangeX;
                     float normalizedY = (center.y - minY) * inverseRangeY;
@@ -260,11 +264,15 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
         /// <summary>
         /// Finds all elements within distance <paramref name="range"/> of <paramref name="position"/> (circle query).
         /// </summary>
-        /// <param name="position">Query center.</param>
-        /// <param name="range">Query radius.</param>
-        /// <param name="elementsInRange">Destination list cleared before use.</param>
-        /// <param name="minimumRange">Optional inner exclusion radius.</param>
+        /// <param name="position">Query center. A non-finite center returns no results.</param>
+        /// <param name="range">Query radius, measured to the nearest point of an element's box, so
+        /// zero returns exactly the elements whose box the query point touches. A negative or NaN
+        /// radius returns nothing. The comparison is exact: no epsilon widens the circle, because an
+        /// absolute epsilon is most of a zero-radius query and nothing at all at world scale.</param>
+        /// <param name="elementsInRange">Destination list, cleared exactly once before use.</param>
+        /// <param name="minimumRange">Optional inner exclusion radius, compared the same way.</param>
         /// <returns>The destination list, for chaining.</returns>
+        /// <exception cref="ArgumentNullException">Thrown when <paramref name="elementsInRange"/> is null.</exception>
         public List<T> GetElementsInRange(
             Vector2 position,
             float range,
@@ -272,8 +280,13 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
             float minimumRange = 0f
         )
         {
+            if (elementsInRange == null)
+            {
+                throw new ArgumentNullException(nameof(elementsInRange));
+            }
+
             elementsInRange.Clear();
-            if (range <= 0f)
+            if (float.IsNaN(range) || range < 0f || !SpatialQueryMath.IsFinite(position))
             {
                 return elementsInRange;
             }
@@ -297,24 +310,20 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
                 return elementsInRange;
             }
 
-            Circle area = new(position, range);
+            float rangeSquared = range * range;
             bool hasMinimumRange = 0f < minimumRange;
-            Circle minimumArea = default;
-            if (hasMinimumRange)
-            {
-                minimumArea = new Circle(position, minimumRange);
-            }
+            float minimumRangeSquared = minimumRange * minimumRange;
 
             foreach (int index in candidateIndices)
             {
                 ElementData elementData = _elementData[index];
-                Bounds elementBoundary = elementData._bounds;
-                if (!area.Intersects(elementBoundary))
+                float distanceSquared = NodeDistanceSquared(elementData._bounds, position);
+                if (rangeSquared < distanceSquared)
                 {
                     continue;
                 }
 
-                if (hasMinimumRange && minimumArea.Intersects(elementBoundary))
+                if (hasMinimumRange && distanceSquared <= minimumRangeSquared)
                 {
                     continue;
                 }
@@ -328,10 +337,23 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
         /// <summary>
         /// Finds all elements whose bounds intersect the specified axis-aligned box.
         /// </summary>
+        /// <param name="bounds">Axis-aligned query bounds. A box with a NaN edge returns nothing.</param>
+        /// <param name="elementsInBounds">Destination list, cleared exactly once before use.</param>
         /// <returns>The destination list, for chaining.</returns>
+        /// <exception cref="ArgumentNullException">Thrown when <paramref name="elementsInBounds"/> is null.</exception>
         public List<T> GetElementsInBounds(Bounds bounds, List<T> elementsInBounds)
         {
+            if (elementsInBounds == null)
+            {
+                throw new ArgumentNullException(nameof(elementsInBounds));
+            }
+
             elementsInBounds.Clear();
+            if (SpatialQueryMath.IsInvalidQueryBounds(bounds))
+            {
+                return elementsInBounds;
+            }
+
             if (!bounds.FastIntersects2D(_bounds))
             {
                 return elementsInBounds;
@@ -352,167 +374,256 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
         /// <summary>
         /// Returns an approximate set of the nearest <paramref name="count"/> neighbors to <paramref name="position"/>.
         /// </summary>
+        /// <param name="position">Query center. A non-finite center returns no results.</param>
+        /// <param name="count">How many neighbors to return. Zero or fewer returns nothing.</param>
+        /// <param name="nearestNeighbors">Destination list, cleared exactly once before use.</param>
+        /// <returns>The destination list, for chaining.</returns>
         /// <remarks>
-        /// Heavily adapted from ANN strategies for speed; suitable for gameplay proximity needs.
+        /// <para>Returns exactly <c>min(count, elementCount)</c> entries. Equal-valued elements stay
+        /// distinct: identity is the element's insertion index, not its value. What comes back is
+        /// ordered by ascending distance and then by ascending insertion index.</para>
+        /// <para><b>Which</b> equidistant elements come back is a separate question, and it is not
+        /// specified. This tree admits a candidate only when it is strictly closer than the current
+        /// worst, so among equidistant elements the one the traversal reaches first wins -- for an
+        /// R-tree that is Morton-curve order, which no caller should depend on. The
+        /// collect-then-sort trees (<see cref="KdTree2D{T}"/>, <see cref="QuadTree2D{T}"/>) resolve
+        /// the same tie the other way, by lowest insertion index among whatever the descent
+        /// visited.</para>
+        /// <para><b>Cost:</b> a best-first descent, keyed on each node's distance to
+        /// <paramref name="position"/>, that stops once <paramref name="count"/> candidates are held
+        /// and the nearest unexpanded node is no closer than the worst of them. That makes the
+        /// answer exact for the elements it indexes, and it makes a <paramref name="count"/> near
+        /// the element count visit every leaf -- the greedy single-path descent this replaced was
+        /// O(depth) and could miss the true nearest entirely.</para>
         /// </remarks>
+        /// <exception cref="ArgumentNullException">Thrown when <paramref name="nearestNeighbors"/> is null.</exception>
         public List<T> GetApproximateNearestNeighbors(
             Vector2 position,
             int count,
             List<T> nearestNeighbors
         )
         {
+            if (nearestNeighbors == null)
+            {
+                throw new ArgumentNullException(nameof(nearestNeighbors));
+            }
+
             nearestNeighbors.Clear();
 
-            if (count <= 0 || _head._count == 0)
+            if (count <= 0 || _head._count == 0 || !SpatialQueryMath.IsFinite(position))
             {
                 return nearestNeighbors;
             }
 
-            using PooledResource<Stack<RTreeNode>> nodeBufferResource =
-                Buffers<RTreeNode>.Stack.Get(out Stack<RTreeNode> stack);
-            stack.Push(_head);
+            using PooledResource<List<NodeDistance>> nodeHeapResource =
+                Buffers<NodeDistance>.List.Get(out List<NodeDistance> nodeHeap);
+            PushNode(nodeHeap, _head, position);
 
-            using PooledResource<List<RTreeNode>> childrenBufferResource =
-                Buffers<RTreeNode>.List.Get(out List<RTreeNode> childrenCopy);
-            using PooledResource<HashSet<T>> nearestNeighborBufferResource = Buffers<T>.HashSet.Get(
-                out HashSet<T> nearestNeighborsSet
-            );
-            using PooledResource<List<int>> nearestIndexBufferResource = Buffers<int>.List.Get(
-                out List<int> nearestIndices
-            );
+            using PooledResource<List<Candidate>> candidateBufferResource =
+                Buffers<Candidate>.List.Get(out List<Candidate> candidates);
 
             ElementData[] elementData = _elementData;
+            float currentWorstDistanceSquared = float.PositiveInfinity;
 
-            RTreeNode current = _head;
-
-            while (!current.isTerminal)
+            while (0 < nodeHeap.Count)
             {
-                childrenCopy.Clear();
-                RTreeNode[] childNodes = current._children;
-                for (int i = 0; i < childNodes.Length; ++i)
+                NodeDistance best = PopNode(nodeHeap);
+
+                if (
+                    count <= candidates.Count
+                    && currentWorstDistanceSquared <= best._distanceSquared
+                )
                 {
-                    RTreeNode child = childNodes[i];
-                    if (child is not null && 0 < child._count)
+                    break;
+                }
+
+                RTreeNode currentNode = best._node;
+                if (!currentNode.isTerminal)
+                {
+                    RTreeNode[] childNodes = currentNode._children;
+                    for (int i = 0; i < childNodes.Length; ++i)
                     {
-                        childrenCopy.Add(child);
+                        RTreeNode child = childNodes[i];
+                        if (child is not null && 0 < child._count)
+                        {
+                            PushNode(nodeHeap, child, position);
+                        }
                     }
+
+                    continue;
                 }
 
-                if (childrenCopy.Count == 0)
-                {
-                    break;
-                }
-
-                SortChildrenByDistance(childrenCopy, position);
-                for (int i = childrenCopy.Count - 1; 0 <= i; --i)
-                {
-                    stack.Push(childrenCopy[i]);
-                }
-
-                current = childrenCopy[0];
-                if (current._count <= count)
-                {
-                    break;
-                }
-            }
-
-            while (nearestNeighborsSet.Count < count && stack.TryPop(out RTreeNode selected))
-            {
-                int startIndex = selected._startIndex;
-                int endIndex = startIndex + selected._count;
+                int startIndex = currentNode._startIndex;
+                int endIndex = startIndex + currentNode._count;
                 for (int i = startIndex; i < endIndex; ++i)
                 {
                     ElementData data = elementData[i];
-                    if (!nearestNeighborsSet.Add(data._value))
+                    float distanceSquared = (data._center - position).sqrMagnitude;
+
+                    if (candidates.Count < count)
+                    {
+                        candidates.Add(new Candidate(i, data._insertionIndex, distanceSquared));
+                        if (candidates.Count == count)
+                        {
+                            currentWorstDistanceSquared = FindWorstDistanceSquared(candidates);
+                        }
+
+                        continue;
+                    }
+
+                    if (currentWorstDistanceSquared <= distanceSquared)
                     {
                         continue;
                     }
 
-                    nearestIndices.Add(i);
-                    if (count <= nearestNeighborsSet.Count)
-                    {
-                        break;
-                    }
+                    int worstCandidateIndex = FindIndexOfWorstCandidate(candidates);
+                    candidates[worstCandidateIndex] = new Candidate(
+                        i,
+                        data._insertionIndex,
+                        distanceSquared
+                    );
+                    currentWorstDistanceSquared = FindWorstDistanceSquared(candidates);
                 }
             }
 
-            if (nearestIndices.Count == 0)
+            if (1 < candidates.Count)
             {
-                return nearestNeighbors;
+                candidates.Sort(CandidateComparer.Instance);
             }
 
-            if (count < nearestIndices.Count)
+            int resultCount = Math.Min(count, candidates.Count);
+            for (int i = 0; i < resultCount; ++i)
             {
-                SortIndicesByDistance(nearestIndices, elementData, position);
-                nearestIndices.RemoveRange(count, nearestIndices.Count - count);
-            }
-
-            foreach (int index in nearestIndices)
-            {
-                nearestNeighbors.Add(elementData[index]._value);
+                nearestNeighbors.Add(elementData[candidates[i].elementIndex]._value);
             }
 
             return nearestNeighbors;
         }
 
-        private static void SortChildrenByDistance(List<RTreeNode> nodes, Vector2 searchPosition)
+        private static void PushNode(List<NodeDistance> heap, RTreeNode node, Vector2 point)
         {
-            for (int i = 1; i < nodes.Count; ++i)
-            {
-                RTreeNode value = nodes[i];
-                float valueDistance = GetNodeSqrDistance(value, searchPosition);
-                int j = i - 1;
-                while (0 <= j)
-                {
-                    RTreeNode previous = nodes[j];
-                    if (GetNodeSqrDistance(previous, searchPosition) <= valueDistance)
-                    {
-                        break;
-                    }
+            NodeDistance entry = new(node, NodeDistanceSquared(node.boundary, point));
+            heap.Add(entry);
+            int index = heap.Count - 1;
 
-                    nodes[j + 1] = previous;
-                    --j;
+            while (0 < index)
+            {
+                int parent = (index - 1) >> 1;
+                NodeDistance parentEntry = heap[parent];
+                if (parentEntry._distanceSquared <= entry._distanceSquared)
+                {
+                    break;
                 }
 
-                nodes[j + 1] = value;
+                heap[index] = parentEntry;
+                index = parent;
             }
+
+            heap[index] = entry;
         }
 
-        private static float GetNodeSqrDistance(RTreeNode node, Vector2 position)
+        private static NodeDistance PopNode(List<NodeDistance> heap)
         {
-            return ((Vector2)node.boundary.center - position).sqrMagnitude;
-        }
+            int lastIndex = heap.Count - 1;
+            NodeDistance result = heap[0];
+            NodeDistance last = heap[lastIndex];
+            heap.RemoveAt(lastIndex);
 
-        private static void SortIndicesByDistance(
-            List<int> indices,
-            ElementData[] elements,
-            Vector2 position
-        )
-        {
-            for (int i = 1; i < indices.Count; ++i)
+            int index = 0;
+            int count = heap.Count;
+            while (true)
             {
-                int currentIndex = indices[i];
-                float currentDistance = GetElementSqrDistance(elements[currentIndex], position);
-                int j = i - 1;
-                while (0 <= j)
+                int left = (index << 1) + 1;
+                if (count <= left)
                 {
-                    int previousIndex = indices[j];
-                    if (GetElementSqrDistance(elements[previousIndex], position) <= currentDistance)
-                    {
-                        break;
-                    }
-
-                    indices[j + 1] = previousIndex;
-                    --j;
+                    break;
                 }
 
-                indices[j + 1] = currentIndex;
+                int right = left + 1;
+                int smallest =
+                    right < count && heap[right]._distanceSquared < heap[left]._distanceSquared
+                        ? right
+                        : left;
+
+                if (last._distanceSquared <= heap[smallest]._distanceSquared)
+                {
+                    break;
+                }
+
+                heap[index] = heap[smallest];
+                index = smallest;
             }
+
+            if (0 < count)
+            {
+                heap[index] = last;
+            }
+
+            return result;
         }
 
-        private static float GetElementSqrDistance(ElementData element, Vector2 position)
+        private static float NodeDistanceSquared(in Bounds boundary, Vector2 point)
         {
-            return (element._center - position).sqrMagnitude;
+            /*
+                One local copy: Unity's Bounds is not a readonly struct and exposes no fields, so
+                every property read through an `in` parameter would take its own defensive copy.
+            */
+            Bounds self = boundary;
+            Vector3 min = self.min;
+            Vector3 max = self.max;
+            float deltaX = 0f;
+            if (point.x < min.x)
+            {
+                deltaX = min.x - point.x;
+            }
+            else if (max.x < point.x)
+            {
+                deltaX = point.x - max.x;
+            }
+
+            float deltaY = 0f;
+            if (point.y < min.y)
+            {
+                deltaY = min.y - point.y;
+            }
+            else if (max.y < point.y)
+            {
+                deltaY = point.y - max.y;
+            }
+
+            return (deltaX * deltaX) + (deltaY * deltaY);
+        }
+
+        private static float FindWorstDistanceSquared(List<Candidate> candidates)
+        {
+            float worst = 0f;
+            for (int i = 0; i < candidates.Count; ++i)
+            {
+                float distance = candidates[i].distanceSquared;
+                if (worst < distance)
+                {
+                    worst = distance;
+                }
+            }
+
+            return worst;
+        }
+
+        private static int FindIndexOfWorstCandidate(List<Candidate> candidates)
+        {
+            int worstIndex = 0;
+            float worstDistanceSquared = candidates[0].distanceSquared;
+            for (int i = 1; i < candidates.Count; ++i)
+            {
+                float distanceSquared = candidates[i].distanceSquared;
+                if (worstDistanceSquared < distanceSquared)
+                {
+                    worstDistanceSquared = distanceSquared;
+                    worstIndex = i;
+                }
+            }
+
+            return worstIndex;
         }
 
         private static void RadixSort(ElementData[] elements, int length)
@@ -534,13 +645,17 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
             ElementData[] destination = scratch;
             bool dataInScratch = false;
 
+            /*
+                Bounds-checked indexing throughout: the destination is a pooled, over-sized array,
+                so an Unsafe.Add offset from element zero was bounded only by the prefix sum being
+                right.
+            */
             for (int shift = 0; shift < 64; shift += BitsPerPass)
             {
                 counts.Clear();
-                ref ElementData sourceRef = ref source[0];
                 for (int i = 0; i < length; ++i)
                 {
-                    ulong key = Unsafe.Add(ref sourceRef, i)._sortKey;
+                    ulong key = source[i]._sortKey;
                     counts[(int)((key >> shift) & (BucketCount - 1))]++;
                 }
 
@@ -552,12 +667,11 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
                     total += count;
                 }
 
-                ref ElementData destinationRef = ref destination[0];
                 for (int i = 0; i < length; ++i)
                 {
-                    ElementData value = Unsafe.Add(ref sourceRef, i);
+                    ElementData value = source[i];
                     int bucket = (int)((value._sortKey >> shift) & (BucketCount - 1));
-                    Unsafe.Add(ref destinationRef, counts[bucket]++) = value;
+                    destination[counts[bucket]++] = value;
                 }
 
                 (source, destination) = (destination, source);
@@ -660,6 +774,12 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
             internal Bounds _bounds;
             internal Vector2 _center;
             internal ulong _sortKey;
+
+            /*
+                Survives the Morton sort, so two equal values stay distinguishable and a distance
+                tie resolves the same way on every run.
+            */
+            internal int _insertionIndex;
         }
 
         [Serializable]
@@ -710,6 +830,43 @@ namespace WallstopStudios.UnityHelpers.Core.DataStructure
 
                 nodeBounds = EnsureMinimumBounds(nodeBounds);
                 return new RTreeNode(startIndex, endIndex - startIndex, nodeBounds, children);
+            }
+        }
+
+        private readonly struct NodeDistance
+        {
+            internal readonly RTreeNode _node;
+            internal readonly float _distanceSquared;
+
+            internal NodeDistance(RTreeNode node, float distanceSquared)
+            {
+                _node = node;
+                _distanceSquared = distanceSquared;
+            }
+        }
+
+        private readonly struct Candidate
+        {
+            internal readonly int elementIndex;
+            internal readonly int insertionIndex;
+            internal readonly float distanceSquared;
+
+            internal Candidate(int elementIndex, int insertionIndex, float distanceSquared)
+            {
+                this.elementIndex = elementIndex;
+                this.insertionIndex = insertionIndex;
+                this.distanceSquared = distanceSquared;
+            }
+        }
+
+        private sealed class CandidateComparer : IComparer<Candidate>
+        {
+            internal static readonly CandidateComparer Instance = new();
+
+            public int Compare(Candidate x, Candidate y)
+            {
+                int byDistance = x.distanceSquared.CompareTo(y.distanceSquared);
+                return byDistance == 0 ? x.insertionIndex.CompareTo(y.insertionIndex) : byDistance;
             }
         }
     }

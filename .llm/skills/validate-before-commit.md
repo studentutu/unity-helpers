@@ -116,21 +116,19 @@ For detailed workflow patterns and more examples, see [formatting](./formatting.
 ### A new analyzer diagnostic needs a CLEAN typecheck, because the incremental one lies
 
 `npm run typecheck:tests` exited **0** on a tree the same command reported **four `WPROTO044`
-errors** on once `TestCheck/obj` was deleted (session 238). The `.cs` files had not changed, so
-MSBuild skipped the compile and the newly built analyzer never ran -- and a gate that looked at
-nothing prints what a pass prints. **Deleting `obj/` is not sufficient either**: session 239, with
-`obj/` gone and the edits on disk, a shared `VBCSCompiler` served a stale snapshot and reported
+errors** on once `TestCheck/obj` was deleted (session 238): the `.cs` files had not changed, MSBuild
+skipped the compile, and a gate that looked at nothing prints what a pass prints. Deleting `obj/` is
+not sufficient either -- session 239, a shared `VBCSCompiler` served a stale snapshot and reported
 diagnostics at pre-edit line numbers.
 
 ```bash
-rm -rf Generator~/*/obj Generator~/*/bin
-dotnet build -c Release -p:UseSharedCompilation=false \
-  "Generator~/WallstopStudios.UnityHelpers.TypeCheck/WallstopStudios.UnityHelpers.TypeCheck.csproj"
+npm run typecheck:unity:clean               # every tree
+npm run typecheck:unity:clean typecheck:tests   # or just one
 ```
 
-Do this whenever the change **adds or widens a diagnostic** -- the discriminator is whether an
-analyzer DLL is in the diff -- not on every run. Unity is not fooled, so this is a gap between the
-local gate and CI that costs a whole matrix run to find.
+It deletes every `Generator~/*/obj` and `bin` and exports `UseSharedCompilation=false`, which
+MSBuild reads as a global property. Several times slower, so reach for it only when an analyzer DLL
+is in the diff.
 
 ### Editor test fixtures
 
@@ -141,6 +139,20 @@ fixture reached the Unity matrix twice with `typecheck:tests` green both times.
 A `[WProtoContract]` fixture there has one trap: `WPROTO001` wants `partial` on the type **and
 every type enclosing it**, because the formatter is nested. A `[TestFixture]` cannot be partial, so
 put such fixtures at namespace scope.
+
+**A new `Runtime/` file that an existing `Runtime/` file depends on breaks a build no typecheck
+project runs.** `Proto.Generator.Tests` names its Runtime sources one by one rather than globbing,
+so an interface `SerializableValueTuple` implements compiled clean in all sixteen `typecheck:unity`
+legs and failed there with `CS0246` (session 240). When the diff adds a `Runtime/` file that
+something in that csproj references, run `dotnet test -c Release -p:ProtobufNetOracle=v3` there.
+
+**`WPROTO044` is Unity-only, and no check project can change that.** It reports a subclass whose
+base is in **another assembly**, and every check project flattens many asmdefs into ONE compilation,
+where "same assembly" is the _correct_ answer -- so narrowing the guard does not help. The rule is
+held cross-assembly in the generator's own suite instead, and a **generic** base is deliberately
+exempt forever. Full reasoning, the blocker for a split project, and the tests recording both
+decisions are in `EditorTestCheck`'s csproj header
+([#650](https://github.com/Ambiguous-Interactive/unity-helpers/issues/650)).
 
 ---
 

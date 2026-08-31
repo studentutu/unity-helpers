@@ -228,6 +228,34 @@ if (laserBeam.Intersects(shield))
 
 ---
 
+### Comparing shapes: `Equals` is exact, `ApproximatelyEquals` is not
+
+`Circle`, `Sphere`, `Line2D` and `Line3D` compare every component exactly, so anything `Equals`
+reports equal also shares a hash code and survives a `Dictionary` or `HashSet` round trip. An
+approximate `Equals` cannot: the hash would still be computed from the exact bits, and a value could
+vanish from the set it had just been added to.
+
+For a shape that was computed rather than authored, state the tolerance:
+
+```csharp
+Circle measured = FitCircle(samples);
+Circle expected = new Circle(new Vector2(5f, 10f), 3f);
+
+bool close = measured.ApproximatelyEquals(expected, 1e-4f);
+```
+
+Every component -- both centre axes and the radius, or every endpoint coordinate -- must agree within
+the tolerance, and the tolerance is the whole of the permitted difference: nothing proportional to
+the magnitudes is added on top, so `tolerance: 0f` is an exact comparison whether the values are near
+zero or near a million. A negative, infinite, or NaN tolerance is not a comparison anyone meant to
+make, so it returns `false` rather than being coerced to something.
+
+A non-finite component -- an infinite radius, a NaN endpoint -- compares exactly instead. Identical
+infinities are approximately equal and mismatched ones never are, so a shape is always approximately
+equal to itself.
+
+---
+
 ### Range<T>: Numeric ranges with flexible boundaries
 
 **Why it exists:** Solves the "is this value in a valid range" problem with clear, readable code and support for different boundary conditions.
@@ -855,7 +883,7 @@ list.Sort((a, b) => a.priority.CompareTo(b.priority));
 ### Span Operations
 
 `Span<T>` is not an `IList<T>`, so a caller holding a `stackalloc` buffer or a slice could reach none
-of the above. `SpanExtensions` covers the shuffling half.
+of the above. `SpanExtensions` covers it.
 
 ```csharp
 using WallstopStudios.UnityHelpers.Core.Extension;
@@ -868,20 +896,45 @@ Span<Direction> directions = stackalloc Direction[Navigable.Length];
 // Nothing allocated. `Navigable` is untouched.
 ```
 
-`Shuffle`, `TryCopyShuffled` and `TryGetRandomElement` are the surface.
-
 **They consume the random source draw for draw exactly as their `IList` siblings do**, because they
 are the same body: `IList<T>.Shuffle` reaches `Span<T>.Shuffle` for its array fast path and for its
-pooled write-back path alike. So a project with seeded, reproducible generation can move a shuffle
-onto a stack buffer and get byte-identical output -- which is the property that decides whether the
-move is possible at all.
+pooled write-back path alike, and `IList<T>.Shift` reaches `Span<T>.Shift` the same way. So a project
+with seeded, reproducible generation can move a shuffle onto a stack buffer and get byte-identical
+output -- which is the property that decides whether the move is possible at all.
 
-`TryCopyShuffled` returns false, writing and drawing nothing, when the destination is shorter than
-the source. `TryGetRandomElement` returns false for an empty span rather than throwing, which is why
-there is no throwing span counterpart to `IList<T>.GetRandomElement`.
+| Method                                                       | Notes                                                                       |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| `Shuffle(random)`                                            | Fisher-Yates in place, same draws as the `IList` sibling                    |
+| `TryCopyShuffled(destination, random)`                       | Shuffles a copy; false for a short destination, writing and drawing nothing |
+| `TryGetRandomElement(out element, random)`                   | False for an empty span                                                     |
+| `TrySwap(indexA, indexB)`                                    | False for an index outside the span, writing nothing                        |
+| `Fill(factory)`                                              | Index-driven fill; a null factory writes nothing                            |
+| `Shift(amount)`, `RotateLeft(n)`, `RotateRight(n)`           | Three reversals; the amount is normalized, so any integer is well-defined   |
+| `IndexOf(predicate)`, `LastIndexOf(predicate)`               | Predicate search, `-1` for no match or a null predicate                     |
+| `TryFindAll(destination, state, predicate, out written)`     | The non-allocating `FindAll`                                                |
+| `TryPartition(matching, notMatching, state, predicate, ...)` | The non-allocating `Partition`                                              |
 
-A `Span<T>` cannot be captured by a lambda or held across an `await` or a `yield`, so nothing here
-takes a delegate.
+Nothing here throws. An index, a bound or a destination that cannot work is reported, which is why
+there is no throwing span counterpart to `IList<T>.GetRandomElement` or `IList<T>.Swap`.
+
+`TryFindAll` refuses differently from `TryCopyShuffled` on purpose: it keeps whatever already fit and
+reports the count, so a caller can grow the buffer and retry. Counting first to leave the destination
+pristine would run the predicate twice per element. `TryPartition` instead requires both destinations
+to be at least as long as the source -- either side can take every element -- so its refusal writes
+nothing.
+
+A `Span<T>` cannot be captured by a lambda or held across an `await` or a `yield`. A predicate passed
+as an argument is fine, but one that closes over caller state allocates, so every predicate-taking
+method has a `TState` overload that keeps the lambda `static`:
+
+```csharp
+Span<int> even = stackalloc int[values.Length];
+((ReadOnlySpan<int>)values).TryFindAll(even, 2, static (v, d) => v % d == 0, out int written);
+```
+
+`Span<T>` already carries `Fill(T)`, `Reverse()`, `Clear()` and `MemoryExtensions.IndexOf(T)`, so this
+type deliberately does not shadow them. A `ReadOnlySpan<T>` receiver needs an explicit cast at this
+language version, because an extension receiver takes no user-defined conversion.
 
 ### Dictionary Helpers
 

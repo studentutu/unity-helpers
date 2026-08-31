@@ -252,8 +252,30 @@ namespace WallstopStudios.UnityHelpers.Core.Random
 
         public virtual int Next()
         {
-            // Mask out the MSB to ensure the value is within [0, int.MaxValue]
-            return unchecked((int)NextUint() & 0x7FFFFFFF);
+            unchecked
+            {
+                /*
+                    Masking alone yields [0, int.MaxValue], one value wider than IRandom
+                    promises. Rejecting that single value costs one extra draw in 2^31; reducing
+                    through NextUint(int.MaxValue) instead would pay a threshold division on half
+                    of all calls, because a bound that large accepts only half the products
+                    outright.
+                */
+                int attempts = 0;
+                while (true)
+                {
+                    int value = (int)NextUint() & int.MaxValue;
+                    if (value < int.MaxValue)
+                    {
+                        return value;
+                    }
+
+                    if (MaxRejectionAttempts32 < ++attempts)
+                    {
+                        return int.MaxValue - 1;
+                    }
+                }
+            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -296,9 +318,27 @@ namespace WallstopStudios.UnityHelpers.Core.Random
                 throw new ArgumentException("Max cannot be zero");
             }
 
+            return SampleUintBelow(max, out _);
+        }
+
+        /// <summary>
+        /// Lemire multiply-shift rejection over <c>[0, max)</c>, shared by
+        /// <see cref="NextUint(uint)"/> and <see cref="TryNextUint(uint, out uint)"/> so the
+        /// arithmetic exists once.
+        /// </summary>
+        /// <param name="max">Exclusive upper bound; must not be zero.</param>
+        /// <param name="unbiased">
+        /// <c>false</c> when the source rejected every draw the cap allows, in which case the
+        /// return value is the last draw folded with modulo -- in range, but biased.
+        /// </param>
+        /// <returns>A value in <c>[0, max)</c>.</returns>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private uint SampleUintBelow(uint max, out bool unbiased)
+        {
             // Power-of-two fast path
             if ((max & (max - 1)) == 0)
             {
+                unbiased = true;
                 return NextUint() & (max - 1);
             }
 
@@ -314,7 +354,7 @@ namespace WallstopStudios.UnityHelpers.Core.Random
                 {
                     if (MaxRejectionAttempts32 < ++attempts)
                     {
-                        // Prevent infinite loop: fall back to modulo (small bias) rather than hang
+                        unbiased = false;
                         return r % max;
                     }
                     r = NextUint();
@@ -322,6 +362,8 @@ namespace WallstopStudios.UnityHelpers.Core.Random
                     lo = (uint)m;
                 }
             }
+
+            unbiased = true;
             return (uint)(m >> 32);
         }
 
@@ -335,6 +377,60 @@ namespace WallstopStudios.UnityHelpers.Core.Random
             }
 
             return min + NextUint(max - min);
+        }
+
+        /// <summary>
+        /// Samples <c>[0, max)</c> and reports whether the result is unbiased.
+        /// </summary>
+        /// <param name="max">Exclusive upper bound.</param>
+        /// <param name="value">The sample, or <c>default</c> when this returns <c>false</c>.</param>
+        /// <returns>
+        /// <c>false</c> for a zero bound, and <c>false</c> rather than a biased answer when the
+        /// source rejected every draw the internal cap allows. <see cref="NextUint(uint)"/> returns
+        /// the biased answer in that case; this reports it instead.
+        /// </returns>
+        public bool TryNextUint(uint max, out uint value)
+        {
+            if (max == 0)
+            {
+                value = default;
+                return false;
+            }
+
+            uint sample = SampleUintBelow(max, out bool unbiased);
+            if (!unbiased)
+            {
+                value = default;
+                return false;
+            }
+
+            value = sample;
+            return true;
+        }
+
+        /// <summary>
+        /// Samples <c>[min, max)</c> and reports whether the result is unbiased.
+        /// </summary>
+        /// <param name="min">Inclusive lower bound.</param>
+        /// <param name="max">Exclusive upper bound.</param>
+        /// <param name="value">The sample, or <c>default</c> when this returns <c>false</c>.</param>
+        /// <returns><c>false</c> for an empty range or an exhausted source.</returns>
+        public bool TryNextUint(uint min, uint max, out uint value)
+        {
+            if (max <= min)
+            {
+                value = default;
+                return false;
+            }
+
+            if (TryNextUint(max - min, out uint offset))
+            {
+                value = min + offset;
+                return true;
+            }
+
+            value = default;
+            return false;
         }
 
         public short NextShort()
@@ -382,7 +478,22 @@ namespace WallstopStudios.UnityHelpers.Core.Random
                 // Through NextUlong, not two NextUint draws of its own: a generator that answers a
                 // 64-bit draw in one state advance has to be asked for one. This composed the pair
                 // inline and so was the only 64-bit entry point the overrides could not reach.
-                return (long)(NextUlong() & 0x7FFFFFFFFFFFFFFF);
+                // Masking alone yields [0, long.MaxValue], one value wider than IRandom promises,
+                // so that single value is rejected -- one extra draw in 2^63.
+                int attempts = 0;
+                while (true)
+                {
+                    long value = (long)(NextUlong() & 0x7FFFFFFFFFFFFFFF);
+                    if (value < long.MaxValue)
+                    {
+                        return value;
+                    }
+
+                    if (MaxRejectionAttempts64 < ++attempts)
+                    {
+                        return long.MaxValue - 1;
+                    }
+                }
             }
         }
 
@@ -429,31 +540,58 @@ namespace WallstopStudios.UnityHelpers.Core.Random
                 throw new ArgumentException("Max cannot be zero");
             }
 
+            return SampleUlongBelow(max, out _);
+        }
+
+        /// <summary>
+        /// Lemire multiply-shift rejection over <c>[0, max)</c>, shared by
+        /// <see cref="NextUlong(ulong)"/> and <see cref="TryNextUlong(ulong, out ulong)"/> so the
+        /// arithmetic exists once.
+        /// </summary>
+        /// <param name="max">Exclusive upper bound; must not be zero.</param>
+        /// <param name="unbiased">
+        /// <c>false</c> when the source rejected every draw the cap allows, in which case the
+        /// return value is the last draw folded with modulo -- in range, but biased.
+        /// </param>
+        /// <returns>A value in <c>[0, max)</c>.</returns>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private ulong SampleUlongBelow(ulong max, out bool unbiased)
+        {
             // Power-of-two fast path (no rejection required)
             if ((max & (max - 1)) == 0)
             {
+                unbiased = true;
                 return NextUlong() & (max - 1);
             }
 
             // Lemire's method with rejection: use high 64 bits of the 128-bit product,
             // retrying when the low bits fall within the threshold region to avoid bias.
-            ulong threshold = unchecked(0UL - max) % max;
-            int attempts = 0;
-            while (true)
+            ulong sample = NextUlong();
+            ulong productLow = unchecked(sample * max);
+            if (productLow < max)
             {
-                ulong sample = NextUlong();
-                ulong productLow = unchecked(sample * max);
-                if (threshold <= productLow)
+                /*
+                    The threshold is always below max, so a low half already at or above max is
+                    accepted without paying for the 64-bit division that computes it. The 32-bit
+                    path has always had this guard; the 64-bit one divided on every call.
+                */
+                ulong threshold = unchecked(0UL - max) % max;
+                int attempts = 0;
+                while (productLow < threshold)
                 {
-                    return MulHi64(sample, max);
-                }
+                    if (MaxRejectionAttempts64 < ++attempts)
+                    {
+                        unbiased = false;
+                        return sample % max;
+                    }
 
-                if (MaxRejectionAttempts64 < ++attempts)
-                {
-                    // Failsafe: fall back to modulo to avoid hanging indefinitely.
-                    return sample % max;
+                    sample = NextUlong();
+                    productLow = unchecked(sample * max);
                 }
             }
+
+            unbiased = true;
+            return MulHi64(sample, max);
         }
 
         public ulong NextUlong(ulong min, ulong max)
@@ -466,6 +604,59 @@ namespace WallstopStudios.UnityHelpers.Core.Random
             }
 
             return NextUlong(max - min) + min;
+        }
+
+        /// <summary>
+        /// Samples <c>[0, max)</c> and reports whether the result is unbiased.
+        /// </summary>
+        /// <param name="max">Exclusive upper bound.</param>
+        /// <param name="value">The sample, or <c>default</c> when this returns <c>false</c>.</param>
+        /// <returns>
+        /// <c>false</c> for a zero bound, and <c>false</c> rather than a biased answer when the
+        /// source rejected every draw the internal cap allows.
+        /// </returns>
+        public bool TryNextUlong(ulong max, out ulong value)
+        {
+            if (max == 0)
+            {
+                value = default;
+                return false;
+            }
+
+            ulong sample = SampleUlongBelow(max, out bool unbiased);
+            if (!unbiased)
+            {
+                value = default;
+                return false;
+            }
+
+            value = sample;
+            return true;
+        }
+
+        /// <summary>
+        /// Samples <c>[min, max)</c> and reports whether the result is unbiased.
+        /// </summary>
+        /// <param name="min">Inclusive lower bound.</param>
+        /// <param name="max">Exclusive upper bound.</param>
+        /// <param name="value">The sample, or <c>default</c> when this returns <c>false</c>.</param>
+        /// <returns><c>false</c> for an empty range or an exhausted source.</returns>
+        public bool TryNextUlong(ulong min, ulong max, out ulong value)
+        {
+            if (max <= min)
+            {
+                value = default;
+                return false;
+            }
+
+            if (TryNextUlong(max - min, out ulong offset))
+            {
+                value = min + offset;
+                return true;
+            }
+
+            value = default;
+            return false;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -588,14 +779,36 @@ namespace WallstopStudios.UnityHelpers.Core.Random
 
         protected double NextDoubleWithInfiniteRange(double min, double max)
         {
+            if (ToOrderedDouble(max) <= ToOrderedDouble(min))
+            {
+                throw new ArgumentException(
+                    $"Invalid range [{min}, {max}) for infinite-range sampling."
+                );
+            }
+
+            return SampleDoubleWithInfiniteRange(min, max, out _);
+        }
+
+        /// <summary>
+        /// Samples an ordered-bit-pattern range whose width overflows a <see cref="double"/>
+        /// subtraction, and reports whether the result came from the rejection loop.
+        /// </summary>
+        /// <param name="min">Inclusive lower bound.</param>
+        /// <param name="max">Exclusive upper bound.</param>
+        /// <param name="sampled">
+        /// <c>false</c> for an empty range, or when the source exhausted the rejection cap and the
+        /// return value is a fixed point in the range rather than a draw.
+        /// </param>
+        /// <returns>A finite value in <c>[min, max)</c>.</returns>
+        private double SampleDoubleWithInfiniteRange(double min, double max, out bool sampled)
+        {
             ulong orderedMin = ToOrderedDouble(min);
             ulong orderedMax = ToOrderedDouble(max);
 
             if (orderedMax <= orderedMin)
             {
-                throw new ArgumentException(
-                    $"Invalid range [{min}, {max}) for infinite-range sampling."
-                );
+                sampled = false;
+                return default;
             }
 
             ulong range = orderedMax - orderedMin;
@@ -603,21 +816,28 @@ namespace WallstopStudios.UnityHelpers.Core.Random
             while (true)
             {
                 ulong sample = orderedMin + NextUlong(range);
-                double value = FromOrderedDouble(sample);
+                double candidate = FromOrderedDouble(sample);
 
-                if (!double.IsNaN(value) && !double.IsInfinity(value))
+                if (!double.IsNaN(candidate) && !double.IsInfinity(candidate))
                 {
-                    return value;
+                    sampled = true;
+                    return candidate;
                 }
                 if (MaxRejectionAttempts64 < ++attempts)
                 {
-                    // Transparent fallback: pick a finite value inside [min, max)
+                    /*
+                        Degraded: a fixed finite point inside [min, max), so the caller still
+                        gets a usable number. TryNextDouble reports this rather than passing it
+                        off.
+                    */
                     if (double.IsPositiveInfinity(max))
                     {
+                        sampled = false;
                         return FromOrderedDouble(orderedMax - 1);
                     }
                     if (double.IsNegativeInfinity(min))
                     {
+                        sampled = false;
                         return FromOrderedDouble(orderedMin + 1);
                     }
 
@@ -625,13 +845,52 @@ namespace WallstopStudios.UnityHelpers.Core.Random
                     double midValue = FromOrderedDouble(midpoint);
                     if (!double.IsNaN(midValue) && !double.IsInfinity(midValue))
                     {
+                        sampled = false;
                         return midValue;
                     }
 
                     // Final safeguard: nudge just above min in ordered space
+                    sampled = false;
                     return FromOrderedDouble(orderedMin + 1);
                 }
             }
+        }
+
+        /// <summary>
+        /// Samples <c>[min, max)</c> and reports whether the result is a genuine draw.
+        /// </summary>
+        /// <param name="min">Inclusive lower bound; must be finite or negative infinity.</param>
+        /// <param name="max">Exclusive upper bound; must be finite or positive infinity.</param>
+        /// <param name="value">The sample, or <c>default</c> when this returns <c>false</c>.</param>
+        /// <returns>
+        /// <c>false</c> for a NaN bound, an empty range, or a source that exhausted the internal
+        /// rejection cap. <see cref="NextDouble(double, double)"/> returns a fixed in-range value in
+        /// the last case; this reports it instead.
+        /// </returns>
+        public bool TryNextDouble(double min, double max, out double value)
+        {
+            if (double.IsNaN(min) || double.IsNaN(max) || max <= min)
+            {
+                value = default;
+                return false;
+            }
+
+            double range = max - min;
+            if (double.IsInfinity(range))
+            {
+                double wide = SampleDoubleWithInfiniteRange(min, max, out bool sampled);
+                if (!sampled)
+                {
+                    value = default;
+                    return false;
+                }
+
+                value = wide;
+                return true;
+            }
+
+            value = min + NextDouble() * range;
+            return true;
         }
 
         protected double NextDoubleFullRange()
@@ -658,13 +917,64 @@ namespace WallstopStudios.UnityHelpers.Core.Random
             return mean + NextGaussianInternal() * stdDev;
         }
 
+        /// <summary>
+        /// Samples a normal deviate and reports whether the result is a genuine draw.
+        /// </summary>
+        /// <param name="mean">Distribution mean; must be finite.</param>
+        /// <param name="stdDev">Distribution standard deviation; must be finite and non-negative.</param>
+        /// <param name="value">The sample, or <c>default</c> when this returns <c>false</c>.</param>
+        /// <returns>
+        /// <c>false</c> for a non-finite or negative parameter, and <c>false</c> rather than an
+        /// approximately-normal substitute when the source exhausted the internal rejection cap.
+        /// </returns>
+        public bool TryNextGaussian(double mean, double stdDev, out double value)
+        {
+            bool finiteParameters =
+                !double.IsNaN(mean)
+                && !double.IsInfinity(mean)
+                && !double.IsNaN(stdDev)
+                && !double.IsInfinity(stdDev)
+                && 0 <= stdDev;
+            if (!finiteParameters)
+            {
+                value = default;
+                return false;
+            }
+
+            double deviate = SampleGaussian(out bool sampled);
+            if (!sampled)
+            {
+                value = default;
+                return false;
+            }
+
+            value = mean + deviate * stdDev;
+            return true;
+        }
+
         private double NextGaussianInternal()
+        {
+            return SampleGaussian(out _);
+        }
+
+        /// <summary>
+        /// Marsaglia polar sampling of the standard normal, reporting whether the result came from
+        /// the rejection loop.
+        /// </summary>
+        /// <param name="sampled">
+        /// <c>false</c> when the source exhausted the internal rejection cap, in which case the
+        /// return value is a Box-Muller substitute drawn without rejection, so its distribution is
+        /// only approximately normal.
+        /// </param>
+        /// <returns>A standard normal deviate.</returns>
+        private double SampleGaussian(out bool sampled)
         {
             if (_cachedGaussian != null)
             {
-                double gaussian = _cachedGaussian.Value;
+                double cached = _cachedGaussian.Value;
                 _cachedGaussian = null;
-                return gaussian;
+                sampled = true;
+                return cached;
             }
 
             // https://stackoverflow.com/q/7183229/1917135
@@ -679,7 +989,12 @@ namespace WallstopStudios.UnityHelpers.Core.Random
                 square = x * x + y * y;
                 if (MaxGaussianAttempts < ++attempts)
                 {
-                    // Fallback to Box-Muller without rejection to avoid infinite loop
+                    /*
+                        Degraded: Box-Muller without rejection, so the loop terminates. The
+                        partner deviate is deliberately not cached -- a caller that asked for an
+                        exact draw must not be handed a second value from the same exhausted
+                        source.
+                    */
                     double u1 = NextDouble();
                     if (u1 <= double.Epsilon)
                     {
@@ -687,15 +1002,14 @@ namespace WallstopStudios.UnityHelpers.Core.Random
                     }
                     double u2 = NextDouble();
                     double mag = Math.Sqrt(-2.0 * Math.Log(u1));
-                    double z0 = mag * Math.Cos(2.0 * Math.PI * u2);
-                    double z1 = mag * Math.Sin(2.0 * Math.PI * u2);
-                    _cachedGaussian = z1;
-                    return z0;
+                    sampled = false;
+                    return mag * Math.Cos(2.0 * Math.PI * u2);
                 }
             } while (square is 0 or > 1);
 
             double fac = Math.Sqrt(-2 * Math.Log(square) / square);
             _cachedGaussian = x * fac;
+            sampled = true;
             return y * fac;
         }
 
@@ -1153,20 +1467,20 @@ namespace WallstopStudios.UnityHelpers.Core.Random
             return unchecked((long)(value - LongBias));
         }
 
+        /// <summary>
+        /// The high 64 bits of the 128-bit product, by schoolbook decomposition.
+        /// </summary>
+        /// <param name="x">First factor.</param>
+        /// <param name="y">Second factor.</param>
+        /// <returns>The product's high half.</returns>
+        /// <remarks>
+        /// A BMI2 wide-multiply branch lived here behind <c>NET7_0_OR_GREATER</c>, which no Unity player
+        /// defines, so it never ran
+        /// (<see href="https://github.com/Ambiguous-Interactive/unity-helpers/issues/637">#637</see>).
+        /// </remarks>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static ulong MulHi64(ulong x, ulong y)
         {
-#if NET7_0_OR_GREATER
-            if (System.Runtime.Intrinsics.X86.Bmi2.X64.IsSupported)
-            {
-                unsafe
-                {
-                    ulong lo;
-                    ulong hi = System.Runtime.Intrinsics.X86.Bmi2.X64.MultiplyNoFlags(x, y, &lo);
-                    return hi;
-                }
-            }
-#endif
             ulong x0 = (uint)x;
             ulong x1 = x >> 32;
             ulong y0 = (uint)y;

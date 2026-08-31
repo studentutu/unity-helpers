@@ -6,6 +6,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools
     using System;
     using System.Collections.Generic;
     using System.IO;
+    using System.Linq;
     using System.Reflection;
     using System.Text;
     using UnityEditor;
@@ -218,6 +219,105 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools
             return report;
         }
 
+        /// <summary>
+        /// Whether a base already names this subtype in a <c>[WProtoInclude]</c>.
+        /// </summary>
+        /// <param name="baseType">The contract to read.</param>
+        /// <param name="subType">The subtype to look for.</param>
+        /// <returns><c>true</c> when the base carries the number itself.</returns>
+        /// <remarks>
+        /// An include's number lives on the base, not in the manifest, so inventorying such a pair
+        /// would mint a second number for one type.
+        /// </remarks>
+        private static bool DeclaresInclude(Type baseType, Type subType)
+        {
+            foreach (
+                WProtoIncludeAttribute include in baseType.GetCustomAttributes<WProtoIncludeAttribute>(
+                    false
+                )
+            )
+            {
+                if (include.KnownType == subType)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Whether a type is serialized by WallstopProto: it says so, or it inherits it.
+        /// </summary>
+        /// <param name="type">The type to classify.</param>
+        /// <returns><c>true</c> when the generator will generate a formatter for it.</returns>
+        /// <remarks>
+        /// The reflection mirror of <c>SubtypeMap.IsSerializedContract</c>, and it has to agree with
+        /// it exactly: this decides which types get a committed number, and that one decides which
+        /// types demand one. A type this misses sits at <c>WPROTO041</c> with nothing able to clear
+        /// it.
+        /// </remarks>
+        internal static bool IsSerializedContract(Type type)
+        {
+            for (Type current = type; current != null; current = current.BaseType)
+            {
+                if (current.GetCustomAttributes<WProtoNotSerializedAttribute>(false).Any())
+                {
+                    return false;
+                }
+
+                if (current.GetCustomAttributes<WProtoContractAttribute>(false).Any())
+                {
+                    return true;
+                }
+
+                if (current.BaseType == null || !CanCarrySubtype(current.BaseType, current))
+                {
+                    return false;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Whether a base could hold this subtype in its dispatch chain at all.
+        /// </summary>
+        /// <param name="baseType">The candidate base.</param>
+        /// <param name="subType">The type that derives from it.</param>
+        /// <returns><c>true</c> when the relationship is structurally expressible.</returns>
+        /// <remarks>
+        /// <para>
+        /// The reflection mirror of <c>SubtypeMap.CanCarrySubtype</c>: a generic type on either end
+        /// is as many types as it has closures and one field number cannot identify it, and a base
+        /// in another assembly had its chain emitted before this type existed.
+        /// </para>
+        /// <para>
+        /// <b><see cref="Type.IsGenericType"/>, not <see cref="Type.IsGenericTypeDefinition"/>.</b>
+        /// A CLOSED construction such as <c>Cache&lt;List&lt;float&gt;&gt;</c> is neither an open
+        /// definition nor does it contain generic parameters, so the narrower pair let it through
+        /// while the generator -- which asks whether the ORIGINAL definition declares any -- refused
+        /// it. The pair was then inventoried, and <c>NameOf</c> writes a CLR <c>FullName</c>
+        /// carrying backticks and <c>[[...]]</c> into a <c>typeof(...)</c>, which does not compile:
+        /// an automatic pass would have written a manifest that broke the project after a reload.
+        /// <c>SerializableDictionary.Cache&lt;T&gt;</c> is exactly this shape and this repository
+        /// already derives from one.
+        /// </para>
+        /// <para>
+        /// Conservative in one direction, deliberately: a type nested inside a generic reports
+        /// <see cref="Type.IsGenericType"/> because it carries the enclosing arguments, while the
+        /// generator counts only the parameters the type itself declares. That costs nothing --
+        /// <c>WPROTO009</c> refuses a contract nested inside a generic type, so the generator would
+        /// never honour a number for one either.
+        /// </para>
+        /// </remarks>
+        internal static bool CanCarrySubtype(Type baseType, Type subType)
+        {
+            return !baseType.IsGenericType
+                && !subType.IsGenericType
+                && baseType.Assembly == subType.Assembly;
+        }
+
         private static Dictionary<Assembly, Inventory> Collect(Report report)
         {
             Dictionary<Assembly, Inventory> byAssembly = new Dictionary<Assembly, Inventory>();
@@ -256,6 +356,72 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools
                     if (inventory.Bases.Add(baseType))
                     {
                         AddReserved(inventory, baseType, report);
+                    }
+                }
+            }
+
+            // The inherited half. Deriving from a [WProtoContract] IS the declaration (#613), so a
+            // subclass that wrote no attribute still needs a committed number -- and this is the
+            // ONLY thing that can supply one, because the generator refuses to invent numbers.
+            // Without this sweep an implicit subtype sits at WPROTO041 forever.
+            //
+            // TRANSITIVE, and that is load-bearing. `GetTypesDerivedFrom` returns every descendant,
+            // not just direct children, and a grandchild of an IMPLICIT middle is serialized too --
+            // the generator walks the chain to classify it. Inventorying only types whose base
+            // carries the attribute left `A(contract) <- B <- C` with no entry for C, so its
+            // editor warning never cleared and its player build stayed refused.
+            //
+            // A descendant is reachable from several ancestors, so `inventoried` keeps one entry per
+            // type: two would claim two numbers for one subtype.
+            HashSet<Type> inventoried = new HashSet<Type>();
+            foreach (Type contract in TypeCache.GetTypesWithAttribute<WProtoContractAttribute>())
+            {
+                if (contract == null || contract.IsGenericTypeDefinition)
+                {
+                    continue;
+                }
+
+                foreach (Type subType in TypeCache.GetTypesDerivedFrom(contract))
+                {
+                    if (subType == null || !inventoried.Add(subType))
+                    {
+                        continue;
+                    }
+
+                    Type baseType = subType.BaseType;
+                    if (
+                        baseType == null
+                        || !IsSerializedContract(subType)
+                        || !IsSerializedContract(baseType)
+                        || !CanCarrySubtype(baseType, subType)
+                    )
+                    {
+                        continue;
+                    }
+
+                    // An explicit declaration is inventoried above, and one the base names carries
+                    // the base's own number. Either way a second entry would claim a second number.
+                    if (
+                        subType.GetCustomAttributes<WProtoSubtypeAttribute>(false).Any()
+                        || DeclaresInclude(baseType, subType)
+                    )
+                    {
+                        continue;
+                    }
+
+                    Inventory inherited = InventoryFor(byAssembly, subType.Assembly);
+                    inherited.Declarations.Add(
+                        new WProtoSubtypeTagPlan.Declaration(
+                            WProtoSubtypeTagManifestFile.NameOf(subType),
+                            WProtoSubtypeTagManifestFile.NameOf(baseType),
+                            false,
+                            0
+                        )
+                    );
+
+                    if (inherited.Bases.Add(baseType))
+                    {
+                        AddReserved(inherited, baseType, report);
                     }
                 }
             }

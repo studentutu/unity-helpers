@@ -113,6 +113,43 @@ Preferred commit prep order:
 
 For detailed workflow patterns and more examples, see [formatting](./formatting.md).
 
+### A new analyzer diagnostic needs a CLEAN typecheck, because the incremental one lies
+
+`npm run typecheck:tests` exited **0** on a tree the same command reported **four `WPROTO044`
+errors** on once `Generator~/WallstopStudios.UnityHelpers.TestCheck/obj` was deleted. Measured
+2026-08-30, on the session that added the diagnostic. The `.cs` files had not changed, so MSBuild
+considered the compile up to date and the newly built analyzer never ran -- and the gate reported a
+pass, which is the same output as having checked.
+
+**A rebuilt `Runtime/Analyzers/*.dll` is a changed input to every check project, and the only
+reliable way to make one honour it is to delete `obj/`:**
+
+```bash
+rm -rf Generator~/*/obj Generator~/*/bin
+npm run typecheck:unity
+```
+
+Do this whenever the change **adds or widens a diagnostic**, not on every run: a clean chain is
+minutes and an incremental one is seconds, and for a change that only touches `.cs` files the
+incremental answer is correct. The discriminator is whether an analyzer DLL is in the diff.
+
+Unity is not fooled -- it recompiles per assembly against the analyzer it loads -- so this is a gap
+between the local gate and CI, and it costs a whole matrix run to discover.
+
+### `typecheck:tests` does not compile `Tests/Editor/**` at all
+
+`TestCheck` globs `Runtime/**`, `Tests/Core/**`, `Tests/Runtime/**`; `EditorCheck` compiles the
+editor SOURCES, not the editor TESTS. So **nothing local type-checks `Tests/Editor/**`** -- 20+
+assemblies -- and `typecheck:tests` prints `Build succeeded` for files it never opened
+([#616](https://github.com/Ambiguous-Interactive/unity-helpers/issues/616)). Measured, session 238:
+one new fixture reached the Unity matrix twice, `typecheck:tests` green both times, the second
+**after** the gap was filed. Until #616 lands, the MCP bridge is the only local verifier for that
+tree -- see [unity-mcp-fixture-runner](./unity-mcp-fixture-runner.md).
+
+A `[WProtoContract]` fixture there has one extra trap: `WPROTO001` wants `partial` on the type **and
+every type enclosing it**, because the formatter is nested. A `[TestFixture]` cannot be partial, so
+put such fixtures at namespace scope.
+
 ---
 
 ## Workflow by File Type

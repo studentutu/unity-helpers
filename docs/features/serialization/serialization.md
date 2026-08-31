@@ -502,14 +502,14 @@ However, this is error-prone. **Start with `preserve="all"` and optimize later i
 - [protobuf-net documentation](https://protobuf-net.github.io/protobuf-net/)
 - [Unity Discussions: link.xml best practices](https://discussions.unity.com/)
 
-````text
-
 <a id="protobuf-schema-evolution-the-killer-feature"></a>
+
 ## Protobuf Schema Evolution: The Killer Feature
 
 **The Problem Protobuf Solves:**
 
 You ship your game with this save format:
+
 ```csharp
 [ProtoContract]
 public class PlayerSave
@@ -517,7 +517,7 @@ public class PlayerSave
     [ProtoMember(1)] public int level;
     [ProtoMember(2)] public string name;
 }
-````
+```
 
 A month later, you want to add a new feature and change the format:
 
@@ -1007,6 +1007,8 @@ Annotate a type and a formatter is generated for it, in your assembly, at your b
 are the wire contract; `Name` is not written to the wire at all, and exists so a schema, a
 diagnostic, or a payload dump does not change meaning when you rename a C# member:
 
+<!-- doc-sample: compiles -->
+
 ```csharp
 [WProtoContract(Name = "player_state")]
 public sealed partial class PlayerState
@@ -1098,8 +1100,16 @@ everywhere. `AbstractRandom` is the worked example: the after-deserialization wo
 needs is declared on `AbstractRandom` and dispatched through `OnAfterDeserialization`. Suppress
 `WPROTO034` at the declaration when the hook only repeats work every other path already does.
 
-`WPROTO043` fires when a member takes a field number, or a name, that the contract reserved. See
-[Retiring a member](#retiring-a-member).
+`WPROTO043` fires when a member takes a field number, or a name, that the contract reserved, and
+`WPROTO046` is the same refusal for an **enum member** taking a value or a name the enum reserved.
+See [Retiring a member](#retiring-a-member) and
+[Retiring an enum member](#retiring-an-enum-member).
+
+`WPROTO044` fires when a subclass derives from a contract in **another assembly**, which no
+per-assembly generator can honour; `WPROTO045` when the `[WProtoNotSerialized]` opt-out sits beside a
+declaration that says the opposite; and `WPROTO047` **warns** when a type inherits its contract and
+declares `[WProtoMember]` of its own without saying so. See
+[A subclass that is not serialized](#a-subclass-that-is-not-serialized).
 
 `WPROTO039`, `WPROTO040`, `WPROTO041` and `WPROTO042` are specific to declaring a subtype **from
 the subtype** with `[WProtoSubtype]`. `WPROTO039` fires when two subtypes of one base claim
@@ -1445,13 +1455,79 @@ instance), and a payload for one that names no subtype is malformed rather than 
 include holding `Melee`'s members, then `Weapon`'s. That is what protobuf-net does, so payloads move
 between the two serializers unchanged.
 
-The consequence is that a subtype whose base is a contract has to be declared **somewhere**, or it
-is a build error (`WPROTO018`): there would be no tag to write it under.
+**Deriving from a contract is the declaration.** A subclass joins its base's chain because it is a
+subclass; nothing has to be written down:
+
+```csharp
+[WProtoContract]
+public partial class Weapon { [WProtoMember(1)] public int Damage; }
+
+public partial class PlasmaCutter : Weapon { [WProtoMember(1)] public float Charge; }
+```
+
+That round-trips as a `PlasmaCutter` through a `Weapon`-typed member, collection or root. The one
+thing it needs is a **field number**, because a number is the only type identity protobuf has, and
+the editor commits one on the next reload -- see
+[Numbering a subtype](#declaring-the-subtype-from-the-subtype). `partial` is required because the
+generated formatter is nested inside the type, which is how it reaches private members without
+reflection.
+
+An attribute you can forget to write should not decide whether a save works. This shape used to
+throw from a shipped player, and briefly became a build error demanding two attributes; neither is a
+pit of success.
+
+##### A subclass that is not serialized
+
+Deriving from a serializable base without wanting the subclass on the wire is an ordinary thing to
+do -- a presentation-only variant, a test double, an editor-only subclass. Say so:
+
+```csharp
+[WProtoNotSerialized]                       // never reaches the serializer
+public sealed class PreviewWeapon : Weapon { public float Charge; }
+```
+
+It is a statement about **that type alone**, and it stops the walk: a subclass of an opted-out type
+has no serialized ancestor between it and the contract either, so nothing writes it as the contract
+and nothing generates for it. Writing it beside a `[WProtoContract]` or a `[WProtoSubtype]` is
+`WPROTO045`, because those say the opposite and whichever the generator read first would otherwise
+decide.
+
+The opt-out is a promise, not an enforcement. A contract that is neither sealed nor a value type
+ends its dispatch chain in a guard refusing any runtime type it does not declare, so if such a value
+does reach the serializer it throws rather than being written as its base -- which would lose a
+level of type identity from saved data with nothing to report it.
+
+##### Saying it out loud
+
+A subclass that inherits its contract **and declares `[WProtoMember]` of its own** gets `WPROTO047`,
+a warning:
+
+> `'PlasmaCutter'` declares `[WProtoMember]` on `'Charge'`, so it has a wire contract of its own, but
+> carries no `[WProtoContract]`. This works ... Add `[WProtoContract]` to `'PlasmaCutter'` anyway, so
+> a reader can see that its members are on the wire without opening `'Weapon'`.
+
+The code works -- nothing on the wire depends on the attribute -- so this is a warning about
+legibility, and it is suppressible. It is gated on the type declaring a member because a subclass
+that adds only behaviour is the ordinary reason to derive from anything, and asking every one of
+those for an attribute would be the noise this design removed.
+
+##### Two shapes that still cannot be inherited
+
+- **A base in another assembly** is `WPROTO044`. The base's dispatch chain is generated when the
+  base's own assembly compiles, so a subtype declared afterwards could never appear in it. Compose
+  instead of deriving, or move the type. Tracked on
+  [issue 612](https://github.com/Ambiguous-Interactive/unity-helpers/issues/612).
+- **A generic base** is left alone entirely. One field number cannot identify a type that is really
+  as many types as it has closures, so `WPROTO040` refuses a declaration naming one and no implicit
+  include is synthesized. `SerializableDictionary.Cache<T>` is that shape, and every consumer of a
+  cache-boxed dictionary writes one.
 
 ##### Declaring the subtype from the subtype
 
 `[WProtoSubtype(typeof(Base), tag)]` says the same thing from the other end, so a base does not have
 to know its own subtypes and does not have to be edited when one is added:
+
+<!-- doc-sample: compiles -->
 
 ```csharp
 [WProtoContract]
@@ -1669,6 +1745,8 @@ written by an older build reads that field back as the wrong thing, with no diag
 
 Record the removal where the next author is already reading:
 
+<!-- doc-sample: compiles -->
+
 ```csharp
 [WProtoContract]
 [WProtoReserved(3)]                   // Health, removed in 4.0
@@ -1698,6 +1776,53 @@ A reservation binds **subtype discriminators too**, not only members. A base's `
 one you step around by writing the number on the other half. **Assign WallstopProto Subtype Tags**
 knows this as well, and assigns around reserved numbers rather than handing out one the next compile
 would reject.
+
+#### Retiring an enum member
+
+An enum member's numeric value is on the wire: WallstopProto writes an enum as a varint of its
+underlying value. So the hazard above has a second shape, one field-number reservations do not
+cover:
+
+```csharp
+public enum Status
+{
+    None = 0,
+    Poisoned = 3,   // removed in 4.0
+}
+
+public enum Status
+{
+    None = 0,
+    Frozen = 3,     // every older save now reads back as Frozen
+}
+```
+
+`[WProtoReserved]` may be written on an enum, and means there what it means on a contract:
+
+<!-- doc-sample: compiles -->
+
+```csharp
+[WProtoReserved(3)]                   // Poisoned, removed in 4.0
+[WProtoReserved("Poisoned")]          // and the name it went by
+public enum Status
+{
+    None = 0,
+    Burning = 1,
+}
+```
+
+A member taking a reserved value or a reserved name is `WPROTO046`. Two differences from
+`WPROTO043` are worth knowing:
+
+- **Every member is checked**, not an annotated subset. An enum has no per-member declaration to opt
+  one in, and its value reaches the wire whichever member carries it -- aliases included, so two
+  members sharing a reserved value are both refused.
+- **The value range is any `int32`**, not a field number's 1-536,870,911. Reserving `0` is legal and
+  is often the one worth pinning; a negative value is legal too.
+
+The exported `.proto` carries the reservation inside the `enum` block, so a consumer's own toolchain
+refuses the reuse as well rather than permitting one build system over exactly what this refuses
+here.
 
 Reservations are per contract. A base's reservation does not bind its subtypes' OWN members: those
 numbers live in a different space, so inheriting one would refuse a member for a collision that
@@ -1761,6 +1886,8 @@ root marshals when code size matters more than tuple support.
 
 A `[WProtoContract]` may be generic, and its members may be typed as its own parameters:
 
+<!-- doc-sample: compiles -->
+
 ```csharp
 [WProtoContract]
 public partial class Box<T>
@@ -1799,6 +1926,8 @@ registered. Move it out, or make it generic itself.
 
 A contract may keep its `readonly` fields and get-only properties:
 
+<!-- doc-sample: compiles -->
+
 ```csharp
 [WProtoContract]
 public readonly partial struct Coordinate
@@ -1824,6 +1953,8 @@ and protobuf-net, which refuses a type it cannot construct, keeps reading it.
 Your constructor still seeds the value. A member the payload does not carry comes back holding
 whatever your parameterless constructor left on it, a sub-message merges into it, a collection appends
 to it and a map merges by key, the same rules an assignable contract follows:
+
+<!-- doc-sample: compiles -->
 
 ```csharp
 [WProtoContract]
@@ -2025,6 +2156,8 @@ Protobuf's default `int32` encodes a negative value by sign-extending it to 64 b
 **ten bytes** where `1` costs one. `sint32` (ZigZag) maps `-1` onto `1` and `-2` onto `3`, so the
 width follows the value's distance from zero rather than which side of zero it sits on. Ask for it
 per member:
+
+<!-- doc-sample: compiles -->
 
 ```csharp
 [WProtoContract]

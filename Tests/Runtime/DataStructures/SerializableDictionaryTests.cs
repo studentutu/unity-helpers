@@ -9,6 +9,7 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
     using UnityEngine;
     using UnityEngine.TestTools;
     using WallstopStudios.UnityHelpers.Core.DataStructure.Adapters;
+    using WallstopStudios.UnityHelpers.Core.Serialization.WallstopProto;
     using WallstopStudios.UnityHelpers.Tests.Core;
     using WallstopStudios.UnityHelpers.Tests.Core.TestTypes;
     using Serializer = WallstopStudios.UnityHelpers.Core.Serialization.Serializer;

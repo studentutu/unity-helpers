@@ -7,6 +7,7 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
     using System.Collections.Generic;
     using NUnit.Framework;
     using WallstopStudios.UnityHelpers.Core.DataStructure;
+    using WallstopStudios.UnityHelpers.Tests.Core;
 
     [TestFixture]
     [NUnit.Framework.Category("Fast")]
@@ -243,22 +244,26 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
             StringWrapper.Remove(value);
         }
 
+        /// <summary>
+        /// The wrapper is shared with every other holder of the same string, so one borrower's
+        /// <c>using</c> block must not evict it. <c>Dispose</c> leaves the cache alone, and
+        /// <see cref="StringWrapper.Remove"/> stays the way to administer it
+        /// (<see href="https://github.com/Ambiguous-Interactive/unity-helpers/issues/646">#646</see>).
+        /// </summary>
         [Test]
-        public void DisposeRemovesFromCache()
+#pragma warning disable CS0618
+        public void DisposeLeavesTheSharedWrapperInTheCache()
         {
             StringWrapper wrapper = StringWrapper.Get("test");
             wrapper.Dispose();
-            bool removed = StringWrapper.Remove("test");
-            Assert.IsFalse(removed);
-        }
 
-        [Test]
-        public void DisposeTwiceDoesNotThrow()
-        {
-            StringWrapper wrapper = StringWrapper.Get("test");
-            wrapper.Dispose();
+            Assert.AreSame(wrapper, StringWrapper.Get("test"));
             Assert.DoesNotThrow(() => wrapper.Dispose());
+            Assert.AreSame(wrapper, StringWrapper.Get("test"));
+            Assert.IsTrue(StringWrapper.Remove("test"));
+            Assert.IsFalse(StringWrapper.Remove("test"));
         }
+#pragma warning restore CS0618
 
         [Test]
         public void ConcurrentGetReturnsSameInstance()
@@ -350,8 +355,8 @@ namespace WallstopStudios.UnityHelpers.Tests.DataStructures
             dict[wrapper3] = 300; // Should overwrite wrapper1's value
 
             Assert.AreEqual(2, dict.Count);
-            Assert.AreEqual(300, dict[wrapper1]);
-            Assert.AreEqual(200, dict[wrapper2]);
+            Assert.AreEqual(300, dict.ValueFor(wrapper1));
+            Assert.AreEqual(200, dict.ValueFor(wrapper2));
 
             StringWrapper.Remove("key1");
             StringWrapper.Remove("key2");

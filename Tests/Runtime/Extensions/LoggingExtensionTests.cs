@@ -7,6 +7,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
     using System.Collections.Generic;
     using System.Linq;
     using System.Text.RegularExpressions;
+    using System.Threading;
     using NUnit.Framework;
     using UnityEngine;
     using UnityEngine.TestTools;
@@ -784,6 +785,126 @@ namespace WallstopStudios.UnityHelpers.Tests.Extensions
                     exception = e;
                     throw;
                 }
+            }
+        }
+
+        /// <summary>
+        /// The per-object disable set was an unsynchronized <c>HashSet</c> that the logger
+        /// enumerated into a buffer every fifth call, while any thread could be adding to it. That
+        /// is a collection-modified exception raised from inside a diagnostic
+        /// (<see href="https://github.com/Ambiguous-Interactive/unity-helpers/issues/646">#646</see>).
+        /// </summary>
+        /// <remarks>
+        /// Global logging stays ON, because the destroyed-object sweep only runs on a call that
+        /// could still log. Nothing is emitted anyway: the context the main thread drives is
+        /// disabled for the whole test and no worker touches it, so every call reaches the sweep
+        /// and then answers false.
+        /// </remarks>
+        [Test]
+        [Timeout(60000)]
+        public void ConcurrentPerObjectLoggingChangesDoNotBreakTheSweep()
+        {
+            const int workerCount = 4;
+            const int iterations = 4000;
+
+            GameObject[] contexts = new GameObject[8];
+            for (int i = 0; i < contexts.Length; ++i)
+            {
+                contexts[i] = Track(new GameObject($"LoggerRaceContext{i}"));
+            }
+
+            GameObject quietContext = Track(new GameObject("LoggerRaceQuietContext"));
+            quietContext.DisableLogging();
+
+            bool previousGlobalLogging = WallstopStudiosLogger.IsGlobalLoggingEnabled();
+            WallstopStudiosLogger.SetGlobalLoggingEnabled(true);
+            Exception failure = null;
+            try
+            {
+                using Barrier barrier = new(workerCount + 1);
+                Thread[] workers = new Thread[workerCount];
+                for (int w = 0; w < workerCount; ++w)
+                {
+                    int offset = w;
+                    workers[w] = new Thread(() =>
+                    {
+                        try
+                        {
+                            barrier.SignalAndWait();
+                            for (int i = 0; i < iterations; ++i)
+                            {
+                                GameObject context = contexts[(offset + i) % contexts.Length];
+                                context.DisableLogging();
+                                context.EnableLogging();
+                            }
+                        }
+                        catch (Exception e)
+                        {
+                            _ = Interlocked.CompareExchange(ref failure, e, null);
+                        }
+                    });
+                    workers[w].IsBackground = true;
+                    workers[w].Start();
+                }
+
+                barrier.SignalAndWait();
+                for (int i = 0; i < iterations; ++i)
+                {
+                    quietContext.Log($"race {i}");
+                }
+
+                foreach (Thread worker in workers)
+                {
+                    Assert.IsTrue(
+                        worker.Join(TimeSpan.FromSeconds(30)),
+                        "A worker did not finish inside its budget"
+                    );
+                }
+            }
+            finally
+            {
+                quietContext.EnableLogging();
+                WallstopStudiosLogger.SetGlobalLoggingEnabled(previousGlobalLogging);
+            }
+
+            Assert.IsTrue(failure == null, failure?.ToString());
+        }
+
+        /// <summary>
+        /// The global flag was a plain static field, so a worker that flipped it had no barrier
+        /// forcing any other thread to observe the write.
+        /// </summary>
+        [Test]
+        [Timeout(60000)]
+        public void GlobalLoggingFlagIsVisibleToOtherThreads()
+        {
+            bool previousGlobalLogging = WallstopStudiosLogger.IsGlobalLoggingEnabled();
+            WallstopStudiosLogger.SetGlobalLoggingEnabled(true);
+            try
+            {
+                Exception failure = null;
+                Thread writer = new(() =>
+                {
+                    try
+                    {
+                        WallstopStudiosLogger.SetGlobalLoggingEnabled(false);
+                    }
+                    catch (Exception e)
+                    {
+                        failure = e;
+                    }
+                })
+                {
+                    IsBackground = true,
+                };
+                writer.Start();
+                Assert.IsTrue(writer.Join(TimeSpan.FromSeconds(30)), "writer did not finish");
+                Assert.IsTrue(failure == null, failure?.ToString());
+                Assert.IsFalse(WallstopStudiosLogger.IsGlobalLoggingEnabled());
+            }
+            finally
+            {
+                WallstopStudiosLogger.SetGlobalLoggingEnabled(previousGlobalLogging);
             }
         }
 

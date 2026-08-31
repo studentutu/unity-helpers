@@ -1,8 +1,21 @@
-# Performance Analyzers (`WUH###`)
+# Analyzers (`WUH###`)
 
 Unity Helpers ships a Roslyn analyzer that reports footguns in code that already compiles and, for
 the most part, already works. It runs on your code as well as the package's, because the shapes it
 finds are not specific to either.
+
+| Id                                                                       | Reports                                                     |
+| ------------------------------------------------------------------------ | ----------------------------------------------------------- |
+| [`WUH001`](#wuh001-a-lookup-factory-passed-as-a-method-group)            | A lookup factory passed as a method group                   |
+| [`WUH002`](#wuh002-a-nested-collection-unity-does-not-serialize)         | A nested collection Unity does not serialize                |
+| [`WUH003`](#wuh003-null-propagation-on-a-unityengineobject)              | `?.` / `?[]` / `??` / `??=` on a `UnityEngine.Object`       |
+| [`WUH004`](#wuh004-a-null-assertion-that-passes-over-a-destroyed-object) | An NUnit null assertion that passes over a destroyed object |
+| [`WUH005`](#wuh005-unityenginerandom)                                    | `UnityEngine.Random`, which no test can replay in isolation |
+| [`WUH006`](#wuh006-a-discarded-effecthandle)                             | A discarded `EffectHandle`                                  |
+| [`WUH007`](#wuh007-a-discarded-coroutine-handle)                         | A discarded coroutine handle                                |
+| [`WUH008`](#wuh008-a-tryxxx-out-value-read-without-testing-the-call)     | A `TryXxx` `out` value read without testing the call        |
+| [`WUH009`](#wuh009-a-teardowns-base-call-that-is-not-last)               | A teardown's `base` call that is not last                   |
+| [`WUH010`](#wuh010-a-dictionary-indexer-read-opt-in)                     | A dictionary indexer read (**off by default**)              |
 
 These are a different family from the `WPROTO###` serialization diagnostics, and they follow a
 different policy on purpose:
@@ -12,11 +25,12 @@ different policy on purpose:
 | Reports             | A serialization contract that cannot be honoured             | An allocation or footgun in correct code |
 | Severity            | Error: the alternative is an exception from a shipped player | **Warning, always**                      |
 | Can fail your build | Yes, and it should                                           | **No**                                   |
-| Default             | On                                                           | On                                       |
+| Default             | On                                                           | On, except `WUH010`                      |
 
 **A `WUH###` diagnostic will never fail your build.** Taking a package upgrade cannot turn a green
 build red over one of these. If your project treats warnings as errors, see
-[Turning one off](#turning-one-off).
+[Turning one off](#turning-one-off). `WUH010` goes further and is off until you ask for it, because
+its shape is correct code far more often than it is a defect.
 
 ## `WUH001`: a lookup factory passed as a method group
 
@@ -115,6 +129,324 @@ Any field Unity will serialize:
 - A multi-dimensional array. Unity serializes `int[,]` at no nesting at all, so reporting it here
   would name the wrong cause.
 
+## `WUH003`: null-propagation on a `UnityEngine.Object`
+
+`UnityEngine.Object` overloads `==` so that a **destroyed** object compares equal to null. The C#
+null-conditional and null-coalescing operators do not use that overload -- they test CLR null. So on
+a destroyed object `obj?.Foo()` runs the member access and `obj ?? fallback` hands back the
+destroyed object, both silently, and both at exactly the moment the guard was written for.
+
+All four spellings are reported: `?.`, the null-conditional **index** `?[]`, `??` and `??=`. The
+message quotes back whichever one you wrote, so `?[]` is never reported as `?.`.
+
+```csharp
+// WUH003: a destroyed window still gets Close() called on it.
+editorWindow?.Close();
+
+// Goes through the overload, so a destroyed window is skipped.
+if (editorWindow != null)
+{
+    editorWindow.Close();
+}
+```
+
+The signal is the **receiver's type, not the operator**. `Vector2? p; p?.x` is correct and common --
+a nullable value type is what `?.` is for -- so a regex over `?.` reports mostly false positives.
+This asks the semantic model whether the operand is assignable to `UnityEngine.Object`, including
+through a generic constraint.
+
+[`Objects.NotNull`](../features/utilities/helper-utilities.md) and `Objects.Null` are the package's
+own tests and go through the overload.
+
+### What it deliberately does not report
+
+- A nullable value type, a `string`, or any type not assignable to `UnityEngine.Object`.
+- An unconstrained generic `T`, which may not be a Unity object at all.
+- A receiver whose **static** type is not a Unity object even if it holds one -- the rule is the
+  static type, because that is what decides which `==` the compiler emits.
+
+## `WUH004`: a null assertion that passes over a destroyed object
+
+This is the same overload, failing the other way: the assertion **passes** over an object that is
+gone. `NUnit.Framework.Assert.IsNotNull(destroyed)` is green about a thing that no longer exists, and
+`NUnit.Framework.Assert.IsNull(destroyed)` fails about one that does not exist either.
+
+```csharp
+// WUH004: passes over a destroyed component.
+Assert.IsNotNull(component);
+
+// Goes through the overload.
+Assert.IsTrue(component != null);
+```
+
+Reported for `IsNotNull`, `IsNull`, `NotNull`, `Null`, and `AreEqual` / `AreNotEqual` against a null
+literal on either side. `Assert.That(x, Is.Null)` is a constraint expression and is not reported.
+
+### Where it looks
+
+**`NUnit.Framework` and nothing else.** Within that namespace the match is on any type whose name
+_ends in_ `Assert`, not on `Assert` alone, so `CollectionAssert` and `StringAssert` are covered by the
+same rule and so is a same-named type NUnit adds later.
+
+### Why Unity's own `Assert` is excluded
+
+`UnityEngine.Assertions.Assert` is **already destroyed-aware**, so reporting it would be a false
+positive on correct code. Measured in a Unity 6000.4.6f1 editor against a destroyed `GameObject`,
+with `Assert.raiseExceptions = true` and an `IsNotNull((string)null)` control that did fail:
+
+| call on a destroyed object                           | result     |
+| ---------------------------------------------------- | ---------- |
+| `UnityEngine.Assertions.Assert.IsNull(destroyed)`    | **passes** |
+| `UnityEngine.Assertions.Assert.IsNotNull(destroyed)` | **fails**  |
+
+Both are the destroyed-aware answers, and both are the opposite of what the same calls answer for a
+live object. Its `IsNull<T>` / `IsNotNull<T>` forward to a `UnityEngine.Object` overload that
+compares through the `==` operator, where `NUnit.Framework.Assert.IsNull(object)` has no such
+overload and genuinely tests CLR null. This is recorded because it reads as an omission: do not add
+the `UnityEngine.Assertions` namespace back.
+
+## `WUH005`: `UnityEngine.Random`
+
+`UnityEngine.Random` is one process-global generator that every caller shares. Its state is not
+out of reach -- `InitState` and `state` are exactly the two members that set and read it -- but they
+move every other caller along with them, so **no test can replay one system's draws in isolation**.
+A spawn table, a scatter or a procedural layout built on it produces a bug report that says
+"sometimes the fruit lands inside the wall" and no way to reproduce it.
+
+```csharp
+// WUH005: nothing can replay this.
+float angle = UnityEngine.Random.Range(0f, 360f);
+
+// Seedable, serializable, and a test can substitute its own.
+float angle = PRNG.Instance.NextFloat(0f, 360f);
+```
+
+The package ships [~20 generators behind `IRandom`](../features/utilities/random-generators.md), all
+seedable and serializable, plus `PRNG.Instance`. Taking an `IRandom` field is what lets a test seed
+it. `System.Random` is a different mistake with a different fix and is deliberately out of scope.
+
+Swapping afterwards changes every call site at once, which is why the rule is cheapest to adopt at
+zero uses. Port a range with care: `UnityEngine.Random.Range(x, x)` returns `x`, while
+`IRandom.NextFloat(min, max)` throws when `max` is not greater than `min`. For a spread that may
+legitimately be zero, draw with
+[`NextFloatInRange`](../features/utilities/random-generators.md#ranges-a-designer-authored).
+
+### Where it looks
+
+Any member of `UnityEngine.Random` -- method, property or field -- and its nested `State` type,
+wherever that type is named. Resolution is through the semantic model rather than textual, because
+both dodges are free: `using R = UnityEngine.Random;` leaves no `Random.` token to grep for, and
+`using static UnityEngine.Random;` leaves no qualifier at all.
+
+`UnityEngine.Random.State` reports under **this same id** rather than one of its own, and its half of
+the message is a different one: a type annotation draws nothing, so `PRNG.Instance` is no fix for it.
+What that snapshot ties you to is the engine's single generator, which is the only thing it can ever
+be resumed into. Hold a `RandomState` instead -- every `IRandom` hands one out through
+`InternalState`, the generators take one back through a constructor, and it serializes.
+
+**A second id was built for it and backed out on purpose.** Splitting the declaration off would have
+walked it out from under every `#pragma warning disable WUH005` a consumer had already written around
+a deliberate engine save and restore -- a package upgrade re-raising a warning they had answered,
+which is exactly what the `WUH###` contract forbids. Do not propose the split again.
+
+### What it deliberately does not report
+
+- Code inside `UnityEngine.Random` itself, and inside this package's own
+  [`UnityRandom`](../features/utilities/random-generators.md) adapter, whose entire job is to call
+  it. The exemption is scoped to that one type, so the twenty seedable generators beside it are
+  still covered.
+- `System.Random`, which is a different mistake with a different fix.
+
+## `WUH006`: a discarded `EffectHandle`
+
+`ApplyEffect` hands back the `EffectHandle` that removes the effect. Two members return one:
+`EffectHandler.ApplyEffect(AttributeEffect)`, and the `AttributeUtilities.ApplyEffect(this Object,
+AttributeEffect)` extension that finds or adds the handler for you. Both answer `EffectHandle?`.
+Where the effect is `ModifierDurationType.Infinite` -- the default a designer lands on, because a
+duration is a number somebody has to choose -- nothing else expires it, and **the object carrying the
+effect routinely outlives whatever applied it**: a summoner, a trigger volume or a cutscene director
+applies a hold to the player and then goes away.
+
+```csharp
+// WUH006: if this effect is ever re-authored to Infinite, it can never come off.
+player.ApplyEffect(immobilize);
+
+// The handle outlives the applier.
+_immobilizeHandle = player.ApplyEffect(immobilize);
+```
+
+Duration is authored data the compiler cannot see, so the rule is deliberately **not** gated on it.
+
+### Where it looks
+
+A discarded call **named `ApplyEffect`** whose return type is `EffectHandle` or `EffectHandle?`. The
+name gate is there because the return type alone is too wide: `Attribute.Add`, `Attribute.Subtract`
+and `EnsureHandle` hand back an `EffectHandle` with no undo obligation attached.
+
+`TagHandler` declares no `ApplyEffect` at all. Its `ForceApplyEffect(AttributeEffect)` returns
+`void`, so it never reaches this rule -- that is the member to call for an instant effect nothing
+will ever need to take off.
+
+### A handle-less wrapper of your own needs a suppression
+
+`ApplyEffectsNoAlloc` is a differently named member on a different type, not an overload of
+`ApplyEffect` -- and it is **not** exempt. Its two handle-less overloads
+(`ApplyEffectsNoAlloc(this Object, List<AttributeEffect>)` and the `IEnumerable<AttributeEffect>`
+one) each loop over `effectHandler.ApplyEffect(...)` and drop the handle, so both carry an explicit
+`#pragma warning disable WUH006` around the loop. Any wrapper you write in the same shape will need
+the same suppression, with a reason.
+
+Prefer the sibling overload where the handles matter:
+`ApplyEffectsNoAlloc(this Object, List<AttributeEffect>, List<EffectHandle>)` fills a buffer you own,
+and `ApplyEffects` returns the list.
+
+## `WUH007`: a discarded coroutine handle
+
+`StartCoroutine` returns the only thing that can stop the work, and the only thing that can answer
+"is this already running". Drop it and `StopAllCoroutines` is the sole remaining lever -- which also
+stops the coroutine doing the stopping.
+
+The rule matches on the **return type**, not on a method name. Measured in the tree this came from,
+the package's own periodic-job and delay helpers each outnumbered raw `StartCoroutine`, so a
+name-only rule saw 9 of 44 call sites. Matching `UnityEngine.Coroutine` covers
+`MonoBehaviour.StartCoroutine`, this package's `StartFunctionAsCoroutine`,
+`ExecuteFunctionAfterDelay`, `ExecuteFunctionNextFrame` and `ExecuteFunctionAfterFrame`, and any
+starter of your own, with no list to keep in sync.
+
+Where one owner starts many, a `List<Coroutine>` the owner clears where its state ends is the answer,
+not a bigger guard. A site that must outlive its starter should say so with a suppression carrying a
+reason.
+
+Reassigning a field over a live handle -- the shape that produces "it got faster every time I
+re-triggered it" -- is a dataflow question and is **not** reported.
+
+## `WUH008`: a `TryXxx` `out` value read without testing the call
+
+```csharp
+// WUH008: reads whatever the callee left in the slot on the path it failed.
+_ = map.TryGetValue(key, out Thing thing);
+thing.DoSomething();
+```
+
+The compiler already forces the callee to write every `out` before it returns, so the slot is never
+_unwritten_ -- it is **unspecified**. The BCL happens to write `default` on failure. **Nothing
+obliges anyone else's `TryXxx` to**, and this package ships plenty of them, so the same shape over
+its own API reads whatever the callee left in the slot. The failure is quiet in the worst way: a
+`default` struct or a `0` count is a plausible value, so the symptom is wrong behaviour rather than
+a crash.
+
+It is the mirror of the rule the package holds about writing an `out`: assign it immediately before
+each `return`, never once at the top, because an up-front assignment disables the compiler's
+definite-assignment check. Reading the `out` after `false` throws that away from the caller's side.
+
+### What it deliberately does not report
+
+- `out _`. A discard has nothing to read.
+- A discarded call whose `out` is never read afterwards -- `_ = set.TryAdd(x, out Thing unused);` is
+  a legitimate "add if absent".
+- `if (TryX(out v)) { ... }`, `if (!TryX(out v)) { return; }`, `while (TryX(out v))`, or any other
+  shape where the `bool` reached a condition, a local, a field, an argument or a return. That is the
+  overwhelming majority and reporting it would make the rule unusable.
+- A read that precedes the call in source order but reaches it on a later loop iteration. Pairing is
+  positional within one operation block rather than through a control-flow graph, which is sound for
+  the shape the rule is about -- call, then read -- and refuses to guess about the rest.
+- An `out` bound to another object's field (`TryFill(out other.Field)`). Only a local, a parameter,
+  a `static` field or one reached through `this` names a single storage slot; the field _symbol_ is
+  shared by every instance, so tracking `a.Field` and `b.Field` under it would pair a binding on one
+  object with a read of another.
+
+## `WUH009`: a teardown's `base` call that is not last
+
+```csharp
+protected override void OnDestroy()
+{
+    base.OnDestroy();   // drops the singleton registration, releases the messaging token
+    Announce(...);      // now has nothing to announce through
+}
+```
+
+There is a real asymmetry here, and it is why "always call base first" is wrong advice:
+
+- **Setup chains base-first.** The base has to have registered before the body uses what it
+  registered.
+- **Teardown chains base-last.** The body has to finish using it before the base takes it away.
+
+Reported in an `override` of `OnDestroy`, `OnDisable`, `OnApplicationQuit` or `Dispose()` when the
+`base` call is a top-level statement with executed statements after it. Local function declarations,
+empty statements and a bare `return;` do not count, because none of them runs anything the base call
+could have been moved ahead of; a `base` call nested inside an `if` or a `try` is left alone rather
+than guessed at. There is deliberately **no** allow-list for a body that "only logs afterwards":
+moving one line is cheaper than a suppression, and an exception list reads as permission.
+
+The message quotes the `base` call exactly as it was written, arguments included, rather than
+reconstructing a parameterless one.
+
+`Dispose` counts at the **parameterless arity only**. `Dispose(bool disposing)` is the BCL's own
+disposal protocol -- `Stream`, `HttpContent`, `DbConnection` -- where chaining
+`base.Dispose(disposing)` first is the documented convention rather than a mistake.
+
+No mirror rule for setup exists, here or anywhere else in the package. Ordering `Awake` and
+`OnEnable` base-first is still right; nothing checks it for you.
+
+## `WUH010`: a dictionary indexer read (opt-in)
+
+**This is the one member of the family that is off by default.** Reading a key you know is present
+is correct and ubiquitous, so an on-by-default rule here would bury the other nine on your first
+build. Turn it on when you want the discipline:
+
+```xml
+<Rule Id="WUH010" Action="Warning" />
+```
+
+A key indexer has nothing to return for a key that is absent. `Dictionary<K, V>` throws
+`KeyNotFoundException`; `TryGetValue` reports and hands you the value in the same lookup.
+
+```csharp
+// WUH010: throws for a key nobody guaranteed was there.
+Thing thing = _byId[id];
+
+// One lookup, and the absent key is handled where it happens.
+if (!_byId.TryGetValue(id, out Thing thing))
+{
+    return;
+}
+```
+
+`if (map.ContainsKey(k)) { Use(map[k]); }` is **still reported**, deliberately. Proving the guard
+covers the read needs dataflow, and the shape it would exempt is a double lookup that `TryGetValue`
+collapses into one — both point the same way.
+
+### `match.Groups["name"]`, which is worse than throwing
+
+`GroupCollection`'s string indexer does not throw. It returns a **non-participating** `Group` whose
+`Value` is `""`. So a group name the pattern does not declare — a typo, or a rename of the named
+group in the regex above — reads as an ordinary miss, forever, with nothing red. `TryGetValue`, or
+testing `Group.Success`, makes it visible.
+
+`GroupCollection` implements `IReadOnlyDictionary<string, Group>` only from .NET Core 3.0, and not
+on the netstandard2.1 profile Unity compiles against — so the interface test alone would report this
+in a modern unit test and nowhere a consumer builds. The analyzer matches the type by name as well,
+which is why it fires where it matters.
+
+### What it deliberately does not report
+
+- A **write**: `map[key] = value` is add-or-update and has no better `Try` form. An interface-typed
+  write and an object-initializer `["a"] = 1` are the same.
+- A compound read-modify-write **is** reported (`map[key] += 1`, `map[key]++`, `map[key] ??= v`):
+  the read half throws exactly as a bare read does. The counting idiom becomes
+  `map[key] = map.TryGetValue(key, out int count) ? count + 1 : 1;`.
+- An indexer on a `List<T>`, an array, a `string`, a `Span<T>`, or a `SortedList`'s `Values`.
+- `match.Groups[0]`, which is an `int` index and always present.
+
+### The package holds its own production code to it
+
+`Generator~/CheckProjects.ruleset` enables `WUH010` for the `TypeCheck` and `EditorCheck` local
+gates, where warnings are errors. The test check projects are deliberately **not** wired to it: 286
+of the 346 sites the rule first reported were in `Tests/`, dominated by fixtures whose subject _is_
+the indexer, and rewriting `Assert.AreEqual(1, map["a"])` in a dictionary's own test deletes what it
+tests. Separating those from the genuine accidents is tracked on
+[#653](https://github.com/Ambiguous-Interactive/unity-helpers/issues/653).
+
 ## Turning one off
 
 Suppress a single call site whose lookup is genuinely cold:
@@ -134,6 +466,8 @@ Or turn the rule off for the whole project in `Assets/Default.ruleset`:
     RuleNamespace="WallstopStudios.UnityHelpers.Analyzers">
     <Rule Id="WUH001" Action="None" />
     <Rule Id="WUH002" Action="None" />
+    <Rule Id="WUH003" Action="None" />
+    <Rule Id="WUH010" Action="Warning" />
   </Rules>
 </RuleSet>
 ```

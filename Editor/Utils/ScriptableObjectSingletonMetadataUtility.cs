@@ -399,7 +399,11 @@ namespace WallstopStudios.UnityHelpers.Editor.Utils
         /// <param name="metadata">The metadata asset to sync. If null, loads or creates the metadata asset.</param>
         internal static void SyncAllSingletonMetadata(ScriptableObjectSingletonMetadata metadata)
         {
-            metadata ??= LoadOrCreateMetadataAsset();
+            if (metadata == null)
+            {
+                metadata = LoadOrCreateMetadataAsset();
+            }
+
             if (metadata == null)
             {
                 Debug.LogWarning(
@@ -521,15 +525,19 @@ namespace WallstopStudios.UnityHelpers.Editor.Utils
             }
 
             // Remove stale entries (types that no longer exist or have no assets)
-            foreach (string existingTypeName in existingByTypeName.Keys)
+            foreach (
+                KeyValuePair<
+                    string,
+                    ScriptableObjectSingletonMetadata.Entry
+                > existing in existingByTypeName
+            )
             {
+                string existingTypeName = existing.Key;
                 if (!foundTypeNames.Contains(existingTypeName))
                 {
                     // Type was not found during scan - could be deleted or renamed
                     // Also check if the asset still exists
-                    ScriptableObjectSingletonMetadata.Entry staleEntry = existingByTypeName[
-                        existingTypeName
-                    ];
+                    ScriptableObjectSingletonMetadata.Entry staleEntry = existing.Value;
                     if (!string.IsNullOrEmpty(staleEntry.resourcesLoadPath))
                     {
                         string assetPath = $"Assets/Resources/{staleEntry.resourcesLoadPath}.asset";

@@ -1,0 +1,208 @@
+// MIT License - Copyright (c) 2026 wallstop
+// Full license text: https://github.com/wallstop/unity-helpers/blob/main/LICENSE
+
+namespace WallstopStudios.UnityHelpers.Editor.Validation
+{
+#if UNITY_EDITOR
+    using System;
+    using System.Collections.Generic;
+    using System.IO;
+    using UnityEditor;
+    using UnityEngine;
+    using Object = UnityEngine.Object;
+
+    /// <summary>
+    /// Drops serialized keys no field claims, one asset at a time, and undoes any rewrite that
+    /// loses content.
+    /// </summary>
+    /// <remarks>
+    /// <c>ForceReserializeAssets</c> is not safe unsupervised: an asset whose content lives in
+    /// sub-objects can come back with them gone while the rewrite reports success. So each asset is
+    /// rewritten alone and any rewrite that lowers its non-null object count is undone. See
+    /// <see href="https://github.com/Ambiguous-Interactive/unity-helpers/blob/main/docs/features/editor-tools/authored-asset-validation.md">Authored Asset Validation</see>.
+    /// </remarks>
+    public static class StaleSerializedKeyRepair
+    {
+        /// <summary>
+        /// Rewrites each of <paramref name="assetPaths"/> alone, undoing any that loses content.
+        /// </summary>
+        /// <param name="assetPaths">The assets to rewrite.</param>
+        /// <param name="outcomes">Receives what happened to each asset, keyed by path.</param>
+        /// <returns><c>false</c> when the repair could not run at all.</returns>
+        public static bool TryRepair(
+            IReadOnlyList<string> assetPaths,
+            Dictionary<string, StaleSerializedKeyRepairOutcome> outcomes
+        )
+        {
+            if (assetPaths == null || outcomes == null)
+            {
+                return false;
+            }
+
+            outcomes.Clear();
+            for (int index = 0; index < assetPaths.Count; ++index)
+            {
+                string assetPath = assetPaths[index];
+                if (string.IsNullOrEmpty(assetPath))
+                {
+                    continue;
+                }
+
+                outcomes[assetPath] = RepairAsset(assetPath);
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Rewrites one asset, undoing the rewrite when it comes back with less than it went in with.
+        /// </summary>
+        /// <param name="assetPath">The asset to rewrite.</param>
+        /// <returns>What happened.</returns>
+        public static StaleSerializedKeyRepairOutcome RepairAsset(string assetPath)
+        {
+            if (string.IsNullOrEmpty(assetPath))
+            {
+                return StaleSerializedKeyRepairOutcome.RefusedUnreadable;
+            }
+
+            /*
+                The AssetDatabase is asked with the asset path and the filesystem with the resolved
+                one: an asset path is project-relative, and reading it directly would depend on the
+                process working directory rather than on the project.
+            */
+            string filePath = AuthoredAssetPaths.ToFileSystemPath(assetPath);
+            byte[] original;
+            try
+            {
+                if (!File.Exists(filePath))
+                {
+                    return StaleSerializedKeyRepairOutcome.RefusedUnreadable;
+                }
+
+                original = File.ReadAllBytes(filePath);
+            }
+            catch (Exception)
+            {
+                return StaleSerializedKeyRepairOutcome.RefusedUnreadable;
+            }
+
+            int before = LoadedObjectCount(assetPath);
+            if (before <= 0)
+            {
+                return StaleSerializedKeyRepairOutcome.RefusedUnreadable;
+            }
+
+            try
+            {
+                /*
+                    Metadata rather than assets-only, because with assets-only a prefab is silently
+                    not rewritten at all -- measured on ten of them, which read as "these had no
+                    stale keys".
+                */
+                AssetDatabase.ForceReserializeAssets(
+                    new[] { assetPath },
+                    ForceReserializeAssetsOptions.ReserializeAssetsAndMetadata
+                );
+            }
+            catch (Exception)
+            {
+                return Restore(assetPath, filePath, original)
+                    ? StaleSerializedKeyRepairOutcome.RefusedUnreadable
+                    : StaleSerializedKeyRepairOutcome.RefusedUndoFailed;
+            }
+
+            int after = LoadedObjectCount(assetPath);
+            if (after < before)
+            {
+                return Restore(assetPath, filePath, original)
+                    ? StaleSerializedKeyRepairOutcome.RefusedLostSubObjects
+                    : StaleSerializedKeyRepairOutcome.RefusedUndoFailed;
+            }
+
+            return SameBytes(filePath, original)
+                ? StaleSerializedKeyRepairOutcome.NotRewritten
+                : StaleSerializedKeyRepairOutcome.Repaired;
+        }
+
+        private static int LoadedObjectCount(string assetPath)
+        {
+            Object[] loaded = AssetDatabase.LoadAllAssetsAtPath(assetPath);
+            if (loaded == null)
+            {
+                return 0;
+            }
+
+            int count = 0;
+            foreach (Object asset in loaded)
+            {
+                if (asset != null)
+                {
+                    ++count;
+                }
+            }
+
+            return count;
+        }
+
+        private static bool SameBytes(string filePath, byte[] original)
+        {
+            try
+            {
+                byte[] current = File.ReadAllBytes(filePath);
+                if (current.Length != original.Length)
+                {
+                    return false;
+                }
+
+                for (int index = 0; index < current.Length; ++index)
+                {
+                    if (current[index] != original[index])
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        /// <summary>Puts the original bytes back and makes the editor re-read them.</summary>
+        /// <param name="assetPath">The asset path, for the re-import.</param>
+        /// <param name="filePath">The resolved path, for the write.</param>
+        /// <param name="original">The bytes captured before the rewrite.</param>
+        /// <returns><c>false</c> when the undo did not complete.</returns>
+        /// <remarks>
+        /// A failure here is the worst outcome this type has: the rewrite already happened, so
+        /// swallowing it would leave a damaged asset while the caller reported a refusal. It is
+        /// reported as an error naming the file, because the recovery is a human restoring it.
+        /// </remarks>
+        private static bool Restore(string assetPath, string filePath, byte[] original)
+        {
+            try
+            {
+                File.WriteAllBytes(filePath, original);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogError(
+                    $"[Unity Helpers] Could not undo the rewrite of {assetPath}: {exception.Message}. "
+                        + $"The file at {filePath} holds the rewritten bytes, not the original. "
+                        + "Restore it from source control before saving the project."
+                );
+                return false;
+            }
+
+            AssetDatabase.ImportAsset(
+                assetPath,
+                ImportAssetOptions.ForceUpdate | ImportAssetOptions.ForceSynchronousImport
+            );
+            return true;
+        }
+    }
+#endif
+}

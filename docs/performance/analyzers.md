@@ -4,19 +4,21 @@ Unity Helpers ships a Roslyn analyzer that reports footguns in code that already
 the most part, already works. It runs on your code as well as the package's, because the shapes it
 finds are not specific to either.
 
-| Id                                                                       | Reports                                                     |
-| ------------------------------------------------------------------------ | ----------------------------------------------------------- |
-| [`WUH001`](#wuh001-a-lookup-factory-passed-as-a-method-group)            | A lookup factory passed as a method group                   |
-| [`WUH002`](#wuh002-a-nested-collection-unity-does-not-serialize)         | A nested collection Unity does not serialize                |
-| [`WUH003`](#wuh003-null-propagation-on-a-unityengineobject)              | `?.` / `?[]` / `??` / `??=` on a `UnityEngine.Object`       |
-| [`WUH004`](#wuh004-a-null-assertion-that-passes-over-a-destroyed-object) | An NUnit null assertion that passes over a destroyed object |
-| [`WUH005`](#wuh005-unityenginerandom)                                    | `UnityEngine.Random`, which no test can replay in isolation |
-| [`WUH006`](#wuh006-a-discarded-effecthandle)                             | A discarded `EffectHandle`                                  |
-| [`WUH007`](#wuh007-a-discarded-coroutine-handle)                         | A discarded coroutine handle                                |
-| [`WUH008`](#wuh008-a-tryxxx-out-value-read-without-testing-the-call)     | A `TryXxx` `out` value read without testing the call        |
-| [`WUH009`](#wuh009-a-teardowns-base-call-that-is-not-last)               | A teardown's `base` call that is not last                   |
-| [`WUH010`](#wuh010-a-dictionary-indexer-read-opt-in)                     | A dictionary indexer read (**off by default**)              |
-| [`WUH011`](#wuh011-changing-a-serialized-string-comparer-after-use)      | A comparer mode changed after collection construction       |
+| Id                                                                       | Reports                                                           |
+| ------------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| [`WUH001`](#wuh001-a-lookup-factory-passed-as-a-method-group)            | A lookup factory passed as a method group                         |
+| [`WUH002`](#wuh002-a-nested-collection-unity-does-not-serialize)         | A nested collection Unity does not serialize                      |
+| [`WUH003`](#wuh003-null-propagation-on-a-unityengineobject)              | `?.` / `?[]` / `??` / `??=` / `is null` on a `UnityEngine.Object` |
+| [`WUH004`](#wuh004-a-null-assertion-that-passes-over-a-destroyed-object) | An NUnit null assertion that passes over a destroyed object       |
+| [`WUH005`](#wuh005-unityenginerandom)                                    | `UnityEngine.Random`, which no test can replay in isolation       |
+| [`WUH006`](#wuh006-a-discarded-effecthandle)                             | A discarded `EffectHandle`                                        |
+| [`WUH007`](#wuh007-a-discarded-coroutine-handle)                         | A discarded coroutine handle                                      |
+| [`WUH008`](#wuh008-a-tryxxx-out-value-read-without-testing-the-call)     | A `TryXxx` `out` value read without testing the call              |
+| [`WUH009`](#wuh009-a-teardowns-base-call-that-is-not-last)               | A teardown's `base` call that is not last                         |
+| [`WUH010`](#wuh010-a-dictionary-indexer-read-opt-in)                     | A dictionary indexer read (**off by default**)                    |
+| [`WUH011`](#wuh011-changing-a-serialized-string-comparer-after-use)      | A comparer mode changed after collection construction             |
+| [`WUH012`](#wuh012-a-serialized-row-dereferenced-without-a-test)         | A serialized row dereferenced without a null test                 |
+| [`WUH013`](#wuh013-a-counting-loop-that-could-be-a-foreach)              | A counting loop that could be a `foreach` (**off by default**)    |
 
 These are a different family from the `WPROTO###` serialization diagnostics, and they follow a
 different policy on purpose:
@@ -26,12 +28,12 @@ different policy on purpose:
 | Reports             | A serialization contract that cannot be honoured             | An allocation or footgun in correct code |
 | Severity            | Error: the alternative is an exception from a shipped player | **Warning, always**                      |
 | Can fail your build | Yes, and it should                                           | **No**                                   |
-| Default             | On                                                           | On, except `WUH010`                      |
+| Default             | On                                                           | On, except `WUH010` and `WUH013`         |
 
 **A `WUH###` diagnostic will never fail your build.** Taking a package upgrade cannot turn a green
 build red over one of these. If your project treats warnings as errors, see
-[Turning one off](#turning-one-off). `WUH010` goes further and is off until you ask for it, because
-its shape is correct code far more often than it is a defect.
+[Turning one off](#turning-one-off). `WUH010` and `WUH013` go further and are off until you ask for them, because
+their shapes are correct code far more often than they are defects.
 
 ## `WUH001`: a lookup factory passed as a method group
 
@@ -137,8 +139,17 @@ null-conditional and null-coalescing operators do not use that overload -- they 
 a destroyed object `obj?.Foo()` runs the member access and `obj ?? fallback` hands back the
 destroyed object, both silently, and both at exactly the moment the guard was written for.
 
-All four spellings are reported: `?.`, the null-conditional **index** `?[]`, `??` and `??=`. The
-message quotes back whichever one you wrote, so `?[]` is never reported as `?.`.
+Six spellings are reported: `?.`, the null-conditional **index** `?[]`, `??`, `??=`, `is null` and
+`is not null`. The message quotes back whichever one you wrote, so `?[]` is never reported as `?.`.
+
+A pattern is the same mistake in different syntax -- `row is null` is a CLR null test, so a destroyed
+object reads as alive -- and it is easy to reach for precisely because it looks like a null check
+rather than an operator.
+
+A **type** pattern is deliberately **not** reported. `row is Sprite` is not a null test at all: a
+destroyed object keeps its managed wrapper and still matches, so there is no null test to correct.
+That is the same reason [`WUH012`](#wuh012-a-serialized-row-dereferenced-without-a-test) refuses to
+accept one as a guard.
 
 ```csharp
 // WUH003: a destroyed window still gets Close() called on it.
@@ -392,7 +403,7 @@ No mirror rule for setup exists, here or anywhere else in the package. Ordering 
 ## `WUH010`: a dictionary indexer read (opt-in)
 
 **This is the one member of the family that is off by default.** Reading a key you know is present
-is correct and ubiquitous, so an on-by-default rule here would bury the other ten on your first
+is correct and ubiquitous, so an on-by-default rule here would bury the other eleven on your first
 build. Turn it on when you want the discipline:
 
 ```xml
@@ -478,6 +489,87 @@ the use and write in one block is deliberately conservative: it avoids claiming 
 exclusive branches both ran. Aliases, custom collections, and ownership passed between methods are
 outside its local flow scope.
 
+## `WUH012`: a serialized row dereferenced without a test
+
+A serialized `List<T>` or `T[]` of references is **untrusted data**. Delete or rename the asset a
+row names -- or take a component off a prefab, which is a far more ordinary edit -- and Unity leaves
+the row behind, empty. No editing session has to have happened for "the list is authored correctly"
+to stop being true.
+
+```csharp
+[SerializeField]
+private List<KeycapDefinition> _keycaps;
+
+private void OnEnable()
+{
+    foreach (KeycapDefinition keycap in _keycaps)
+    {
+        // WUH012: one deleted keycap takes out everything after this loop in OnEnable.
+        keycap.Load();
+    }
+}
+```
+
+Guarding the **list** is not guarding the **rows**: `if (_postProcessors != null)` still throws on
+the first empty row. Test the row, or drop the null rows once and walk them forever after:
+
+```csharp
+private void Awake()
+{
+    _keycaps.RemoveAll(keycap => keycap == null);
+}
+```
+
+Compaction counts as the guard on purpose. Where a list is walked more than once, testing each row
+in each walk is the worse of the two repairs, and a rule that makes the code worse in order to be
+satisfied is a rule people route around. A null test anywhere in the walk's body clears the rule
+too: once the author has treated the row as an input, where the test belongs is theirs. `if (!row)`
+counts, because `UnityEngine.Object`'s implicit `bool` conversion is the same native aliveness check
+`==` performs.
+
+The rule asks the symbol whether the element type derives from `UnityEngine.Object`, so an alias, a
+constrained type parameter, or a base class of your own reaches it. It looks only at `foreach` over
+a field the Unity serializer accepts: a `[NonSerialized]` field, a private field with no
+`[SerializeField]`, and a local copy are all outside it.
+
+## `WUH013`: a counting loop that could be a `foreach`
+
+`foreach` over an **array** or a **`List<T>`** allocates nothing: the array form compiles to an
+indexed loop, and `List<T>` returns a struct enumerator the JIT keeps on the stack. So a counting
+loop over either, whose body only ever uses the index to reach into that same sequence, says less
+than `foreach` does for no benefit.
+
+```csharp
+// WUH013: the index is only ever used to index rows.
+for (int index = 0; index < rows.Length; ++index)
+{
+    Process(rows[index]);
+}
+
+foreach (Row row in rows)
+{
+    Process(row);
+}
+```
+
+**The counting loop is the right shape more often than not**, which is why this is off by default.
+It is not reported when:
+
+- the sequence is an **interface** -- `IReadOnlyList<T>` and `IList<T>` hand back
+  `IEnumerator<T>`, which **boxes**, so the counting loop is the allocation-free one;
+- the body uses the index for anything else -- reporting it, offsetting it, indexing a second
+  collection with it;
+- the walk is not the ordinary forward one: a non-zero start, a stride other than one, or backwards.
+
+The discriminator is the sequence's **type**, which is why this cannot be a source linter: the loop
+over `List<T>` and the identical loop over `IReadOnlyList<T>` are the same tokens and opposite
+answers.
+
+Turn it on with `<Rule Id="WUH013" Action="Warning" />` in `Assets/Default.ruleset`. Measured at
+**127 sites** across this package on 2026-09-01, which is why it ships off and why the package does
+not yet hold itself to it
+([#671](https://github.com/Ambiguous-Interactive/unity-helpers/issues/671)).
+
 ## Turning one off
 
 Suppress a single call site whose lookup is genuinely cold:
@@ -500,6 +592,8 @@ Or turn the rule off for the whole project in `Assets/Default.ruleset`:
     <Rule Id="WUH003" Action="None" />
     <Rule Id="WUH010" Action="Warning" />
     <Rule Id="WUH011" Action="None" />
+    <Rule Id="WUH012" Action="None" />
+    <Rule Id="WUH013" Action="Warning" />
   </Rules>
 </RuleSet>
 ```

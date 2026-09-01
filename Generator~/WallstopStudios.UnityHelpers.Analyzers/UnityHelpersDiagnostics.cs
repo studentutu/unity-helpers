@@ -268,7 +268,7 @@ namespace WallstopStudios.UnityHelpers.Analyzers
             new DiagnosticDescriptor(
                 "WUH010",
                 "A dictionary indexer read has no answer for a missing key",
-                "This reads '{0}' through its key indexer, which has nothing to return for a key that is absent: it throws 'KeyNotFoundException', or -- for 'GroupCollection' -- hands back a 'Group' that never matched, so a name the pattern does not declare reads as an ordinary miss forever. Call 'TryGetValue' and handle the absent key on the spot. WUH010 is the one member of this family that is off by default, because reading a key that is known present is correct and ubiquitous and an on-by-default rule here would bury the other ten; turn it on with a '<Rule Id=\"WUH010\" Action=\"Warning\" />' line in 'Assets/Default.ruleset'.",
+                "This reads '{0}' through its key indexer, which has nothing to return for a key that is absent: it throws 'KeyNotFoundException', or -- for 'GroupCollection' -- hands back a 'Group' that never matched, so a name the pattern does not declare reads as an ordinary miss forever. Call 'TryGetValue' and handle the absent key on the spot. WUH010 is off by default, as WUH013 is, because reading a key that is known present is correct and ubiquitous and an on-by-default rule here would bury the correctness rules; turn it on with a '<Rule Id=\"WUH010\" Action=\"Warning\" />' line in 'Assets/Default.ruleset'.",
                 "Correctness",
                 DiagnosticSeverity.Warning,
                 isEnabledByDefault: false
@@ -292,6 +292,65 @@ namespace WallstopStudios.UnityHelpers.Analyzers
                 "Correctness",
                 DiagnosticSeverity.Warning,
                 isEnabledByDefault: true
+            );
+
+        /// <summary>
+        /// A walk of a Unity-serialized collection of object references that dereferences a row
+        /// without testing it.
+        /// </summary>
+        /// <remarks>
+        /// A serialized <c>List&lt;T&gt;</c> holds references. Delete or rename the asset a row
+        /// names and Unity leaves the row behind, empty -- so "the list is authored correctly" is
+        /// not a property any authoring step preserves, and no editing session has to have happened
+        /// for it to stop being true. The row also empties when a component is taken off a prefab,
+        /// which is a far more ordinary edit than deleting a file.
+        /// <para>
+        /// The asymmetry is the point. In two of the five sites measured the author had already
+        /// thought about null, in the seam they wrote by hand, four lines from the offending loop:
+        /// the guarded seam is the one somebody wrote, and the unguarded one is the serialized
+        /// field, which nobody thinks of as an input. Compaction counts as the guard, because where
+        /// a list is walked more than once the right repair is to drop the null rows once rather
+        /// than test each row forever -- and a rule that makes the code worse in order to be
+        /// satisfied is a rule people route around (#628).
+        /// </para>
+        /// </remarks>
+        internal static readonly DiagnosticDescriptor SerializedRowDereferencedWithoutTest =
+            new DiagnosticDescriptor(
+                "WUH012",
+                "A serialized collection of references is untrusted data",
+                "'{0}' is serialized, so a row goes empty whenever the asset or component it names is deleted -- with nobody editing and nothing else changing. This walk dereferences '{1}' without testing it, and in OnEnable, Awake or Start the throw lands before everything after it in the same method. Test the row, or drop the null rows once with RemoveAll before the walk.",
+                "Correctness",
+                DiagnosticSeverity.Warning,
+                isEnabledByDefault: true
+            );
+
+        /// <summary>
+        /// A counting <c>for</c> over an array or <c>List&lt;T&gt;</c> whose body never uses the
+        /// index, where <c>foreach</c> allocates nothing and says what the loop means.
+        /// </summary>
+        /// <remarks>
+        /// <c>foreach</c> over an array or a <c>List&lt;T&gt;</c> is allocation-free: the array form
+        /// compiles to an indexed loop and <c>List&lt;T&gt;</c> returns a struct enumerator the JIT
+        /// keeps on the stack. The exception is an interface -- <c>IReadOnlyList&lt;T&gt;</c> and
+        /// <c>IList&lt;T&gt;</c> hand back <c>IEnumerator&lt;T&gt;</c>, which boxes -- so a counting
+        /// loop there is correct and is not reported. Neither is a loop whose body reads the index,
+        /// walks a non-unit stride, runs backwards, or does not start at zero.
+        /// <para>
+        /// The second member of this family that ships <b>off by default</b>, for the reason the
+        /// criterion names: the rule is right and the shape is everywhere. Measured 2026-09-01 at
+        /// <b>127 sites</b> across <c>Runtime/</c>, <c>Editor/</c> and <c>Tests/</c>, so on by
+        /// default it would bury the eleven correctness rules on a consumer's first build after an
+        /// upgrade. The package opts in once the population is worked down (#671).
+        /// </para>
+        /// </remarks>
+        internal static readonly DiagnosticDescriptor CountingLoopOverAllocationFreeSequence =
+            new DiagnosticDescriptor(
+                "WUH013",
+                "This loop can be a foreach",
+                "'{0}' is a '{1}', which 'foreach' walks without allocating, and this loop never uses '{2}' for anything but indexing it. Write it as 'foreach' so the loop says what it does. A counting loop is the right shape over an interface like 'IReadOnlyList<T>', whose enumerator boxes, and wherever the body needs the index itself. Off by default: turn it on with '<Rule Id=\"WUH013\" Action=\"Warning\" />' in 'Assets/Default.ruleset'.",
+                "Style",
+                DiagnosticSeverity.Warning,
+                isEnabledByDefault: false
             );
     }
 }

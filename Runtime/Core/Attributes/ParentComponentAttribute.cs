@@ -182,20 +182,20 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
                     bool foundParent;
                     if (field.kind == FieldKind.Single)
                     {
+                        /*
+                            No GetComponentInParent fast path in front of this walk: the one that
+                            was here could never run, because its gate refused both halves of an
+                            exhaustive pair. Reinstating one is a behaviour change that wants
+                            measurement (#644).
+                        */
                         if (
-                            TryAssignParentSingleFast(
-                                root,
-                                field,
-                                filters,
-                                out Component parentComponent
-                            )
-                            || TryGetFirstParentComponent(
+                            TryGetFirstParentComponent(
                                 root,
                                 filters,
                                 field.elementType,
                                 field.attribute,
                                 field.isInterface,
-                                out parentComponent
+                                out Component parentComponent
                             )
                         )
                         {
@@ -632,36 +632,6 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
             return buffer;
         }
 
-        private static bool TryAssignParentSingleFast(
-            Transform root,
-            FieldMetadata<ParentComponentAttribute> metadata,
-            FilterParameters filters,
-            out Component parentComponent
-        )
-        {
-            if (
-                root == null
-                || metadata.isInterface
-                || filters.RequiresPostProcessing
-                || metadata.attribute.IncludeInactive
-                || 0 < metadata.attribute.MaxDepth
-            )
-            {
-                parentComponent = null;
-                return false;
-            }
-
-            Component candidate = root.GetComponentInParent(metadata.elementType);
-            if (candidate == null)
-            {
-                parentComponent = null;
-                return false;
-            }
-
-            parentComponent = candidate;
-            return true;
-        }
-
         private static bool TryGetFirstParentComponent(
             Transform root,
             FilterParameters filters,
@@ -786,9 +756,9 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
                 at runtime in player builds).
             */
             Component[] matches = component.GetComponentsInParent(elementType, includeInactive);
-            for (int i = 0; i < matches.Length; ++i)
+            foreach (Component match in matches)
             {
-                results.Add(matches[i]);
+                results.Add(match);
             }
 
             return results;

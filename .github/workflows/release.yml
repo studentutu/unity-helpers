@@ -408,8 +408,33 @@ jobs:
           results-dir: .artifacts/unity/unitypackage-project/unitypackage-output
           label: Unity package export
 
+      # LEAK GUARD: Unity writes its license identity into unity.log and
+      # configure.log while it activates. GitHub masks a registered secret in
+      # the rendered job log, but it never rewrites the bytes of an uploaded
+      # artifact, so the upload below would hand the serial to anyone who can
+      # download it. Scrub the tree after the last Unity invocation and before
+      # the first upload that can carry a log.
+      # Scope is exactly what this job uploads. A wider scope reaches files the
+      # job never publishes -- the Docker license cache under this tree is
+      # written by root and cannot be rewritten by the runner -- and the
+      # redactor fails closed on a file it cannot scrub, so a wider scope fails
+      # the job over a file that was never at risk.
+      - name: Redact credentials from Unity artifacts
+        id: redact_unity_artifacts
+        if: always()
+        timeout-minutes: 2
+        uses: ./.github/actions/redact-unity-artifacts
+        with:
+          paths: |
+            .artifacts/unity/unitypackage-project/Assets/Editor
+            .artifacts/unity/unitypackage-project/Packages
+            .artifacts/unity/unitypackage-project/ProjectSettings
+            .artifacts/unity/unitypackage-project/unitypackage-output
+
       - name: Upload .unitypackage export diagnostics
-        if: ${{ failure() || cancelled() }}
+        if: >-
+          ${{ (failure() || cancelled())
+          && steps.redact_unity_artifacts.outcome == 'success' }}
         timeout-minutes: 5
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:

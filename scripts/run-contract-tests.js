@@ -162,6 +162,11 @@ const CHECKS = [
     run: "npm run test:lint-nested-type-placement"
   },
   {
+    id: "typecheck-controls",
+    name: "Type-check gate control self-test",
+    run: "npm run test:typecheck-controls"
+  },
+  {
     id: "lint-comment-block-form",
     name: "Comment block-form linter self-test",
     run: "npm run test:lint-comment-block-form"
@@ -289,9 +294,24 @@ const CHECKS = [
     run: "npm run test:license-year-rename"
   },
   {
+    id: "license-year-copy-detection",
+    name: "License year copy detection",
+    run: "npm run test:license-year-copy-detection"
+  },
+  {
     id: "unity-nunit-results",
     name: "Unity NUnit results gate",
     run: "npm run test:unity-nunit-results"
+  },
+  {
+    id: "redact-unity-artifacts",
+    name: "Unity artifact credential redactor",
+    run: "npm run test:redact-unity-artifacts"
+  },
+  {
+    id: "unity-artifact-redaction",
+    name: "Unity artifact redaction coverage",
+    run: "npm run test:unity-artifact-redaction"
   },
   {
     id: "shell-portability",

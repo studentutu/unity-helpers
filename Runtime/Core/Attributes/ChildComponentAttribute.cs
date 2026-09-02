@@ -353,16 +353,29 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
                 return false;
             }
 
+            /*
+                GetComponentsInChildren(type, false) excludes components on INACTIVE GameObjects and
+                nothing else: a disabled Behaviour on an active object comes back. The slow path
+                filters those through IsComponentEnabled, so without this check a single field and a
+                collection field carrying the identical attribute disagreed about the same
+                hierarchy -- and only for a sealed element type, which is the only shape that
+                reaches this fast path at all.
+            */
+            bool requireEnabled = !attribute.IncludeInactive;
             Transform componentTransform = component.transform;
-            for (int i = 0; i < results.Length; ++i)
+            foreach (Component candidate in results)
             {
-                Component candidate = results[i];
                 if (candidate == null)
                 {
                     continue;
                 }
 
                 if (attribute.OnlyDescendants && candidate.transform == componentTransform)
+                {
+                    continue;
+                }
+
+                if (requireEnabled && !candidate.IsComponentEnabled())
                 {
                     continue;
                 }
@@ -780,9 +793,8 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
                     components
                 );
 
-                for (int i = 0; i < components.Count; ++i)
+                foreach (Component candidate in components)
                 {
-                    Component candidate = components[i];
                     if (!PassesStateAndFilters(candidate, filters, filterDisabledComponents: true))
                     {
                         continue;
@@ -859,9 +871,9 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
                 at runtime in player builds).
             */
             Component[] matches = component.GetComponentsInChildren(elementType, includeInactive);
-            for (int i = 0; i < matches.Length; ++i)
+            foreach (Component match in matches)
             {
-                results.Add(matches[i]);
+                results.Add(match);
             }
 
             return results;

@@ -92,6 +92,21 @@ namespace WallstopStudios.UnityHelpers.Tags
         private readonly Dictionary<string, uint> _tagCount = new(StringComparer.Ordinal);
         private readonly Dictionary<long, EffectHandle> _effectHandles = new();
 
+        /*
+            How many of each handle's effect tags were actually raised, which is not always all of
+            them. Removal used to decrement every tag the effect names, so a handle that applied
+            only the first of two -- because a subscriber removed the effect, or threw, between
+            them -- decremented a count belonging to a DIFFERENT effect. That effect then reports
+            active while the tag it owns is gone, and nothing repairs it, because InternalRemoveTag
+            on an absent key is silent.
+
+            A count rather than the tags themselves: application walks effect.effectTags in order
+            and stops, so what was raised is always a prefix. Reading the list again at removal is
+            what this type has always done, so the count adds no new assumption about that list
+            holding still, and it keeps the path allocation-free.
+        */
+        private readonly Dictionary<long, int> _appliedTagCountByHandle = new();
+
         private void Awake()
         {
             if (_initialEffectTags is { Count: > 0 })
@@ -569,7 +584,8 @@ namespace WallstopStudios.UnityHelpers.Tags
             foreach (EffectHandle handle in _effectHandles.Values)
             {
                 if (
-                    handle.effect.effectTags != null
+                    handle.effect != null
+                    && handle.effect.effectTags != null
                     && handle.effect.effectTags.Contains(effectTag)
                 )
                 {
@@ -637,7 +653,8 @@ namespace WallstopStudios.UnityHelpers.Tags
                 foreach (EffectHandle handle in _effectHandles.Values)
                 {
                     if (
-                        handle.effect.effectTags != null
+                        handle.effect != null
+                        && handle.effect.effectTags != null
                         && handle.effect.effectTags.Contains(effectTag)
                     )
                     {
@@ -687,6 +704,14 @@ namespace WallstopStudios.UnityHelpers.Tags
         /// Provides an allocation-free view of handles contributing the specified tag.
         /// </summary>
         /// <param name="effectTag">The tag to query.</param>
+        /// <remarks>
+        /// <b>Read-only for the duration of the loop.</b> This walks the live handle table, so
+        /// removing an effect from inside the loop -- which the
+        /// <see cref="GetHandlesWithTag(string, List{EffectHandle})"/> example does, and which is
+        /// the obvious thing to want -- mutates the collection being enumerated and leaves the rest
+        /// of the handles unvisited. Take the buffered overload for that: it copies first, and the
+        /// buffer is the caller's, so it costs nothing per call either.
+        /// </remarks>
         public HandleEnumerable EnumerateHandlesWithTag(string effectTag)
         {
             if (string.IsNullOrEmpty(effectTag) || _effectHandles.Count == 0)
@@ -710,7 +735,42 @@ namespace WallstopStudios.UnityHelpers.Tags
                 return;
             }
 
-            ApplyEffectTags(handle.effect);
+            _appliedTagCountByHandle[id] = 0;
+            try
+            {
+                ApplyTrackedEffectTags(id, handle.effect);
+            }
+            catch (Exception applyFailure)
+            {
+                /*
+                    Take the handle back out and undo exactly what this call raised, so the caller's
+                    rollback -- which calls ForceRemoveTags -- finds nothing and cannot decrement a
+                    tag this handle never raised. Guarded on the removal succeeding: a subscriber
+                    that already tore the effect down did that unwinding itself, and repeating it
+                    would decrement counts belonging to other effects.
+                */
+                if (_effectHandles.Remove(id))
+                {
+                    _ = _appliedTagCountByHandle.Remove(id, out int applied);
+                    try
+                    {
+                        RemoveTrackedTags(handle.effect, applied);
+                    }
+                    catch (Exception unwindFailure)
+                    {
+                        /*
+                            RemoveTrackedTags rethrows the first subscriber that threw while tags
+                            were coming off. Letting that escape replaces the exception being
+                            unwound -- the CAUSE -- with a consequence of unwinding it, and the
+                            rethrow below never runs at all. Keep the cause and log the rest, which
+                            is what every other teardown path in this type does.
+                        */
+                        _ = TeardownFailures.KeepFirst(this, applyFailure, unwindFailure);
+                    }
+                }
+
+                throw;
+            }
         }
 
         /// <summary>
@@ -741,17 +801,33 @@ namespace WallstopStudios.UnityHelpers.Tags
                 return false;
             }
 
-            RemoveEffectTags(appliedHandle.effect);
+            /*
+                The two dictionaries are written together in ForceApplyTags with nothing between
+                them, so a registered handle always has a ledger entry. A miss yields 0, which
+                removes nothing -- the conservative answer, rather than falling back to decrementing
+                every tag the effect names, which is the defect this ledger exists to fix.
+            */
+            _ = _appliedTagCountByHandle.Remove(id, out int applied);
+            RemoveTrackedTags(appliedHandle.effect, applied);
             return true;
         }
 
         private void InternalApplyTag(string effectTag)
         {
-            uint currentCount = _tagCount.AddOrUpdate(
+            NotifyTagApplied(effectTag, RaiseTagCount(effectTag));
+        }
+
+        private uint RaiseTagCount(string effectTag)
+        {
+            return _tagCount.AddOrUpdate(
                 effectTag,
                 static _ => 1U,
                 static (_, existing) => existing + 1
             );
+        }
+
+        private void NotifyTagApplied(string effectTag, uint currentCount)
+        {
             if (currentCount == 1)
             {
                 OnTagAdded?.Invoke(effectTag);
@@ -795,6 +871,11 @@ namespace WallstopStudios.UnityHelpers.Tags
 
         private void ApplyEffectTags(AttributeEffect effect)
         {
+            if (effect == null)
+            {
+                return;
+            }
+
             if (effect.effectTags == null)
             {
                 return;
@@ -806,25 +887,77 @@ namespace WallstopStudios.UnityHelpers.Tags
             }
         }
 
-        private void RemoveEffectTags(AttributeEffect effect)
+        /*
+            InternalApplyTag raises OnTagAdded / OnTagCountChanged, which is user code, and a
+            subscriber may remove the effect between one tag and the next. Without the liveness
+            check the loop went on raising tags for a handle that no longer exists anywhere, and a
+            tag raised that way can never come off: no effect owns it and no removal path can find
+            it. The entity stays stunned, rooted or silenced for good.
+        */
+        private void ApplyTrackedEffectTags(long id, AttributeEffect effect)
         {
-            if (effect.effectTags == null)
+            if (effect == null)
             {
                 return;
             }
 
+            List<string> effectTags = effect.effectTags;
+            if (effectTags == null)
+            {
+                return;
+            }
+
+            int applied = 0;
+            foreach (string effectTag in effectTags)
+            {
+                if (!_effectHandles.ContainsKey(id))
+                {
+                    return;
+                }
+
+                /*
+                    The ledger is written between raising the count and notifying, because the
+                    notification is where a subscriber can tear this handle down: a ForceRemoveTags
+                    reached from inside NotifyTagApplied must already see this tag as one of ours,
+                    or it removes fewer tags than were raised and the surplus never comes off.
+                */
+                uint currentCount = RaiseTagCount(effectTag);
+                ++applied;
+                _appliedTagCountByHandle[id] = applied;
+                NotifyTagApplied(effectTag, currentCount);
+            }
+        }
+
+        /*
+            Every tag comes off even when a subscriber throws: the handle is already detached, so a
+            tag skipped here keeps its reference count raised for good and the entity never leaves
+            the state. The first failure is rethrown once the last tag is removed.
+        */
+        private void RemoveTrackedTags(AttributeEffect effect, int applied)
+        {
             /*
-                The handle is already out of _effectHandles, so a tag skipped here keeps its
-                reference count raised for good and the entity never leaves the state: one throwing
-                OnTagRemoved or OnTagCountChanged subscriber must not stop the rest of the tags
-                coming off. The first failure is rethrown once they all have.
+                An effect asset can be unloaded while a handle from it is still live, and reading a
+                field off a destroyed ScriptableObject throws. Unity's `==` is the only check that
+                sees that; a managed null test steps straight past it.
             */
+            if (effect == null)
+            {
+                return;
+            }
+
+            List<string> effectTags = effect.effectTags;
+            if (effectTags == null)
+            {
+                return;
+            }
+
             Exception firstFailure = null;
-            foreach (string effectTag in effect.effectTags)
+            int removable = applied < effectTags.Count ? applied : effectTags.Count;
+            for (int index = 0; index < removable; ++index)
             {
                 try
                 {
-                    InternalRemoveTag(effectTag, allInstances: false);
+                    InternalRemoveTag(effectTags[index], allInstances: false);
                 }
                 catch (Exception tagFailure)
                 {

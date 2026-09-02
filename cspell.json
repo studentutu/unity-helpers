@@ -900,7 +900,12 @@
         "IHDR",
         "devirtualized",
         "devirtualizes",
-        "fff"
+        "fff",
+        "ghp",
+        "pousr",
+        "ungated",
+        "unredacted",
+        "unwritable"
       ]
     }
   ],
@@ -1185,7 +1190,9 @@
     "llhswwha",
     "WCF",
     "Uwe",
-    "TID"
+    "TID",
+    "AKIA",
+    "CBP"
   ],
   "flagWords": [],
   "minWordLength": 3,

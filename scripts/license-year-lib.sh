@@ -62,6 +62,11 @@ _license_year_primed=false
 # the recursion below normally runs once. The cap exists so a malformed map can never spin.
 _LICENSE_YEAR_MAX_RENAME_DEPTH=16
 
+# The bulk walk's pathspec. Both callers -- the fixer and the auditor -- only ever ask about .cs
+# paths, and the walk's cost is dominated by the copy detection's candidate set, so narrowing it to
+# the extension the license headers live on is a straight saving (#680). See license_year_prime.
+_LICENSE_YEAR_PRIME_PATHSPEC='*.cs'
+
 # Point the resolver at a repository.
 # Args:
 #   $1 - repository root (absolute path)
@@ -159,6 +164,31 @@ _license_year_committed_year() {
 # headers agree with the flag. The flag is load-bearing, and a cheap-first split is refuted rather
 # than untried.
 #
+# What IS free is narrowing the walk's pathspec, and that is what the flag's cost turned out to be
+# most sensitive to. Measured over the 2,186 tracked .cs files in this checkout, git 2.51.1, each
+# variant against the same history:
+#
+#   walk variant                              worktree on the 9p mount   worktree on a native FS
+#   --find-renames                                               1.09s                     0.20s
+#   --find-renames -C                                           15.30s                     0.97s
+#   --find-renames --find-copies-harder                         92.45s                    11.70s
+#   the same, narrowed by `-- '*.cs'`                            40.05s                     3.45s
+#
+# End to end with a cold .git/license-year-cache: audit-license-years.sh --summary 1m42.2s -> 37.5s,
+# update-license-headers.sh --dry-run 1m44.4s -> 37.7s. The folded path -> year map is BYTE-IDENTICAL
+# with and without the pathspec over all 2,186 paths, and no rename or copy record in this history
+# has ever paired a .cs path with a non-.cs one. That last property is the load-bearing one: the
+# pathspec restricts the CANDIDATE SOURCE set the copy detection searches, not only its output, so a
+# .cs file produced by renaming or copying a non-.cs path would silently resolve to a later year.
+# test-license-year-copy-detection.sh asserts it with the same detection flags this walk uses.
+# Both callers ask only about .cs files; any other path still falls through to the per-file query.
+#
+# The cost is also not where #680 guessed. Pointing --git-dir at this checkout's bind-mounted .git
+# while putting the WORKTREE on a native filesystem runs the identical walk in 11.5s, and copying
+# .git to tmpfs while leaving the worktree on the mount changed nothing -- so the packfiles are not
+# the problem, per-path worktree access from the copy detection is. The native column is a tmpfs
+# stand-in for a CI runner's local disk, NOT a measurement on one.
+#
 # Idempotent: the walk runs at most once per process, so a caller may prime unconditionally.
 license_year_prime() {
     if [[ "$_license_year_primed" == true ]]; then
@@ -219,7 +249,8 @@ license_year_prime() {
             --format='YEAR:%ad' \
             --date=format:%Y \
             --find-renames \
-            --find-copies-harder
+            --find-copies-harder \
+            -- "$_LICENSE_YEAR_PRIME_PATHSPEC"
     )
 }
 

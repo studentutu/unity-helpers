@@ -65,8 +65,10 @@ loops.
 
 ## License Year Cache
 
-The license audit (`scripts/audit-license-years.sh`) uses `git log --follow` per file
-to determine creation year. This is O(N) git invocations for N files.
+The license audit (`scripts/audit-license-years.sh`) determines a creation year two ways, both
+in `scripts/license-year-lib.sh`. A `--paths` run asks `git log --follow` per file, which is
+O(N) git invocations for N files. A whole-tree run instead primes ONE history walk
+([#674](https://github.com/Ambiguous-Interactive/unity-helpers/issues/674)).
 
 **Cache design:**
 
@@ -92,6 +94,15 @@ bash scripts/audit-license-years.sh --summary --no-cache
 **Performance:** Full uncached scans are too slow for pre-push. Pre-commit,
 agent preflight, and CI paths must pass changed files through `--paths`; warm
 cache checks for a few changed files should stay sub-second.
+
+**The walk's own cost is `--find-copies-harder`,** which is ~90% of it and cannot be dropped: 24
+tracked files resolve to a later year without it, and the audit would then reject headers nobody
+has touched. `scripts/tests/test-license-year-copy-detection.sh` names all 24. Narrowing the walk
+to a `*.cs` pathspec takes it from 1m42s to 37s on a cold cache here, with a byte-identical
+path-to-year map. That narrowing restricts the **candidate source set** the copy detection searches,
+not just its output, so it is free only while no `.cs` path was ever produced by renaming or copying
+a non-`.cs` one — which the same test asserts, with the same detection flags the library uses
+([#680](https://github.com/Ambiguous-Interactive/unity-helpers/issues/680)).
 
 ---
 

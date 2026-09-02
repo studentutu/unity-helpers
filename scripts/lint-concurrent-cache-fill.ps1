@@ -152,11 +152,35 @@ foreach ($file in @($files | Sort-Object)) {
                 continue
             }
 
-            # The write line plus the contiguous `//` comment block above it. One line of lookback
-            # would force a multi-line reason to break in whatever place puts the marker last.
+            # The write line plus the contiguous comment above it, in EITHER form. One line of
+            # lookback would force a multi-line reason to break wherever puts the marker last, and
+            # reading only `//` made the marker invisible the moment the #635 sweep rewrote a
+            # two-line reason as a block -- which is exactly what happened to the two exemptions in
+            # SerializableDictionaryPropertyDrawer.
+            #
+            # Only a line that is ENTIRELY a comment continues the walk. Accepting any line that
+            # merely ENDS with `*/` was measured letting a trailing `foo(); /* trace */` open a
+            # block the walk never closed, so the lookback ran to the top of the file and found a
+            # marker belonging to a different method -- excusing a racy fill the linter used to
+            # catch. A block's closing line in this repository's own form is `*/` on its own.
             $context = $line
+            $insideBlockComment = $false
             for ($back = $i - 1; $back -ge 0; $back--) {
                 $above = $lines[$back].Trim()
+                if ($insideBlockComment) {
+                    $context = $above + "`n" + $context
+                    if ($above.StartsWith('/*')) { $insideBlockComment = $false }
+                    continue
+                }
+                if ($above.StartsWith('/*') -and $above.EndsWith('*/')) {
+                    $context = $above + "`n" + $context
+                    continue
+                }
+                if ($above.StartsWith('*/')) {
+                    $context = $above + "`n" + $context
+                    $insideBlockComment = $true
+                    continue
+                }
                 if (-not $above.StartsWith('//')) { break }
                 $context = $above + "`n" + $context
             }
@@ -165,7 +189,7 @@ foreach ($file in @($files | Sort-Object)) {
                 continue
             }
 
-            Write-Host "::error file=$relative,line=$($i + 1)::'$name' is a ConcurrentDictionary filled through its indexer. Two callers racing a first use each build a value and each returns one the cache does not hold. Use GetOrAdd (state-taking overload, static lambda) or TryAdd for an already-computed value. A deliberate overwrite must say why with a '// $exemptionMarker <reason>' comment."
+            Write-Host "::error file=$relative,line=$($i + 1)::'$name' is a ConcurrentDictionary filled through its indexer. Two callers racing a first use each build a value and each returns one the cache does not hold. Use GetOrAdd (state-taking overload, static lambda) or TryAdd for an already-computed value. A deliberate overwrite must say why with a '$exemptionMarker <reason>' comment, in either the '//' or the '/* */' form."
             $failed = $true
         }
     }

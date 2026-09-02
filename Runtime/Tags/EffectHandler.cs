@@ -867,8 +867,16 @@ namespace WallstopStudios.UnityHelpers.Tags
             }
 
             Exception firstFailure = null;
-            foreach (AttributesComponent attributesComponent in _attributes)
+            using PooledResource<List<AttributesComponent>> lease = SnapshotAttributes(
+                out List<AttributesComponent> attributes
+            );
+            foreach (AttributesComponent attributesComponent in attributes)
             {
+                if (attributesComponent == null)
+                {
+                    continue;
+                }
+
                 try
                 {
                     attributesComponent.ForceRemoveAttributeModifications(handle);
@@ -880,6 +888,34 @@ namespace WallstopStudios.UnityHelpers.Tags
             }
 
             return firstFailure;
+        }
+
+        /*
+            _attributes is a HashSet, and every loop over it crosses user code: an attribute
+            notification can AddComponent another AttributesComponent -- which registers itself
+            here from Awake -- or destroy one, either of which invalidates the enumerator. The throw
+            that follows is raised by the foreach itself, OUTSIDE the per-component catch, so it
+            escapes the removal sequence entirely: the remaining phases never run, tags stay raised,
+            instanced cosmetics are orphaned and behaviour clones leak. Copy first; the pooled list
+            keeps the steady path allocation-free.
+
+            A copy can hold a component the same callback destroyed, and only the removal loop
+            catches per element -- so every caller tests each entry with Unity's `==` before using
+            it, or the phase aborts on a MissingReferenceException instead of the throw it replaced.
+        */
+        private PooledResource<List<AttributesComponent>> SnapshotAttributes(
+            out List<AttributesComponent> attributes
+        )
+        {
+            PooledResource<List<AttributesComponent>> lease = Buffers<AttributesComponent>.List.Get(
+                out attributes
+            );
+            if (_attributes != null)
+            {
+                attributes.AddRange(_attributes);
+            }
+
+            return lease;
         }
 
         /*
@@ -1034,8 +1070,16 @@ namespace WallstopStudios.UnityHelpers.Tags
 
             if (effect.modifications is { Count: > 0 })
             {
-                foreach (AttributesComponent attributesComponent in _attributes)
+                using PooledResource<List<AttributesComponent>> lease = SnapshotAttributes(
+                    out List<AttributesComponent> attributes
+                );
+                foreach (AttributesComponent attributesComponent in attributes)
                 {
+                    if (attributesComponent == null)
+                    {
+                        continue;
+                    }
+
                     attributesComponent.ForceApplyAttributeModifications(handle);
                     if (!_effectHandlesById.ContainsKey(handleId))
                     {
@@ -1071,9 +1115,15 @@ namespace WallstopStudios.UnityHelpers.Tags
 
             if (effect.modifications is { Count: > 0 })
             {
-                foreach (AttributesComponent attributesComponent in _attributes)
+                using PooledResource<List<AttributesComponent>> lease = SnapshotAttributes(
+                    out List<AttributesComponent> attributes
+                );
+                foreach (AttributesComponent attributesComponent in attributes)
                 {
-                    attributesComponent.ForceApplyAttributeModifications(effect);
+                    if (attributesComponent != null)
+                    {
+                        attributesComponent.ForceApplyAttributeModifications(effect);
+                    }
                 }
             }
         }
@@ -1184,9 +1234,18 @@ namespace WallstopStudios.UnityHelpers.Tags
             PeriodicEffectDefinition definition = runtimeState.definition;
             if (_attributes is { Count: > 0 } && definition.modifications is { Count: > 0 })
             {
-                foreach (AttributesComponent attributesComponent in _attributes)
+                using PooledResource<List<AttributesComponent>> lease = SnapshotAttributes(
+                    out List<AttributesComponent> attributes
+                );
+                foreach (AttributesComponent attributesComponent in attributes)
                 {
-                    attributesComponent.ApplyAttributeModifications(definition.modifications, null);
+                    if (attributesComponent != null)
+                    {
+                        attributesComponent.ApplyAttributeModifications(
+                            definition.modifications,
+                            null
+                        );
+                    }
                 }
             }
 
@@ -1242,7 +1301,21 @@ namespace WallstopStudios.UnityHelpers.Tags
             long handleId = handle.id;
             AttributeEffect effect = handle.effect;
             List<CosmeticEffectData> instancedCosmeticData = null;
-            _ = _handlesWithAppliedCosmetics.Add(handleId);
+            /*
+                Refresh is the DEFAULT stacking mode, and it re-enters this method for an effect
+                that is already applied. Tags, attributes and instanced cosmetics each have an
+                idempotence guard; a SHARED cosmetic had none, because the guard above only covers
+                the instanced ones. So every refresh delivered a second OnApplyEffect against one
+                OnRemoveEffect: a template that starts a particle system on apply and stops it on
+                remove never stopped, and the shared template's applied-target list grew by an
+                entry per refresh, holding the entity's GameObject after it was destroyed. The
+                return value of this Add is exactly the "already applied" bit, and it was discarded.
+            */
+            if (!_handlesWithAppliedCosmetics.Add(handleId))
+            {
+                return;
+            }
+
             ++_traversalDepth;
             try
             {

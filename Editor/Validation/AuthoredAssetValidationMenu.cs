@@ -30,11 +30,13 @@ namespace WallstopStudios.UnityHelpers.Editor.Validation
         public static void ReportScriptBindings()
         {
             List<MonoScriptBindingFinding> findings = new();
+            List<string> unreadable = new();
             MonoScriptIndex.ClearCaches();
             if (
                 !MonoScriptBindingValidator.TryScan(
                     new[] { ProjectAssetRoot + "/" },
                     findings,
+                    unreadable,
                     out int typesConsidered,
                     out int scriptsConsidered
                 )
@@ -47,6 +49,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Validation
             Report(
                 "script bindings",
                 $"{typesConsidered} concrete types and {scriptsConsidered} script assets",
+                unreadable,
                 findings
             );
         }
@@ -59,12 +62,14 @@ namespace WallstopStudios.UnityHelpers.Editor.Validation
         {
             List<AuthoredRequirementFinding> findings = new();
             List<AuthoredRequirementExemption> exemptions = new();
+            List<string> unreadable = new();
             MonoScriptIndex.ClearCaches();
             if (
                 !AuthoredRequirementValidator.TryScan(
                     AuthoredAssetPaths.AuthoredAssetsUnderProjectRoot(),
                     findings,
                     exemptions,
+                    unreadable,
                     out int documentsInspected
                 )
             )
@@ -87,7 +92,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Validation
                 }
             }
 
-            Report("unfilled required fields", budget.ToString(), findings);
+            Report("unfilled required fields", budget.ToString(), unreadable, findings);
         }
 
         /// <summary>
@@ -97,10 +102,12 @@ namespace WallstopStudios.UnityHelpers.Editor.Validation
         public static void ReportBrokenSerializableDictionaries()
         {
             List<SerializableDictionaryAssetFinding> findings = new();
+            List<string> unreadable = new();
             if (
                 !SerializableDictionaryAssetValidator.TryScan(
                     AuthoredAssetPaths.AuthoredAssetsUnderProjectRoot(),
                     findings,
+                    unreadable,
                     out int dictionariesInspected
                 )
             )
@@ -112,6 +119,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Validation
             Report(
                 "authored dictionaries",
                 $"{dictionariesInspected} dictionaries inspected",
+                unreadable,
                 findings
             );
         }
@@ -123,10 +131,12 @@ namespace WallstopStudios.UnityHelpers.Editor.Validation
         public static void ReportEmptyAnimationKeyframes()
         {
             List<AnimationKeyframeFinding> findings = new();
+            List<string> unreadable = new();
             if (
                 !AnimationClipKeyframeValidator.TryScan(
                     new[] { ProjectAssetRoot + "/" },
                     findings,
+                    unreadable,
                     out int clipsInspected,
                     out int keyframesInspected
                 )
@@ -139,11 +149,23 @@ namespace WallstopStudios.UnityHelpers.Editor.Validation
             Report(
                 "animation keyframes",
                 $"{clipsInspected} clips and {keyframesInspected} object keyframes inspected",
+                unreadable,
                 findings
             );
         }
 
-        private static void Report<T>(string subject, string budget, IReadOnlyList<T> findings)
+        /// <summary>Builds the line a command logs, so the wording and the severity are testable.</summary>
+        /// <param name="subject">What was scanned, for the first line.</param>
+        /// <param name="budget">What the scan judged, so a vacuous pass is visible.</param>
+        /// <param name="unreadable">The asset paths the scan could not read.</param>
+        /// <param name="findings">The defects found.</param>
+        /// <returns>The message, and whether it is a warning.</returns>
+        internal static (string Message, bool Warn) Compose<T>(
+            string subject,
+            string budget,
+            IReadOnlyList<string> unreadable,
+            IReadOnlyList<T> findings
+        )
         {
             StringBuilder message = new();
             message
@@ -154,18 +176,40 @@ namespace WallstopStudios.UnityHelpers.Editor.Validation
                 .Append(findings.Count == 1 ? " finding across " : " findings across ")
                 .Append(budget);
 
+            UnreadableAssetPaths.Append(message, unreadable);
+
             for (int index = 0; index < findings.Count; ++index)
             {
                 message.AppendLine().Append("  ").Append(findings[index]);
             }
 
-            if (findings.Count <= 0)
+            return (message.ToString(), 0 < findings.Count);
+        }
+
+        /// <remarks>
+        /// The unreadable set is printed the way the exemption budget is, and it always prints --
+        /// but it does not raise the severity on its own. A warning claims there is something to
+        /// fix, and the commonest unreadable file is not: Unity writes <c>LightingData.asset</c> as
+        /// binary whatever the serialization mode says, measured 2026-09-01 on two of two under
+        /// <c>ForceText</c>, so any project with baked lighting would warn on every run forever. A
+        /// gate that wants to fail on a coverage hole asserts the list, which is what the scan
+        /// returns it for.
+        /// </remarks>
+        private static void Report<T>(
+            string subject,
+            string budget,
+            IReadOnlyList<string> unreadable,
+            IReadOnlyList<T> findings
+        )
+        {
+            (string message, bool warn) = Compose(subject, budget, unreadable, findings);
+            if (warn)
             {
-                Debug.Log(message.ToString());
+                Debug.LogWarning(message);
                 return;
             }
 
-            Debug.LogWarning(message.ToString());
+            Debug.Log(message);
         }
     }
 #endif

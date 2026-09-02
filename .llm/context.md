@@ -68,7 +68,7 @@ See [create-csharp-file](./skills/create-csharp-file.md) for detailed C# rules.
 6. One file per MonoBehaviour/ScriptableObject (production AND tests); a nested type goes at the END of its containing type or in its own file, never between members. `npm run lint:nested-type-placement` enforces it and `:fix` moves what it can; a type that would cross a `#if` boundary is reported, never moved ([#575](https://github.com/Ambiguous-Interactive/unity-helpers/issues/575))
 7. NEVER use `?.`, `??`, `??=` on UnityEngine.Object types
 8. **Aim for zero comments.** Reach for a better name before a better sentence, and spell names out rather than abbreviating. A comment that survives that explains **why**, never **what**; a non-doc comment INSIDE a type or member spanning more than one line uses the `/* ... */` block form, the two-line license header excepted (see [create-csharp-file](./skills/create-csharp-file.md))
-9. Generate `.meta` files after creating ANY file/folder (see [create-unity-meta](./skills/create-unity-meta.md)); exception: no `.meta` for dot folders (`.llm/`, `.github/`, `.git/`, `.vscode/`). Use `./scripts/generate-meta.sh <path>` for new or empty folders, then run `npm run agent:preflight:fix` for changed-file `.meta` recovery.
+9. Generate `.meta` files with `./scripts/generate-meta.sh <path>` after creating ANY file/folder -- never commit Unity's auto-written stub, which omits the importer block. And **an `AddComponent`-able MonoBehaviour belongs in a runtime-capable test assembly**: Unity refuses one it can identify as an editor script, and a type with no `MonoScript` merely escapes that policy until someone gives it a correctly-named file (12 red tests, session 244). Exception: no `.meta` for dot folders (`.llm/`, `.github/`, `.git/`, `.vscode/`). See [create-unity-meta](./skills/create-unity-meta.md)
 10. Enums: explicit values, `None`/`Unknown` = 0 with `[Obsolete]` (see [create-enum](./skills/create-enum.md))
 11. Never reflect on our own code; use `internal` + `[InternalsVisibleTo]` (see [avoid-reflection](./skills/avoid-reflection.md))
 12. Never use magic strings; use `nameof()` (see [avoid-magic-strings](./skills/avoid-magic-strings.md))
@@ -88,7 +88,7 @@ See [create-csharp-file](./skills/create-csharp-file.md) for detailed C# rules.
     is right and the shape is everywhere.** Both DLLs are committed under `Runtime/Analyzers`,
     byte-compared in CI against a fresh `dotnet build -c Release` (SDK 9.0.306), and **an edit to
     either is not finished until you rebuild it**. See [analyzers](../docs/performance/analyzers.md)
-18. NEVER size an allocation from a number a payload states -- only from what it delivers. A length prefix is safe because the reader refuses one longer than the bytes it holds; a capacity is a bare claim, and six bytes can ask for 8 GB. Clamp it with `SerializationCapacityLimits.Clamp` where it is a growth hint, refuse it with `TryAccept` where it is semantic (see [untrusted-payload-limits](./skills/untrusted-payload-limits.md))
+18. NEVER size an allocation from a number a payload states -- only from what it delivers. A length prefix is safe because the reader refuses one longer than the bytes it holds; a capacity is a bare claim, and six bytes can ask for 8 GB. Clamp it with `SerializationCapacityLimits.Clamp` where it is a growth hint, refuse it with `TryAccept` where it is semantic. **A `stackalloc` sized from a caller's argument is the same rule with a worse failure** -- `StackOverflowException` is caught by nothing, so a length must be a compile-time constant or compared against one in the same statement, with a `SystemArrayPool` rent above `StackAllocation.MaxByteBudget`; `npm run lint:unsafe-code` holds it over 56 sites ([#637](https://github.com/Ambiguous-Interactive/unity-helpers/issues/637)). See [untrusted-payload-limits](./skills/untrusted-payload-limits.md)
 
 ### Documentation Rules
 
@@ -452,8 +452,8 @@ deliberate act, not the tail of every commit.
     fixtures against it**. `Unity_RunCommand` cannot _name_ a package type -- its sandbox
     assembly does not reference them, and `using System.Reflection;` is refused -- but fully
     qualified reflection reaches everything, including generic package types and their private
-    members. See
-    [unity-mcp-fixture-runner](./skills/unity-mcp-fixture-runner.md)
+    members. A timeout is an expired session, retry once; a NEW `.cs` file DOES reach the pipeline
+    (#656). See [unity-mcp-fixture-runner](./skills/unity-mcp-fixture-runner.md)
     for the loop and its traps ([#435](https://github.com/Ambiguous-Interactive/unity-helpers/issues/435)).
 - **When a change spans both suites, update both before pushing.** A packed-encoding change in
   session 175 updated the `Generator~` differentials, missed the Unity golden vectors in

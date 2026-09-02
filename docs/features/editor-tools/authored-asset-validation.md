@@ -23,6 +23,37 @@ Every command lives under **Tools > Wallstop Studios > Unity Helpers > Authored 
 
 Every command but the last only reads. The repair rewrites files and asks first.
 
+## What a scan could not read
+
+Every report names the files it could not open, and each command prints that set when it is not
+empty. A read fails for reasons that are not going away: a permissions error, a file another process
+has locked, a file deleted between enumeration and the read, an `.asset` saved in binary
+serialization mode, an I/O error on a network drive. The animation check fails differently — the
+asset database names a path as carrying a clip and then hands back none — and reports it the same
+way.
+
+**An unreadable file is not a finding.** It is a hole in the measurement, not a defect in the asset,
+and folding the two together would make a finding mean two things: a caller could no longer read
+"no findings" as "nothing is wrong". So `TryScan` takes a list of unreadable asset paths beside its
+findings, sorted and naming each file once, and a CI caller that asserts the list is empty fails
+when a scan could not see all of its subject.
+
+The subject counts cannot catch this on their own. They catch a scan that read **nothing** — a moved
+root, a renamed backing field. One locked file in a project of four thousand still reports a large
+count and a clean result, which is the failure these checks exist to prevent turned on themselves.
+
+### Why the set prints without turning the log yellow
+
+Expect entries here in a project with baked lighting, and expect them permanently. Unity writes
+`LightingData.asset` as binary whatever the serialization mode says — measured on two of two under
+`ForceText` — so the scan opens it, finds no Unity document in it, and correctly reports that it
+could not see inside.
+
+That is worth saying and not worth warning about. A warning claims there is something to fix, and a
+permanently unactionable one is exactly what teaches people to stop reading warnings. So the set
+always prints, and the severity follows the findings. A gate that wants to fail on a coverage hole
+asserts the list, which is what the scan returns it for.
+
 ## Why text, and why loading is the wrong instrument
 
 **Opening a scene mutates it.** Every `OnValidate` in it runs — a collider that rebuilds its points
@@ -134,6 +165,15 @@ what it loaded, dropping every dead key. It is not safe unsupervised:
 So the repair rewrites **one asset at a time**, compares the non-null object count before and after,
 and undoes any rewrite that lowers it by writing the original bytes back and re-importing. Refusals
 are printed. Commit or stash first.
+
+The rewrite is covered now, not just the refusals: a fixture authors a plain asset, an asset whose
+content lives in sub-objects, and a prefab, leaves a key no field claims in each, repairs them, and
+asserts the outcome and the object count. It pins the prefab finding directly — the same prefab
+rewritten with assets only comes back byte-identical, stale key and all. **The undo is still
+unproven.** No subject that could be authored lost content, so the branch that puts the original
+bytes back has never had a loss to react to, and the one that is known to lose it is a render
+profile nobody can build from a test. That is why the confirmation dialog stays, and why committing
+first is still the advice.
 
 ## The reader underneath
 

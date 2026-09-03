@@ -331,11 +331,29 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
         > IndexerLookup = new();
 #endif
 
+#if SINGLE_THREADED
+        private static readonly Dictionary<
+            Type,
+            FieldInfo[]
+        > InstanceFieldsIncludingBaseTypesCache = new();
+#else
+        private static readonly ConcurrentDictionary<
+            Type,
+            FieldInfo[]
+        > InstanceFieldsIncludingBaseTypesCache = new();
+#endif
+
         private const BindingFlags AllInstanceFieldsFlags =
             BindingFlags.Public
             | BindingFlags.NonPublic
             | BindingFlags.Instance
             | BindingFlags.Static;
+
+        private const BindingFlags DeclaredInstanceFieldsFlags =
+            BindingFlags.Public
+            | BindingFlags.NonPublic
+            | BindingFlags.Instance
+            | BindingFlags.DeclaredOnly;
 
         /// <summary>
         /// Gets all fields for a type with caching to avoid repeated allocations.
@@ -379,6 +397,144 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                 }
             );
 #endif
+        }
+
+        /// <summary>
+        /// Gets every instance field an instance of <paramref name="type"/> carries, including
+        /// private fields declared by base types, most-derived first.
+        /// </summary>
+        /// <remarks>
+        /// <see cref="Type.GetFields(BindingFlags)"/> without <see cref="BindingFlags.DeclaredOnly"/>
+        /// returns inherited public, protected and internal fields but never an inherited private
+        /// one, so any discovery keyed on the most derived type silently skips a base class's
+        /// private fields.
+        /// <para>
+        /// Where a derived type hides a <b>visible</b> base field name with <c>new</c>, only the
+        /// most derived declaration is returned, matching C# name hiding. A <b>private</b> base
+        /// field is not visible to a derived type and so cannot be hidden: a same-named field there
+        /// is a second, distinct field, and both are returned.
+        /// <see cref="GetFieldsWithAttribute{TAttribute}"/> reports every declaration in either
+        /// case, because a caller asking which fields carry an attribute wants all of them.
+        /// </para>
+        /// <para>
+        /// The walk stops before <see cref="object"/> rather than at
+        /// <c>MonoBehaviour</c>/<c>UnityEngine.Object</c>, so it also reports what Unity's own base
+        /// types declare. Every caller filters by attribute or field type first, and Unity's
+        /// declarations carry neither.
+        /// </para>
+        /// </remarks>
+        internal static FieldInfo[] GetInstanceFieldsIncludingBaseTypes(Type type)
+        {
+            if (type == null)
+            {
+                return Array.Empty<FieldInfo>();
+            }
+
+#if SINGLE_THREADED
+            if (
+                !InstanceFieldsIncludingBaseTypesCache.TryGetValue(
+                    type,
+                    out FieldInfo[] cachedFields
+                )
+            )
+            {
+                cachedFields = BuildInstanceFieldsIncludingBaseTypes(type);
+                InstanceFieldsIncludingBaseTypesCache[type] = cachedFields;
+            }
+            return cachedFields;
+#else
+            return InstanceFieldsIncludingBaseTypesCache.GetOrAdd(
+                type,
+                static key => BuildInstanceFieldsIncludingBaseTypes(key)
+            );
+#endif
+        }
+
+        /// <summary>
+        /// Finds the field named <paramref name="name"/> declared by <paramref name="type"/> or any
+        /// of its base types, including inherited private fields.
+        /// </summary>
+        internal static FieldInfo GetInstanceFieldIncludingBaseTypes(Type type, string name)
+        {
+            if (type == null || string.IsNullOrEmpty(name))
+            {
+                return null;
+            }
+
+            /*
+                Most derived first, which matters because a name can occur twice: a private base
+                field and a same-named derived field are distinct fields rather than one hiding the
+                other. A caller that must reach both enumerates
+                GetInstanceFieldsIncludingBaseTypes instead of asking by name, because a name is
+                not an identity here.
+            */
+            foreach (FieldInfo field in GetInstanceFieldsIncludingBaseTypes(type))
+            {
+                if (string.Equals(field.Name, name, StringComparison.Ordinal))
+                {
+                    return field;
+                }
+            }
+
+            return null;
+        }
+
+        private static FieldInfo[] BuildInstanceFieldsIncludingBaseTypes(Type type)
+        {
+            FieldInfo[] declaredByType = GetFieldsCached(type, DeclaredInstanceFieldsFlags);
+            Type baseType;
+            try
+            {
+                baseType = type.BaseType;
+            }
+            catch
+            {
+                return declaredByType;
+            }
+
+            if (baseType == null || baseType == typeof(object))
+            {
+                return declaredByType;
+            }
+
+            List<FieldInfo> collected = new(declaredByType.Length);
+            HashSet<string> seenNames = new(StringComparer.Ordinal);
+            Type current = type;
+            while (current != null && current != typeof(object))
+            {
+                foreach (FieldInfo field in GetFieldsCached(current, DeclaredInstanceFieldsFlags))
+                {
+                    bool nameIsNew = seenNames.Add(field.Name);
+
+                    /*
+                        A private field is invisible to a derived type, so C# does not treat a
+                        same-named field there as hiding it -- no `new`, no CS0108, two distinct
+                        fields. Dropping the base one would reintroduce, for that pair, exactly the
+                        defect this walk exists to fix. Only a field a derived type could see can be
+                        hidden.
+                    */
+                    if (nameIsNew || field.IsPrivate)
+                    {
+                        collected.Add(field);
+                    }
+                }
+
+                /*
+                    BaseType resolves the base, so it throws for a type whose base assembly is
+                    missing. Every caller here treats "no fields" as an answer rather than an error,
+                    which is what the sites this replaced did with their own try/catch.
+                */
+                try
+                {
+                    current = current.BaseType;
+                }
+                catch
+                {
+                    break;
+                }
+            }
+
+            return collected.Count == 0 ? Array.Empty<FieldInfo>() : collected.ToArray();
         }
 
         /// <summary>
@@ -543,6 +699,16 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
         internal static bool IsFieldSetterCached(FieldInfo field)
         {
             return DelegateFactory.IsFieldSetterCached(field);
+        }
+
+        internal static bool IsHashSetClearerCached(Type elementType)
+        {
+            return elementType != null && HashSetClearers.ContainsKey(elementType);
+        }
+
+        internal static void ClearHashSetClearerCache()
+        {
+            HashSetClearers.Clear();
         }
 
         internal static void ClearFieldGetterCache()

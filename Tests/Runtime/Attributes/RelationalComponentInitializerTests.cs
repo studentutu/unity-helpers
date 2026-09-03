@@ -6,6 +6,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
     using System;
     using System.Reflection;
     using NUnit.Framework;
+    using UnityEngine;
     using WallstopStudios.UnityHelpers.Core.Attributes;
     using WallstopStudios.UnityHelpers.Core.Helper;
     using WallstopStudios.UnityHelpers.Tests.Core;
@@ -15,11 +16,78 @@ namespace WallstopStudios.UnityHelpers.Tests.Attributes
     [NUnit.Framework.Category("Fast")]
     public sealed class RelationalComponentInitializerTests
     {
+        /*
+            Every assertion in this fixture is "not cached before, cached after", and the caches are
+            static. The Unity test runner reuses the domain, so a second run in one session found
+            them already warm and reported the prewarm as broken. Clearing here is what makes each
+            assertion mean what it says.
+        */
+        [SetUp]
+        public void ClearWarmedCaches()
+        {
+            ReflectionHelpers.ClearFieldGetterCache();
+            ReflectionHelpers.ClearFieldSetterCache();
+            ReflectionHelpers.ClearHashSetClearerCache();
+            SiblingComponentExtensions.ClearCachedFieldMetadata();
+            ChildComponentExtensions.ClearCachedFieldMetadata();
+            ParentComponentExtensions.ClearCachedFieldMetadata();
+        }
+
         private static bool CacheContainsField(string cache, FieldInfo field)
         {
             return cache == "FieldGetterCache"
                 ? ReflectionHelpers.IsFieldGetterCached(field)
                 : ReflectionHelpers.IsFieldSetterCached(field);
+        }
+
+        [Test]
+        public void InitializeWarmsWhatTheAssignmentPathActuallyReads()
+        {
+            Type testerType = typeof(PrewarmHashSetTesterComponent);
+
+            Assert.IsFalse(
+                SiblingComponentExtensions.HasCachedFieldMetadata(testerType),
+                "Sibling metadata unexpectedly cached before prewarm."
+            );
+            Assert.IsFalse(
+                ChildComponentExtensions.HasCachedFieldMetadata(testerType),
+                "Child metadata unexpectedly cached before prewarm."
+            );
+            Assert.IsFalse(
+                ParentComponentExtensions.HasCachedFieldMetadata(testerType),
+                "Parent metadata unexpectedly cached before prewarm."
+            );
+            Assert.IsFalse(
+                ReflectionHelpers.IsHashSetClearerCached(typeof(BoxCollider)),
+                "HashSet clearer unexpectedly cached before prewarm."
+            );
+
+            RelationalComponentInitializer.Report report =
+                RelationalComponentInitializer.Initialize(new[] { testerType }, logSummary: false);
+
+            Assert.AreEqual(0, report.Errors, "Prewarm reported errors.");
+
+            /*
+                Every assignment path reads these three caches, and GetFieldMetadata requires the
+                clearer for a set-valued field. Warming only the getter and setter left the largest
+                first-use cost to the first Awake that asked.
+            */
+            Assert.IsTrue(
+                SiblingComponentExtensions.HasCachedFieldMetadata(testerType),
+                "Sibling metadata not cached after prewarm."
+            );
+            Assert.IsTrue(
+                ChildComponentExtensions.HasCachedFieldMetadata(testerType),
+                "Child metadata not cached after prewarm."
+            );
+            Assert.IsTrue(
+                ParentComponentExtensions.HasCachedFieldMetadata(testerType),
+                "Parent metadata not cached after prewarm."
+            );
+            Assert.IsTrue(
+                ReflectionHelpers.IsHashSetClearerCached(typeof(BoxCollider)),
+                "HashSet clearer not cached after prewarm."
+            );
         }
 
         [Test]

@@ -14,10 +14,6 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
     [NUnit.Framework.Category("Fast")]
     public sealed class RestorableGlobalTests : CommonTestBase
     {
-        private const int AllocationProbeIterations = 256;
-
-        private static string _allocationSink;
-
         private int _cell;
         private bool _readThrows;
         private bool _writeThrows;
@@ -333,18 +329,12 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
                 outer.Dispose();
             }
 
-            if (!RecorderCanSeeAnAllocation())
-            {
-                Assert.Ignore(
-                    "GC allocation recording is inert on this player, so a 'did not allocate' "
-                        + "verdict would prove nothing"
-                );
-            }
+            AllocationProbe.IgnoreWhenUnmeasurable();
 
             Assert.That(
                 () =>
                 {
-                    for (int i = 0; i < AllocationProbeIterations; ++i)
+                    for (int i = 0; i < AllocationProbe.Iterations; ++i)
                     {
                         using (owner.Borrow(i))
                         {
@@ -388,28 +378,6 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
             }
 
             _cell = value;
-        }
-
-        private static bool RecorderCanSeeAnAllocation()
-        {
-            try
-            {
-                Assert.That(
-                    () =>
-                    {
-                        for (int i = 0; i < AllocationProbeIterations; ++i)
-                        {
-                            _allocationSink = new string('x', 8 + (i & 7));
-                        }
-                    },
-                    Is.AllocatingGCMemory()
-                );
-                return true;
-            }
-            catch (AssertionException)
-            {
-                return false;
-            }
         }
     }
 }

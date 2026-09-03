@@ -149,6 +149,33 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
             };
         }
 
+        /// <summary>
+        /// Picks between the element type the cache recorded and the one this field's own type
+        /// gives, preferring the cache except where it cannot be describing this field.
+        /// </summary>
+        /// <remarks>
+        /// The cache is keyed by component type and field name, so two same-named fields of
+        /// different types share one slot and the later write wins. A recorded type unrelated to
+        /// the live field's is therefore the other field's, and following it would search for the
+        /// wrong component type.
+        /// </remarks>
+        private static Type ChooseElementType(Type cached, Type live, Type fieldType)
+        {
+            if (cached == null)
+            {
+                return live ?? fieldType;
+            }
+
+            if (live == null)
+            {
+                return cached;
+            }
+
+            bool related =
+                cached == live || cached.IsAssignableFrom(live) || live.IsAssignableFrom(cached);
+            return related ? cached : live;
+        }
+
         private static FieldKind GetFieldKind(Type fieldType, out Type elementType)
         {
             if (fieldType == null)
@@ -190,8 +217,21 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
                 return FieldAccessor.Null;
             }
 
+            /*
+                Both the compiled and the emitted setter refuse an instance type that is not the
+                field's declaring type, so binding a base-declared field through the derived type
+                would fall back to FieldInfo.SetValue on every assignment. Typing the accessor to
+                the declaring type keeps the fast path and shares one accessor across every
+                subclass.
+            */
+            Type declaringType = field.DeclaringType;
+            Type accessorComponentType =
+                declaringType != null && typeof(Component).IsAssignableFrom(declaringType)
+                    ? declaringType
+                    : componentType;
+
             MethodInfo generic = CreateFieldAccessorGenericMethod.MakeGenericMethod(
-                componentType,
+                accessorComponentType,
                 field.FieldType
             );
             return (FieldAccessor)generic.Invoke(null, new object[] { field });
@@ -230,19 +270,36 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
                 using PooledResource<List<FieldMetadata<TAttribute>>> resultBuffer = Buffers<
                     FieldMetadata<TAttribute>
                 >.List.Get(out List<FieldMetadata<TAttribute>> result);
+
+                /*
+                    Driven by the LIVE fields, not by the cache entries. A field name can occur more
+                    than once in the chain -- a private base field and a same-named derived field
+                    are two distinct fields, not one hiding the other -- and the cache is keyed by
+                    name, so it cannot say which declaration an entry meant. Resolving entries by
+                    name bound the most derived field twice and left the base one unbound; resolving
+                    them by position guessed wrong as soon as one of the pair was not relational, or
+                    carried a different relational attribute. The live walk needs neither guess: the
+                    attribute is on the field, and the cache only has to say which names are
+                    relational for this kind.
+                */
+                using PooledResource<HashSet<string>> namesLease = Buffers<string>.HashSet.Get(
+                    out HashSet<string> namesForKind
+                );
                 foreach (AttributeMetadataCache.RelationalFieldMetadata cachedField in cachedFields)
                 {
-                    if (cachedField.attributeKind != targetKind)
+                    if (cachedField.attributeKind == targetKind)
                     {
-                        continue;
+                        namesForKind.Add(cachedField.fieldName);
                     }
+                }
 
-                    FieldInfo field = componentType.GetField(
-                        cachedField.fieldName,
-                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
-                    );
-
-                    if (field == null)
+                foreach (
+                    FieldInfo field in ReflectionHelpers.GetInstanceFieldsIncludingBaseTypes(
+                        componentType
+                    )
+                )
+                {
+                    if (!namesForKind.Contains(field.Name))
                     {
                         continue;
                     }
@@ -252,20 +309,18 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
                         continue;
                     }
 
-                    if (
-                        !cache.TryGetElementType(
-                            componentType,
-                            cachedField.fieldName,
-                            out Type elementType
-                        )
-                    )
+                    if (!cache.TryGetElementType(componentType, field.Name, out Type elementType))
                     {
                         continue;
                     }
 
                     FieldKind kind = GetFieldKind(field.FieldType, out Type actualElementType);
 
-                    Type resolvedElementType = elementType ?? actualElementType ?? field.FieldType;
+                    Type resolvedElementType = ChooseElementType(
+                        elementType,
+                        actualElementType,
+                        field.FieldType
+                    );
 
                     if (
                         kind == FieldKind.HashSet
@@ -337,8 +392,8 @@ namespace WallstopStudios.UnityHelpers.Core.Attributes
                 return result.ToArray();
             }
 
-            FieldInfo[] fields = componentType.GetFields(
-                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
+            FieldInfo[] fields = ReflectionHelpers.GetInstanceFieldsIncludingBaseTypes(
+                componentType
             );
 
             using PooledResource<List<FieldMetadata<TAttribute>>> lease = Buffers<

@@ -414,11 +414,18 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization
             }
 
             int itemCount = wrapper.Items?.Length ?? 0;
-            int capacity = wrapper.Capacity;
-            if (capacity < itemCount)
-            {
-                capacity = itemCount;
-            }
+
+            /*
+                Not bounded through SerializationCapacityLimits, unlike the deque and the sparse
+                set beside it, and that is a decision rather than an omission: a CyclicBuffer
+                allocates NOTHING from its stated capacity -- the constructor takes an empty list
+                and Add grows it one element at a time -- so there is no amplification to refuse.
+                Bounding it would only refuse a legitimately large, sparsely filled buffer, and it
+                would disagree with the nested path, where CyclicBuffer's own
+                [ProtoAfterDeserialization] restores the same field with no check at all.
+                CyclicBufferAllocatesNothingFromAStatedCapacity is what keeps that true.
+            */
+            int capacity = wrapper.Capacity < itemCount ? itemCount : wrapper.Capacity;
 
             // The constructor fills oldest-to-newest, which is the order Wrap writes them in.
             value = new CyclicBuffer<T>(capacity, wrapper.Items);

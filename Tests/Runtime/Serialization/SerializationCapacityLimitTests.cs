@@ -81,6 +81,78 @@ namespace WallstopStudios.UnityHelpers.Tests.Serialization
             );
         }
 
+        /// <remarks>
+        /// A <c>CyclicBuffer</c>'s stated capacity costs nothing to honor, which is why the three
+        /// restore paths do not bound it the way they bound a deque's or a sparse set's.
+        /// <c>CyclicBufferTests.IntMaxCapacityOk</c> is what pins that premise; if it ever stops
+        /// holding, those paths become an 8 GB allocation from six bytes and have to gain a limit.
+        /// </remarks>
+        [Test]
+        public void ACyclicBufferCapacityClaimCostsNothingToHonor()
+        {
+            CyclicBuffer<int> restored = Serializer.ProtoDeserialize<CyclicBuffer<int>>(
+                HostileCapacityClaim
+            );
+
+            Assert.IsTrue(restored != null);
+            Assert.AreEqual(0, restored.Count);
+            restored.Add(3);
+            Assert.AreEqual(1, restored.Count);
+        }
+
+        [Test]
+        public void ACyclicBufferWithinTheLimitStillRoundTrips()
+        {
+            CyclicBuffer<int> buffer = new(4);
+            for (int index = 0; index < 6; index++)
+            {
+                buffer.Add(index);
+            }
+
+            CyclicBuffer<int> restored = Serializer.ProtoDeserialize<CyclicBuffer<int>>(
+                Serializer.ProtoSerialize(buffer)
+            );
+
+            Assert.AreEqual(4, restored.Capacity);
+            Assert.AreEqual(4, restored.Count);
+            Assert.AreEqual(2, restored[0]);
+            Assert.AreEqual(5, restored[3]);
+        }
+
+        /// <remarks>
+        /// <para>
+        /// A bit set states its capacity and delivers its words as separate members, so a payload
+        /// can claim more bits than it carries. Every read indexes the word array from an index the
+        /// capacity admitted, so a capacity the words cannot cover turns <c>TryGet</c> and
+        /// <c>All</c> into throwing members on a value the caller was handed successfully.
+        /// </para>
+        /// <para>
+        /// Asserted through the constructor rather than a hand-patched payload. The constructor is
+        /// where the invariant is established and its only non-test callers are
+        /// <c>BitSet.ToImmutable</c>, which maintains it, and the deserialization surrogate, which
+        /// restores the two members independently and so can disagree. A patched payload would
+        /// instead be asserting the wire encoding, which is not the same on every backend -- the
+        /// first draft of this test passed on Mono and failed on a stripped IL2CPP player for
+        /// exactly that reason -- `ProtoBuf.Internal.StructValueChecker&lt;ImmutableBitSet&gt;` has
+        /// no AOT code there at all, which is issue #696 rather than anything this asserts.
+        /// </para>
+        /// </remarks>
+        [Test]
+        public void AnImmutableBitSetCapacityIsBoundedByTheWordsItCarries()
+        {
+            ImmutableBitSet claimed = new(new ulong[] { 1UL }, int.MaxValue);
+
+            Assert.AreEqual(
+                64,
+                claimed.Capacity,
+                "One delivered word carries 64 bits, whatever the payload claims."
+            );
+            Assert.IsTrue(claimed[0]);
+            Assert.IsFalse(claimed.TryGet(64, out bool _));
+            Assert.DoesNotThrow(() => claimed.All());
+            Assert.DoesNotThrow(() => claimed.TryGet(1_000_000, out bool _));
+        }
+
         [Test]
         public void ACapacityWithinTheLimitStillRoundTrips()
         {

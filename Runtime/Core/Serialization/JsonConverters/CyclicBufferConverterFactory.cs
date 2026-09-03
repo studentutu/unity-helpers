@@ -73,7 +73,19 @@ namespace WallstopStudios.UnityHelpers.Core.Serialization.JsonConverters
                         {
                             throw new JsonException("capacity must be non-negative");
                         }
-                        return new CyclicBuffer<T>(capacity, items);
+
+                        /*
+                            A capacity below the items delivered is raised to hold them, which is
+                            what both binary paths already did -- the document is self-inconsistent
+                            and the items are the half that exists. It is not bounded above,
+                            because a CyclicBuffer allocates nothing from its stated capacity; see
+                            the note in Serializer.DeserializeCyclicBufferWrapper.
+                        */
+                        int delivered = items == null ? 0 : items.Count;
+                        return new CyclicBuffer<T>(
+                            capacity < delivered ? delivered : capacity,
+                            items
+                        );
                     }
 
                     if (reader.TokenType != JsonTokenType.PropertyName)

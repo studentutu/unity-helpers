@@ -9,6 +9,7 @@
 namespace WallstopStudios.UnityHelpers.Utils
 {
     using System;
+    using System.Runtime.ExceptionServices;
     using System.Threading;
     using System.Threading.Tasks;
     using UnityEngine;
@@ -33,6 +34,13 @@ namespace WallstopStudios.UnityHelpers.Utils
     /// </remarks>
     public static class TextureScale
     {
+        /*
+            The seam a fixture needs to make a background slice throw. Production leaves it null;
+            the parallel and single-threaded branches both invoke it with the slice's first row, so
+            a fixture can prove the two branches report a slice failure the same way.
+        */
+        internal static Action<int> SliceStartedForTesting;
+
         /// <summary>
         /// Scales a texture using point (nearest neighbor) sampling.
         /// </summary>
@@ -78,6 +86,30 @@ namespace WallstopStudios.UnityHelpers.Utils
             {
                 tex.Apply(updateMipmaps: false, makeNoLongerReadable: false);
             }
+        }
+
+        /// <summary>
+        /// Keeps the first slice failure, and keeps a later one so it can be logged.
+        /// </summary>
+        /// <remarks>
+        /// Only one exception can reach the caller, and the first is the informative one. The
+        /// loser is recorded rather than logged here, because this runs on a worker while the main
+        /// thread is inside <c>countdown.Wait()</c>: a consumer whose log handler marshals to the
+        /// main thread would deadlock the two against each other. The caller logs it after the
+        /// wait.
+        /// </remarks>
+        private static void RecordSliceFailure(
+            ref Exception first,
+            ref Exception discarded,
+            Exception failure
+        )
+        {
+            if (Interlocked.CompareExchange(ref first, failure, null) == null)
+            {
+                return;
+            }
+
+            Interlocked.CompareExchange(ref discarded, failure, null);
         }
 
         private static void ValidateInputs(Texture2D tex, int newWidth, int newHeight)
@@ -174,6 +206,9 @@ namespace WallstopStudios.UnityHelpers.Utils
                     return the buffers they are still writing into.
                 */
                 int dispatched = 0;
+                Exception workerFailure = null;
+                Exception discardedFailure = null;
+                bool reachedTheEnd = false;
                 try
                 {
                     for (int i = 0; i < cores - 1; i++)
@@ -184,6 +219,7 @@ namespace WallstopStudios.UnityHelpers.Utils
                         {
                             try
                             {
+                                SliceStartedForTesting?.Invoke(start);
                                 if (useBilinear)
                                 {
                                     BilinearScale(
@@ -214,6 +250,14 @@ namespace WallstopStudios.UnityHelpers.Utils
                                     );
                                 }
                             }
+                            catch (Exception sliceFailure)
+                            {
+                                RecordSliceFailure(
+                                    ref workerFailure,
+                                    ref discardedFailure,
+                                    sliceFailure
+                                );
+                            }
                             finally
                             {
                                 countdown.Signal();
@@ -222,37 +266,51 @@ namespace WallstopStudios.UnityHelpers.Utils
                         dispatched++;
                     }
 
-                    // Process final slice on current thread
+                    /*
+                        This slice records into the same field the workers do rather than throwing
+                        through the finally, so whichever slice failed FIRST is the one the caller
+                        sees and neither is discarded.
+                    */
                     int finalStart = slice * (cores - 1);
-                    if (useBilinear)
+                    try
                     {
-                        BilinearScale(
-                            texColors,
-                            premultipliedColors,
-                            newColors,
-                            sourceWidth,
-                            sourceHeight,
-                            newWidth,
-                            ratioX,
-                            ratioY,
-                            finalStart,
-                            newHeight
-                        );
+                        SliceStartedForTesting?.Invoke(finalStart);
+                        if (useBilinear)
+                        {
+                            BilinearScale(
+                                texColors,
+                                premultipliedColors,
+                                newColors,
+                                sourceWidth,
+                                sourceHeight,
+                                newWidth,
+                                ratioX,
+                                ratioY,
+                                finalStart,
+                                newHeight
+                            );
+                        }
+                        else
+                        {
+                            PointScale(
+                                texColors,
+                                newColors,
+                                sourceWidth,
+                                sourceHeight,
+                                newWidth,
+                                ratioX,
+                                ratioY,
+                                finalStart,
+                                newHeight
+                            );
+                        }
                     }
-                    else
+                    catch (Exception sliceFailure)
                     {
-                        PointScale(
-                            texColors,
-                            newColors,
-                            sourceWidth,
-                            sourceHeight,
-                            newWidth,
-                            ratioX,
-                            ratioY,
-                            finalStart,
-                            newHeight
-                        );
+                        RecordSliceFailure(ref workerFailure, ref discardedFailure, sliceFailure);
                     }
+
+                    reachedTheEnd = true;
                 }
                 finally
                 {
@@ -275,11 +333,57 @@ namespace WallstopStudios.UnityHelpers.Utils
                         under a still-running Signal was the same race one level down.
                     */
                     countdown.Wait();
+
+                    /*
+                        Logged here rather than from the slice that raised it: this is the main
+                        thread, and every worker has stopped. Only one exception can reach the
+                        caller, so the second failure is logged instead -- as is a recorded failure
+                        that something else is already unwinding past, because the rethrow below is
+                        then unreachable. A third and later failure is dropped; keeping every one
+                        would mean a list, and two are enough to say the image is wrong.
+
+                        Guarded because this runs during unwinding: a consumer's log handler that
+                        throws would replace the exception the caller is about to receive with its
+                        own.
+                    */
+                    try
+                    {
+                        if (discardedFailure != null)
+                        {
+                            Debug.LogException(discardedFailure);
+                        }
+
+                        if (!reachedTheEnd && workerFailure != null)
+                        {
+                            Debug.LogException(workerFailure);
+                        }
+                    }
+                    catch (Exception)
+                    {
+                        /*
+                            Deliberately without the OutOfMemoryException exclusion the rest of the
+                            package uses. This runs inside a finally that is already unwinding a
+                            real failure, and a log handler runs out of memory exactly when the
+                            caller most needs the failure it is about to receive.
+                        */
+                    }
+                }
+
+                /*
+                    A slice that threw signalled the countdown from its own finally, so the wait
+                    above returned normally and the destination still holds whatever the pooled
+                    buffer had. Reporting nothing here is a silently wrong image; rethrowing is
+                    also what the single-threaded branch below does with the same failure.
+                */
+                if (workerFailure != null)
+                {
+                    ExceptionDispatchInfo.Capture(workerFailure).Throw();
                 }
             }
             else
             {
                 // Single-threaded processing
+                SliceStartedForTesting?.Invoke(0);
                 if (useBilinear)
                 {
                     BilinearScale(

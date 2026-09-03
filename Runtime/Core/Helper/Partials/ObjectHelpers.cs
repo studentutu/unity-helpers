@@ -125,6 +125,83 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
         }
 
         /// <summary>
+        /// Drops every cached tag lookup.
+        /// </summary>
+        /// <remarks>
+        /// A miss costs one <see cref="GameObject.FindGameObjectWithTag"/>, so clearing is cheap.
+        /// While the game is running, an entry whose object a scene unload destroyed is dropped
+        /// without this being called; in the editor outside play mode nothing sweeps the cache,
+        /// because the hook that does is a runtime one.
+        /// </remarks>
+        public static void ClearTagCache()
+        {
+            ObjectsByTag.Clear();
+        }
+
+        /// <summary>
+        /// How many tags the lookup cache currently holds.
+        /// </summary>
+        internal static int TagCacheCount => ObjectsByTag.Count;
+
+        /// <summary>
+        /// Drops cached tag lookups whose object a scene unload destroyed.
+        /// </summary>
+        /// <param name="unloaded">
+        /// Unused; the signature is what <see cref="SceneManager.sceneUnloaded"/> requires.
+        /// </param>
+        /// <remarks>
+        /// The cache is keyed by tag and holds a strong reference to a scene object, so a tag that
+        /// is never asked for again roots that object -- and everything its managed fields reach --
+        /// for the life of the process. A destroyed entry is dropped on the next lookup of the same
+        /// tag, which is exactly the lookup that never comes.
+        /// </remarks>
+        internal static void DropDestroyedTagCacheEntries(Scene unloaded)
+        {
+            if (ObjectsByTag.Count == 0)
+            {
+                return;
+            }
+
+            using PooledResource<List<string>> staleResource = Buffers<string>.List.Get(
+                out List<string> stale
+            );
+            foreach (KeyValuePair<string, Object> entry in ObjectsByTag)
+            {
+                if (entry.Value == null)
+                {
+                    stale.Add(entry.Key);
+                }
+            }
+
+            foreach (string tag in stale)
+            {
+                _ = ObjectsByTag.Remove(tag);
+            }
+        }
+
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+        private static void RegisterTagCacheLifecycle()
+        {
+            /*
+                A session with Domain Reload disabled runs this again over live statics, so both
+                halves have to survive that: subscribing after an unsubscribe is idempotent without
+                a latch, and the previous session's entries are still here, naming objects that
+                stopping play destroyed. Sweeping the destroyed ones rather than clearing outright
+                is what makes this safe against ordering -- methods sharing a load type run in an
+                unspecified order, and a consumer seeding the cache from its own hook must not lose
+                what it just put there.
+
+                What it keeps that a clear would not: an entry naming something the session did not
+                destroy -- a component on a prefab handed to SetInstance, or a DontDestroyOnLoad
+                object -- survives into the next session. ClearTagCache is how a consumer holding
+                one of those resets it.
+            */
+            DropDestroyedTagCacheEntries(default);
+            SceneManager.sceneUnloaded -= DropDestroyedTagCacheEntries;
+            SceneManager.sceneUnloaded += DropDestroyedTagCacheEntries;
+        }
+
+        /// <summary>
         /// Clears the cached instance for a tag if it matches the provided instance.
         /// </summary>
         public static void ClearInstance<T>(string tag, T instance)

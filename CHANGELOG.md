@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add `Helpers.ClearTagCache()`, which drops every cached `Helpers.Find(tag)` lookup. A miss costs one `GameObject.FindGameObjectWithTag` ([#643](https://github.com/Ambiguous-Interactive/unity-helpers/issues/643)).
 - Add `Buffers.ComparerPoolMaxDistinctEntries`, which bounds how many distinct comparers the set and dictionary pool caches retain; the least recently used is evicted past it. See [Comparer-Keyed Pools](./docs/features/utilities/pooling-guide.md#comparer-keyed-pools) ([#689](https://github.com/Ambiguous-Interactive/unity-helpers/issues/689)).
 - Add `RestorableGlobal<T>`, which lends a global for a `using` block and takes it back exactly once, at any nesting depth and in any disposal order, so a copied scope can no longer restore a stale value. `WUH014` reports the disposable structs that still assign in `Dispose`. See [Restorable Globals](./docs/features/utilities/helper-utilities.md#restorableglobalt) ([#627](https://github.com/Ambiguous-Interactive/unity-helpers/issues/627)).
 - Add **Tools > Wallstop Studios > Unity Helpers > Run EditMode/PlayMode Tests With Summary**, which starts a test run and writes a pollable summary file to `Temp/` for a script driving the editor from outside. See [Test Run Reporter](./docs/features/editor-tools/test-run-reporter.md) ([#625](https://github.com/Ambiguous-Interactive/unity-helpers/issues/625)).
@@ -137,6 +138,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Pool purge sizing now averages every rental sample inside `RollingWindowSeconds` rather than the most recent ten thousand, so spike detection reads a longer history on a busy pool ([#693](https://github.com/Ambiguous-Interactive/unity-helpers/issues/693)).
+- Restoring a `CyclicBuffer` from JSON whose stated capacity is below the items it carries now keeps every item, matching what both binary paths already did ([#637](https://github.com/Ambiguous-Interactive/unity-helpers/issues/637)).
 - `StringWrapper.Dispose` no longer removes the wrapper from the cache, and is `[Obsolete]`. The wrapper is shared with every other holder of the same string, so one borrower's `using` block evicted an entry the rest were still reading. Use `StringWrapper.Remove` or `Clear` ([#646](https://github.com/Ambiguous-Interactive/unity-helpers/issues/646)).
 - Restrict `Equals(object)` on `Attribute`, `WGuid`, `FastVector2Int`, `FastVector3Int`, `SerializableType`, `SerializableNullable<T>` and both `SerializableValueTuple` arities to its own type. A boxed `float`, `Guid`, `Type`, `Vector2Int` or `ValueTuple` never answered true in return; the typed overloads are unchanged ([#639](https://github.com/Ambiguous-Interactive/unity-helpers/issues/639)).
 - Change `Attribute` to hash its `CurrentValue`, so an attribute already sitting in a `Dictionary` or `HashSet` becomes unreachable the moment a modification changes that value. Re-add it after applying one ([#639](https://github.com/Ambiguous-Interactive/unity-helpers/issues/639)).
@@ -185,6 +188,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix `Helpers.Find(tag)` keeping an unloaded scene's objects alive: an entry whose object the unload destroyed is dropped, where before only the next lookup of that same tag would notice. `Helpers.ClearTagCache()` drops them all ([#643](https://github.com/Ambiguous-Interactive/unity-helpers/issues/643)).
+- Fix every pooled rental allocating on a growth boundary for its pool's first ten thousand rents, and each pool then retaining 131 KB of usage samples for the process. Rentals are allocation-free once a pool exists ([#693](https://github.com/Ambiguous-Interactive/unity-helpers/issues/693), [#643](https://github.com/Ambiguous-Interactive/unity-helpers/issues/643)).
+- Fix `TextureScale.Bilinear` and `Point` returning a partly scaled texture with no error when a worker slice failed. The failure now reaches the caller, as it already did on a single-core machine ([#691](https://github.com/Ambiguous-Interactive/unity-helpers/issues/691)).
+- Fix the `[SiblingComponent]`, `[ChildComponent]`, `[ParentComponent]` and `[ValidateAssignment]` field caches being plain dictionaries, so assigning components from more than one thread could corrupt them ([#644](https://github.com/Ambiguous-Interactive/unity-helpers/issues/644)).
+- Fix an `ImmutableBitSet` whose serialized capacity exceeded the words stored beside it throwing `IndexOutOfRangeException` from `TryGet` and `All`. The capacity is bounded by the words delivered ([#637](https://github.com/Ambiguous-Interactive/unity-helpers/issues/637)).
 - Fix a `[SiblingComponent]`, `[ChildComponent]` or `[ParentComponent]` field declared `private` on a base class never being assigned, and never logging that it was not. Inherited `[WNotNull]`, `[ValidateAssignment]` and `Attribute` fields are found now too ([#688](https://github.com/Ambiguous-Interactive/unity-helpers/issues/688)).
 - Fix `TextureScale.Bilinear` and `Point` returning their pooled buffers while worker threads were still writing into them, so a scaled texture could carry another caller's pixels ([#643](https://github.com/Ambiguous-Interactive/unity-helpers/issues/643)).
 - Fix a dropdown drawer keeping its choices list after returning it to the pool, so another editor could be handed the list it was still displaying ([#643](https://github.com/Ambiguous-Interactive/unity-helpers/issues/643)).

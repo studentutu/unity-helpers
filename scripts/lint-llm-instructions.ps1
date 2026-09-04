@@ -321,7 +321,7 @@ if ($contextContent -notmatch '(?s)### GitHub Operations.*?GitHub MCP server \*\
     $exitCode = 1
 }
 
-if ($contextContent -notmatch '(?s)### GitHub Operations.*?Announce the capability gap in the same message as the fallback') {
+if ($contextContent -notmatch '(?is)### GitHub Operations.*?announce the\s+capability gap in the same message as the fallback') {
     Write-ErrorMsg 'context.md must require announcing an MCP capability gap in the same message as the fallback.'
     $exitCode = 1
 }

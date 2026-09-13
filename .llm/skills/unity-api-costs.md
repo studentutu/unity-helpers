@@ -78,13 +78,27 @@ size is not sufficient reason to use one.
 **"Precise" means the API rejects a longer array, and that is worth measuring:**
 
 ```text
-Texture2D.SetPixels32(oversized)      -> ArgumentException: size of data to be written is
-                                         outside the target buffer bounds
-RectTransform.GetWorldCorners(len 8)  -> accepted; it needs four OR MORE
+Texture2D.SetPixels32(oversized)             -> ArgumentException: size of data to be written is
+                                                outside the target buffer bounds
+Texture2D.SetPixels32(block, oversized)      -> accepted; consumes the requested block prefix
+RectTransform.GetWorldCorners(len 8)         -> accepted; it needs four OR MORE
 ```
 
-So `SpriteSheetExtractor` is the one justified exact-size rent in the package, and `GetWorldCorners`
-— which looks like it needs exactly four — does not.
+The whole-texture `SetPixels32` overload requires an exact-length array, but its block overload
+accepts a longer array and consumes only the `width * height` prefix. `SpriteSheetExtractor` and
+`SpriteCropper` therefore use the block overload with `SystemArrayPool<Color32>` rather than
+creating permanent exact-size buckets. The active editor test
+`SpriteSheetExtractorPixelBufferTests.PixelBufferOperationsCopyOnlyLogicalPrefixes` guards
+the oversized-buffer behavior on the supported editor matrix, including the 2021.3 floor.
+`GetWorldCorners` likewise accepts more than four elements and does not justify an exact-size rent.
+
+`Parallel.For` is not a zero-allocation substitute for a loop. Retain it only when a multi-size
+benchmark shows a stable crossover with meaningful absolute savings, and keep its body free of
+lexical captures. For rectangular row copies, gate the parallel path on both pixel count and row
+count: a pixel-only threshold misclassifies very wide, short images. The sprite tools use parallel
+copies from 1,048,576 pixels and 512 rows. Their exact row-copy kernels won at 1024², 2048², and
+4096² in a .NET 9 Release benchmark on a 24-logical-CPU host; smaller work and 4096×16 remain
+sequential. Treat that threshold as platform-specific evidence and remeasure before generalizing it.
 
 A texture read has no such lever: `Texture2D` declares `GetPixels32()` and its mip-level overload
 and nothing else — there is no array-filling overload to rent into (measured on 6000.4.6f1; the

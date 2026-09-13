@@ -627,13 +627,48 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
             bool waitBefore = false
         )
         {
+            return StartFunctionAsCoroutine(
+                monoBehaviour,
+                action,
+                updateRate,
+                useJitter,
+                waitBefore,
+                null
+            );
+        }
+
+        /// <summary>
+        /// Repeatedly invokes an action and reports its first failure against the object that owns it.
+        /// </summary>
+        /// <param name="monoBehaviour">The component that hosts the coroutine.</param>
+        /// <param name="action">The action to invoke.</param>
+        /// <param name="updateRate">Interval in seconds; nonpositive or nonfinite values invoke once per frame.</param>
+        /// <param name="useJitter">If true, applies a single randomized initial delay up to <paramref name="updateRate"/>.</param>
+        /// <param name="waitBefore">If true, waits one interval before the first invocation.</param>
+        /// <param name="context">The object that owns the work for error reporting, or the coroutine host when null.</param>
+        /// <returns>The started coroutine.</returns>
+        public static Coroutine StartFunctionAsCoroutine(
+            this MonoBehaviour monoBehaviour,
+            Action action,
+            float updateRate,
+            bool useJitter,
+            bool waitBefore,
+            Object context
+        )
+        {
             if (action == null)
             {
                 throw new ArgumentNullException(nameof(action));
             }
 
             return monoBehaviour.StartCoroutine(
-                FunctionAsCoroutine(monoBehaviour, action, updateRate, useJitter, waitBefore)
+                FunctionAsCoroutine(
+                    context != null ? context : monoBehaviour,
+                    action,
+                    updateRate,
+                    useJitter,
+                    waitBefore
+                )
             );
         }
 

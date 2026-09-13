@@ -56,6 +56,11 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
         private const string CroppedPrefix = "Cropped_";
 
         private const float AlphaThreshold = 0.01f;
+
+        private const long ParallelPixelCopyThreshold = 1_048_576L;
+
+        private const int ParallelRowCopyThreshold = 512;
+
         private static readonly string[] ImageFileExtensions =
         {
             ".png",
@@ -121,6 +126,77 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
         private readonly List<string> _multiSpriteFiles = new();
 
         private bool _ackDanger;
+
+        internal static bool ShouldCopyPixelsInParallel(int width, int height)
+        {
+            return ParallelPixelCopyThreshold <= (long)width * height
+                && ParallelRowCopyThreshold <= height;
+        }
+
+        internal static void CopyCropPixels(
+            Color32[] pixels,
+            int width,
+            int height,
+            int visibleMinX,
+            int visibleMinY,
+            int visibleMaxX,
+            int visibleMaxY,
+            int cropWidth,
+            int cropHeight,
+            Color32[] croppedPixels
+        )
+        {
+            int srcX0 = Mathf.Max(visibleMinX, 0);
+            int srcY0 = Mathf.Max(visibleMinY, 0);
+            int srcX1 = Mathf.Min(visibleMaxX, width - 1);
+            int srcY1 = Mathf.Min(visibleMaxY, height - 1);
+            int copyStartDestX = Mathf.Max(0, srcX0 - visibleMinX);
+            int copyEndDestX = Mathf.Min(cropWidth - 1, srcX1 - visibleMinX);
+            int leftClear = copyStartDestX;
+            int rightClear = cropWidth - 1 - copyEndDestX;
+            int copyCount = copyEndDestX - copyStartDestX + 1;
+
+            if (ShouldCopyPixelsInParallel(cropWidth, cropHeight))
+            {
+                CropRowCopyJob job = new(
+                    pixels,
+                    width,
+                    height,
+                    visibleMinY,
+                    srcX0,
+                    srcY0,
+                    srcY1,
+                    cropWidth,
+                    leftClear,
+                    rightClear,
+                    copyStartDestX,
+                    copyCount,
+                    croppedPixels
+                );
+                Parallel.For(0, cropHeight, job.Execute);
+                return;
+            }
+
+            for (int y = 0; y < cropHeight; ++y)
+            {
+                CopyCropRow(
+                    y,
+                    pixels,
+                    width,
+                    height,
+                    visibleMinY,
+                    srcX0,
+                    srcY0,
+                    srcY1,
+                    cropWidth,
+                    leftClear,
+                    rightClear,
+                    copyStartDestX,
+                    copyCount,
+                    croppedPixels
+                );
+            }
+        }
 
         /// <summary>
         /// Computes the tight alpha-bounded crop rect (with padding) and the adjusted sprite
@@ -275,6 +351,49 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
             }
 
             return new Vector2(0.5f, 0.5f);
+        }
+
+        private static void CopyCropRow(
+            int y,
+            Color32[] pixels,
+            int width,
+            int height,
+            int visibleMinY,
+            int srcX0,
+            int srcY0,
+            int srcY1,
+            int cropWidth,
+            int leftClear,
+            int rightClear,
+            int copyStartDestX,
+            int copyCount,
+            Color32[] croppedPixels
+        )
+        {
+            int destinationRow = y * cropWidth;
+            int sourceY = visibleMinY + y;
+            if (sourceY < 0 || height <= sourceY || sourceY < srcY0 || srcY1 < sourceY)
+            {
+                Array.Clear(croppedPixels, destinationRow, cropWidth);
+                return;
+            }
+
+            if (0 < leftClear)
+            {
+                Array.Clear(croppedPixels, destinationRow, leftClear);
+            }
+
+            if (0 < copyCount)
+            {
+                int sourceIndex = sourceY * width + srcX0;
+                int destinationIndex = destinationRow + copyStartDestX;
+                Array.Copy(pixels, sourceIndex, croppedPixels, destinationIndex, copyCount);
+            }
+
+            if (0 < rightClear)
+            {
+                Array.Clear(croppedPixels, destinationRow + (cropWidth - rightClear), rightClear);
+            }
         }
 
         internal void FindFilesToProcess()
@@ -932,57 +1051,29 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
             int cropHeight = crop.CropHeight;
 
             Texture2D cropped = new(cropWidth, cropHeight, TextureFormat.RGBA32, false);
-            int pixelCount = cropWidth * cropHeight;
-            // SetPixels32 requires exactly width * height elements, so an oversized pool buffer cannot be passed directly.
-            Color32[] croppedPixels = new Color32[pixelCount];
+            {
+                int pixelCount = cropWidth * cropHeight;
+                using PooledArray<Color32> croppedPixelsLease = SystemArrayPool<Color32>.Get(
+                    pixelCount,
+                    out Color32[] croppedPixels
+                );
 
-            int srcX0 = Mathf.Max(visibleMinX, 0);
-            int srcY0 = Mathf.Max(visibleMinY, 0);
-            int srcX1 = Mathf.Min(visibleMaxX, width - 1);
-            int srcY1 = Mathf.Min(visibleMaxY, height - 1);
+                CopyCropPixels(
+                    pixels,
+                    width,
+                    height,
+                    visibleMinX,
+                    visibleMinY,
+                    visibleMaxX,
+                    visibleMaxY,
+                    cropWidth,
+                    cropHeight,
+                    croppedPixels
+                );
 
-            Parallel.For(
-                0,
-                cropHeight,
-                y =>
-                {
-                    int destRow = y * cropWidth;
-                    int srcY = visibleMinY + y;
-                    if (srcY < 0 || height <= srcY || srcY < srcY0 || srcY1 < srcY)
-                    {
-                        Array.Clear(croppedPixels, destRow, cropWidth);
-                        return;
-                    }
-
-                    int copyStartDestX = Mathf.Max(0, srcX0 - visibleMinX);
-                    int copyEndDestX = Mathf.Min(cropWidth - 1, srcX1 - visibleMinX);
-
-                    int leftClear = copyStartDestX;
-                    int rightClear = cropWidth - 1 - copyEndDestX;
-
-                    if (0 < leftClear)
-                    {
-                        Array.Clear(croppedPixels, destRow, leftClear);
-                    }
-
-                    if (copyStartDestX <= copyEndDestX)
-                    {
-                        int numToCopy = copyEndDestX - copyStartDestX + 1;
-                        int srcStartX = srcX0;
-                        int srcIndex = srcY * width + srcStartX;
-                        int destIndex = destRow + copyStartDestX;
-                        Array.Copy(pixels, srcIndex, croppedPixels, destIndex, numToCopy);
-                    }
-
-                    if (0 < rightClear)
-                    {
-                        Array.Clear(croppedPixels, destRow + (cropWidth - rightClear), rightClear);
-                    }
-                }
-            );
-
-            cropped.SetPixels32(croppedPixels);
-            cropped.Apply();
+                cropped.SetPixels32(0, 0, cropWidth, cropHeight, croppedPixels, 0);
+                cropped.Apply();
+            }
 
             string outputDirectory = assetDirectory;
             if (!_overwriteOriginals && _outputDirectory != null)
@@ -1090,6 +1181,74 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
             SkippedNoChange,
             RetryableError,
             FatalError,
+        }
+
+        private sealed class CropRowCopyJob
+        {
+            private readonly Color32[] _pixels;
+            private readonly int _width;
+            private readonly int _height;
+            private readonly int _visibleMinY;
+            private readonly int _srcX0;
+            private readonly int _srcY0;
+            private readonly int _srcY1;
+            private readonly int _cropWidth;
+            private readonly int _leftClear;
+            private readonly int _rightClear;
+            private readonly int _copyStartDestX;
+            private readonly int _copyCount;
+            private readonly Color32[] _croppedPixels;
+
+            internal CropRowCopyJob(
+                Color32[] pixels,
+                int width,
+                int height,
+                int visibleMinY,
+                int srcX0,
+                int srcY0,
+                int srcY1,
+                int cropWidth,
+                int leftClear,
+                int rightClear,
+                int copyStartDestX,
+                int copyCount,
+                Color32[] croppedPixels
+            )
+            {
+                _pixels = pixels;
+                _width = width;
+                _height = height;
+                _visibleMinY = visibleMinY;
+                _srcX0 = srcX0;
+                _srcY0 = srcY0;
+                _srcY1 = srcY1;
+                _cropWidth = cropWidth;
+                _leftClear = leftClear;
+                _rightClear = rightClear;
+                _copyStartDestX = copyStartDestX;
+                _copyCount = copyCount;
+                _croppedPixels = croppedPixels;
+            }
+
+            internal void Execute(int y)
+            {
+                CopyCropRow(
+                    y,
+                    _pixels,
+                    _width,
+                    _height,
+                    _visibleMinY,
+                    _srcX0,
+                    _srcY0,
+                    _srcY1,
+                    _cropWidth,
+                    _leftClear,
+                    _rightClear,
+                    _copyStartDestX,
+                    _copyCount,
+                    _croppedPixels
+                );
+            }
         }
 
         /// <summary>

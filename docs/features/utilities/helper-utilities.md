@@ -266,7 +266,9 @@ Helpers.StartFunctionAsCoroutine(
     gameManager,
     SpawnEnemy,
     updateRate: 5f,
-    useJitter: true
+    useJitter: true,
+    waitBefore: false,
+    context: waveController
 );
 
 void SpawnEnemy()
@@ -274,6 +276,10 @@ void SpawnEnemy()
     Instantiate(enemyPrefab, spawnPoint.position, Quaternion.identity);
 }
 ```
+
+Pass `context` when the object that owns the work is not the `MonoBehaviour` that hosts the
+coroutine. The first callback failure is filed against that object in the Console. A null context
+uses the coroutine host.
 
 **Use for:**
 

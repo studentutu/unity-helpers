@@ -95,6 +95,10 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
         /// </summary>
         private const float DefaultSplitterRatio = 0.4f;
 
+        private const long ParallelPixelCopyThreshold = 1_048_576L;
+
+        private const int ParallelRowCopyThreshold = 512;
+
         internal static bool SuppressUserPrompts { get; set; }
 
         /// <summary>
@@ -522,6 +526,12 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
                 }
             }
             catch { }
+        }
+
+        internal static bool ShouldCopyPixelsInParallel(int width, int height)
+        {
+            return ParallelPixelCopyThreshold <= (long)width * height
+                && ParallelRowCopyThreshold <= height;
         }
 
         /// <summary>
@@ -1275,6 +1285,49 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
                     }
                 );
             }
+        }
+
+        internal static void CopyPixelRows(
+            Color32[] source,
+            int sourceWidth,
+            int sourceX,
+            int sourceY,
+            int width,
+            int height,
+            Color32[] destination
+        )
+        {
+            if (ShouldCopyPixelsInParallel(width, height))
+            {
+                PixelRowCopyJob job = new(
+                    source,
+                    sourceWidth,
+                    sourceX,
+                    sourceY,
+                    width,
+                    destination
+                );
+                Parallel.For(0, height, job.Execute);
+                return;
+            }
+
+            for (int destinationY = 0; destinationY < height; ++destinationY)
+            {
+                int sourceIndex = (sourceY + destinationY) * sourceWidth + sourceX;
+                int destinationIndex = destinationY * width;
+                Array.Copy(source, sourceIndex, destination, destinationIndex, width);
+            }
+        }
+
+        internal static void ApplyPixelBuffer(
+            Texture2D texture,
+            int width,
+            int height,
+            Color32[] pixels
+        )
+        {
+            texture.SetPixels32(0, 0, width, height, pixels, 0);
+            texture.Apply();
         }
 
         [MenuItem("Tools/Wallstop Studios/Unity Helpers/" + Name)]
@@ -7075,8 +7128,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
             }
 
             int pixelCount = targetWidth * targetHeight;
-            // SetPixels32 requires exact-length arrays; WallstopFastArrayPool supplies them without oversized buckets.
-            using PooledArray<Color32> pooledDestination = WallstopFastArrayPool<Color32>.Get(
+            using PooledArray<Color32> pooledDestination = SystemArrayPool<Color32>.Get(
                 pixelCount,
                 out Color32[] destPixels
             );
@@ -7108,8 +7160,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
                     filterMode = FilterMode.Point,
                     wrapMode = TextureWrapMode.Clamp,
                 };
-                preview.SetPixels32(destPixels);
-                preview.Apply();
+                ApplyPixelBuffer(preview, targetWidth, targetHeight, destPixels);
                 return preview;
             }
             catch
@@ -7568,30 +7619,20 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
                 Color32[] pixels = sheet._texture.GetPixels32();
                 int srcWidth = sheet._texture.width;
                 int pixelCount = width * height;
-                // SetPixels32 requires exact-length arrays, so oversized SystemArrayPool buffers cannot be used directly.
-                Color32[] destPixels = new Color32[pixelCount];
-
-                Parallel.For(
-                    0,
-                    height,
-                    destY =>
-                    {
-                        int srcY = y + destY;
-                        int destRowStart = destY * width;
-                        int srcRowStart = srcY * srcWidth + x;
-                        for (int destX = 0; destX < width; ++destX)
-                        {
-                            destPixels[destRowStart + destX] = pixels[srcRowStart + destX];
-                        }
-                    }
-                );
-
                 Texture2D extracted = null;
                 try
                 {
-                    extracted = new Texture2D(width, height, TextureFormat.RGBA32, false);
-                    extracted.SetPixels32(destPixels);
-                    extracted.Apply();
+                    {
+                        using PooledArray<Color32> destinationLease = SystemArrayPool<Color32>.Get(
+                            pixelCount,
+                            out Color32[] destPixels
+                        );
+
+                        CopyPixelRows(pixels, srcWidth, x, y, width, height, destPixels);
+
+                        extracted = new Texture2D(width, height, TextureFormat.RGBA32, false);
+                        ApplyPixelBuffer(extracted, width, height, destPixels);
+                    }
 
                     byte[] pngBytes = extracted.EncodeToPNG();
                     File.WriteAllBytes(fullOutputPath, pngBytes);
@@ -7705,30 +7746,20 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
                 Color32[] pixels = sheet._texture.GetPixels32();
                 int srcWidth = sheet._texture.width;
                 int pixelCount = width * height;
-                // SetPixels32 requires exact-length arrays, so oversized SystemArrayPool buffers cannot be used directly.
-                Color32[] destPixels = new Color32[pixelCount];
-
-                Parallel.For(
-                    0,
-                    height,
-                    destY =>
-                    {
-                        int srcY = y + destY;
-                        int destRowStart = destY * width;
-                        int srcRowStart = srcY * srcWidth + x;
-                        for (int destX = 0; destX < width; ++destX)
-                        {
-                            destPixels[destRowStart + destX] = pixels[srcRowStart + destX];
-                        }
-                    }
-                );
-
                 Texture2D extracted = null;
                 try
                 {
-                    extracted = new Texture2D(width, height, TextureFormat.RGBA32, false);
-                    extracted.SetPixels32(destPixels);
-                    extracted.Apply();
+                    {
+                        using PooledArray<Color32> destinationLease = SystemArrayPool<Color32>.Get(
+                            pixelCount,
+                            out Color32[] destPixels
+                        );
+
+                        CopyPixelRows(pixels, srcWidth, x, y, width, height, destPixels);
+
+                        extracted = new Texture2D(width, height, TextureFormat.RGBA32, false);
+                        ApplyPixelBuffer(extracted, width, height, destPixels);
+                    }
 
                     byte[] pngBytes = extracted.EncodeToPNG();
                     File.WriteAllBytes(fullOutputPath, pngBytes);
@@ -8132,6 +8163,45 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
             None = 0,
             Sprite = 1,
             Sheet = 2,
+        }
+
+        private sealed class PixelRowCopyJob
+        {
+            private readonly Color32[] _source;
+
+            private readonly int _sourceWidth;
+
+            private readonly int _sourceX;
+
+            private readonly int _sourceY;
+
+            private readonly int _width;
+
+            private readonly Color32[] _destination;
+
+            internal PixelRowCopyJob(
+                Color32[] source,
+                int sourceWidth,
+                int sourceX,
+                int sourceY,
+                int width,
+                Color32[] destination
+            )
+            {
+                _source = source;
+                _sourceWidth = sourceWidth;
+                _sourceX = sourceX;
+                _sourceY = sourceY;
+                _width = width;
+                _destination = destination;
+            }
+
+            internal void Execute(int destinationY)
+            {
+                int sourceIndex = (_sourceY + destinationY) * _sourceWidth + _sourceX;
+                int destinationIndex = destinationY * _width;
+                Array.Copy(_source, sourceIndex, _destination, destinationIndex, _width);
+            }
         }
     }
 #endif

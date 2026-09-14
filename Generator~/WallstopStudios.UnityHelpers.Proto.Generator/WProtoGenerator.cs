@@ -9,6 +9,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
     using System.Runtime.Serialization;
     using System.Text;
     using Microsoft.CodeAnalysis;
+    using Microsoft.CodeAnalysis.CSharp;
     using Microsoft.CodeAnalysis.CSharp.Syntax;
     using Microsoft.CodeAnalysis.Text;
     using WallstopStudios.UnityHelpers.Core.Serialization.WallstopProto;
@@ -137,7 +138,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             HashSet<string> announced
         )
         {
-            HashSet<string> found = new HashSet<string>();
+            HashSet<string> found = new HashSet<string>(StringComparer.Ordinal);
             HashSet<ITypeSymbol> visited = new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default);
             HashSet<ITypeSymbol> visitedWithDependencies = new HashSet<ITypeSymbol>(
                 SymbolEqualityComparer.Default
@@ -416,7 +417,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             HashSet<string> announced
         )
         {
-            HashSet<string> found = new HashSet<string>();
+            HashSet<string> found = new HashSet<string>(StringComparer.Ordinal);
             List<string> registrations = new List<string>();
 
             foreach (ClosureScan.TypeUse use in typeUses)
@@ -592,7 +593,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             context.ReportDiagnostic(
                 Diagnostic.Create(
                     WProtoDiagnostics.UndeclaredSubclass,
-                    symbol.Locations.FirstOrDefault(),
+                    FirstLocation(symbol),
                     symbol.Name,
                     declared.Name,
                     declared.ContainingAssembly == null ? "?" : declared.ContainingAssembly.Name
@@ -653,7 +654,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 context.ReportDiagnostic(
                     Diagnostic.Create(
                         WProtoDiagnostics.ReservedEnumValue,
-                        member.Locations.FirstOrDefault(),
+                        FirstLocation(member),
                         enumSymbol.Name,
                         field.Name,
                         reservedValue
@@ -757,7 +758,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 context.ReportDiagnostic(
                     Diagnostic.Create(
                         WProtoDiagnostics.InheritedContractNotDeclared,
-                        contract.Locations.FirstOrDefault(),
+                        FirstLocation(contract),
                         contract.Name,
                         member.Name,
                         declared.Name
@@ -792,7 +793,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 context.ReportDiagnostic(
                     Diagnostic.Create(
                         WProtoDiagnostics.HookWithoutContract,
-                        method.Locations.FirstOrDefault(),
+                        FirstLocation(method),
                         symbol.Name,
                         method.Name
                     )
@@ -844,7 +845,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 context.ReportDiagnostic(
                     Diagnostic.Create(
                         WProtoDiagnostics.ContractMustBePartial,
-                        contract.Locations.FirstOrDefault(),
+                        FirstLocation(contract),
                         contract.Name
                     )
                 );
@@ -857,7 +858,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 context.ReportDiagnostic(
                     Diagnostic.Create(
                         WProtoDiagnostics.GenericContract,
-                        contract.Locations.FirstOrDefault(),
+                        FirstLocation(contract),
                         contract.Name
                     )
                 );
@@ -882,7 +883,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 context.ReportDiagnostic(
                     Diagnostic.Create(
                         WProtoDiagnostics.AbstractWithoutIncludes,
-                        contract.Locations.FirstOrDefault(),
+                        FirstLocation(contract),
                         contract.Name
                     )
                 );
@@ -908,7 +909,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 context.ReportDiagnostic(
                     Diagnostic.Create(
                         WProtoDiagnostics.ImmutableWithIncludes,
-                        contract.Locations.FirstOrDefault(),
+                        FirstLocation(contract),
                         contract.Name
                     )
                 );
@@ -959,7 +960,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 context.ReportDiagnostic(
                     Diagnostic.Create(
                         WProtoDiagnostics.HookOnValueType,
-                        contract.Locations.FirstOrDefault(),
+                        FirstLocation(contract),
                         contract.Name
                     )
                 );
@@ -1004,7 +1005,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 context.ReportDiagnostic(
                     Diagnostic.Create(
                         WProtoDiagnostics.NoParameterlessConstructor,
-                        contract.Locations.FirstOrDefault(),
+                        FirstLocation(contract),
                         contract.Name
                     )
                 );
@@ -1522,7 +1523,11 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             foreach (AttributeData attribute in baseType.GetAttributes())
             {
                 if (
-                    attribute.AttributeClass?.ToDisplayString() != IncludeAttribute
+                    !string.Equals(
+                        attribute.AttributeClass?.ToDisplayString(),
+                        IncludeAttribute,
+                        StringComparison.Ordinal
+                    )
                     || attribute.ConstructorArguments.Length < 2
                 )
                 {
@@ -1665,7 +1670,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 context.ReportDiagnostic(
                     Diagnostic.Create(
                         WProtoDiagnostics.SkipConstructorDropsAnInitializer,
-                        declared.Locations.FirstOrDefault(),
+                        FirstLocation(declared),
                         contract.Name,
                         SymbolEqualityComparer.Default.Equals(declaring, contract)
                             ? declared.Name
@@ -2911,7 +2916,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             HashSet<string> announced
         )
         {
-            HashSet<string> found = new HashSet<string>();
+            HashSet<string> found = new HashSet<string>(StringComparer.Ordinal);
 
             foreach (ClosureScan.TypeUse use in typeUses)
             {
@@ -3001,7 +3006,11 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             {
                 if (
                     attribute.AttributeClass == null
-                    || attribute.AttributeClass.ToDisplayString() != IncludeAttribute
+                    || !string.Equals(
+                        attribute.AttributeClass.ToDisplayString(),
+                        IncludeAttribute,
+                        StringComparison.Ordinal
+                    )
                     || attribute.ConstructorArguments.Length < 2
                 )
                 {
@@ -3041,7 +3050,11 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 }
                 else if (
                     subtypes.Manifest.TryRetired(contract, tag, out string retiredBy)
-                    && retiredBy != subType.ToDisplayString()
+                    && !string.Equals(
+                        retiredBy,
+                        subType.ToDisplayString(),
+                        StringComparison.Ordinal
+                    )
                 )
                 {
                     // Both include declaration forms share the same retirement constraints.
@@ -3063,7 +3076,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                     context.ReportDiagnostic(
                         Diagnostic.Create(
                             WProtoDiagnostics.BadInclude,
-                            contract.Locations.FirstOrDefault(),
+                            FirstLocation(contract),
                             contract.Name,
                             tag,
                             name,
@@ -3085,7 +3098,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                     context.ReportDiagnostic(
                         Diagnostic.Create(
                             WProtoDiagnostics.DuplicateSubtypeTag,
-                            declared.SubType.Locations.FirstOrDefault(),
+                            FirstLocation(declared.SubType),
                             declared.SubType.Name,
                             taken.Name,
                             declared.Tag,
@@ -3101,7 +3114,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                     context.ReportDiagnostic(
                         Diagnostic.Create(
                             WProtoDiagnostics.BadSubtype,
-                            declared.SubType.Locations.FirstOrDefault(),
+                            FirstLocation(declared.SubType),
                             declared.SubType.Name,
                             SubtypeMap.Written(contract, declared.Tag, declared.TagFromManifest),
                             ReservedMap.ReservedProblem(declared.Tag, contract.Name)
@@ -3116,7 +3129,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                     context.ReportDiagnostic(
                         Diagnostic.Create(
                             WProtoDiagnostics.BadSubtype,
-                            declared.SubType.Locations.FirstOrDefault(),
+                            FirstLocation(declared.SubType),
                             declared.SubType.Name,
                             SubtypeMap.Written(contract, declared.Tag, declared.TagFromManifest),
                             "field number "
@@ -3460,8 +3473,13 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
         )
         {
             context.ReportDiagnostic(
-                Diagnostic.Create(descriptor, symbol.Locations.FirstOrDefault(), arguments)
+                Diagnostic.Create(descriptor, FirstLocation(symbol), arguments)
             );
+        }
+
+        private static Location FirstLocation(ISymbol symbol)
+        {
+            return symbol.Locations.Length == 0 ? null : symbol.Locations[0];
         }
 
         /// <summary>
@@ -3478,7 +3496,10 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
         {
             foreach (KeyValuePair<string, TypedConstant> argument in attribute.NamedArguments)
             {
-                if (argument.Key == "Name" && argument.Value.Value is string declared)
+                if (
+                    string.Equals(argument.Key, "Name", StringComparison.Ordinal)
+                    && argument.Value.Value is string declared
+                )
                 {
                     return string.IsNullOrEmpty(declared) ? null : declared;
                 }
@@ -3503,7 +3524,10 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
         {
             foreach (KeyValuePair<string, TypedConstant> argument in attribute.NamedArguments)
             {
-                if (argument.Key != "DataFormat" || argument.Value.Value == null)
+                if (
+                    !string.Equals(argument.Key, "DataFormat", StringComparison.Ordinal)
+                    || argument.Value.Value == null
+                )
                 {
                     continue;
                 }
@@ -3532,7 +3556,10 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
         {
             foreach (KeyValuePair<string, TypedConstant> argument in attribute.NamedArguments)
             {
-                if (argument.Key == name && argument.Value.Value is bool flag)
+                if (
+                    string.Equals(argument.Key, name, StringComparison.Ordinal)
+                    && argument.Value.Value is bool flag
+                )
                 {
                     return flag;
                 }
@@ -3591,12 +3618,22 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 bool partial = false;
                 foreach (SyntaxReference reference in current.DeclaringSyntaxReferences)
                 {
-                    if (
-                        reference.GetSyntax() is TypeDeclarationSyntax declaration
-                        && declaration.Modifiers.Any(modifier => modifier.ValueText == "partial")
-                    )
+                    if (!(reference.GetSyntax() is TypeDeclarationSyntax declaration))
                     {
-                        partial = true;
+                        continue;
+                    }
+
+                    foreach (Microsoft.CodeAnalysis.SyntaxToken modifier in declaration.Modifiers)
+                    {
+                        if (modifier.IsKind(SyntaxKind.PartialKeyword))
+                        {
+                            partial = true;
+                            break;
+                        }
+                    }
+
+                    if (partial)
+                    {
                         break;
                     }
                 }
@@ -3653,7 +3690,11 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             {
                 if (
                     attribute.AttributeClass != null
-                    && attribute.AttributeClass.ToDisplayString() == fullName
+                    && string.Equals(
+                        attribute.AttributeClass.ToDisplayString(),
+                        fullName,
+                        StringComparison.Ordinal
+                    )
                 )
                 {
                     return attribute;
@@ -3913,15 +3954,19 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 return false;
             }
 
-            if (
-                !candidate.IsGlobalNamespace
-                && DeclaresProtobufVocabulary(candidate)
-                && candidate
-                    .GetTypeMembers(ProtobufContractAttributeName)
-                    .Any(member => member.Arity == 0 && IsAttributeType(member))
-            )
+            if (!candidate.IsGlobalNamespace && DeclaresProtobufVocabulary(candidate))
             {
-                return true;
+                foreach (
+                    INamedTypeSymbol member in candidate.GetTypeMembers(
+                        ProtobufContractAttributeName
+                    )
+                )
+                {
+                    if (member.Arity == 0 && IsAttributeType(member))
+                    {
+                        return true;
+                    }
+                }
             }
 
             foreach (INamespaceSymbol nested in candidate.GetNamespaceMembers())
@@ -4000,7 +4045,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                         context.ReportDiagnostic(
                             Diagnostic.Create(
                                 WProtoDiagnostics.ContradictoryNotSerialized,
-                                symbol.Locations.FirstOrDefault(),
+                                FirstLocation(symbol),
                                 symbol.Name,
                                 "carries " + contradiction
                             )
@@ -4028,7 +4073,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
                 {
                     Location location =
                         protobufContract.ApplicationSyntaxReference?.GetSyntax().GetLocation()
-                        ?? symbol.Locations.FirstOrDefault();
+                        ?? FirstLocation(symbol);
                     context.ReportDiagnostic(
                         Diagnostic.Create(
                             WProtoDiagnostics.UnportedProtobufContract,
@@ -4100,7 +4145,7 @@ namespace WallstopStudios.UnityHelpers.Proto.Generator
             DeclaredRootMap.Validate(context.Compilation, context.ReportDiagnostic);
 
             // All scans share diagnostics so one unnameable closure reports only once.
-            HashSet<string> announced = new HashSet<string>();
+            HashSet<string> announced = new HashSet<string>(StringComparer.Ordinal);
 
             List<string> registrations = new List<string>();
             List<string> replacements;

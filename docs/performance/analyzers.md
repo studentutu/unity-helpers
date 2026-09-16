@@ -4,6 +4,11 @@ Unity Helpers ships a Roslyn analyzer that reports footguns in code that already
 the most part, already works. It runs on your code as well as the package's, because the shapes it
 finds are not specific to either.
 
+Open `Tools > Wallstop Studios > Unity Helpers > Analyzer Policies` to inspect the complete policy
+set and enable or disable it for user code. The window manages only the Unity Helpers block in
+`Assets/Default.ruleset`, preserves unrelated analyzer configuration, and reports configuration
+drift before repairing it.
+
 | Id                                                                       | Reports                                                           |
 | ------------------------------------------------------------------------ | ----------------------------------------------------------------- |
 | [`WUH001`](#wuh001-a-lookup-factory-passed-as-a-method-group)            | A lookup factory passed as a method group                         |
@@ -23,20 +28,21 @@ finds are not specific to either.
 | [`WUH015`](#wuh015-an-invalid-unity-lifecycle-signature)                 | A Unity callback with an invalid signature                        |
 | [`WUH016`](#wuh016-a-hidden-inherited-unity-callback)                    | A Unity callback hides an ancestor callback                       |
 | [`WUH017`](#wuh017-a-getcomponent-compared-against-null)                 | A `GetComponent` compared against null                            |
+| [`WUH018`](#wuh018-implicit-string-equality-opt-in)                      | String equality without an explicit policy (**off by default**)   |
 
 These are a different family from the `WPROTO###` serialization diagnostics, and they follow a
 different policy on purpose:
 
-|                     | `WPROTO###`                                                  | `WUH###`                                 |
-| ------------------- | ------------------------------------------------------------ | ---------------------------------------- |
-| Reports             | A serialization contract that cannot be honoured             | An allocation or footgun in correct code |
-| Severity            | Error: the alternative is an exception from a shipped player | **Warning, always**                      |
-| Can fail your build | Yes, and it should                                           | **No**                                   |
-| Default             | On                                                           | On, except `WUH010` and `WUH013`         |
+|                     | `WPROTO###`                                                  | `WUH###`                                    |
+| ------------------- | ------------------------------------------------------------ | ------------------------------------------- |
+| Reports             | A serialization contract that cannot be honoured             | An allocation or footgun in correct code    |
+| Severity            | Error: the alternative is an exception from a shipped player | **Warning, always**                         |
+| Can fail your build | Yes, and it should                                           | **No**                                      |
+| Default             | On                                                           | On, except `WUH010`, `WUH013`, and `WUH018` |
 
 **A `WUH###` diagnostic will never fail your build.** Taking a package upgrade cannot turn a green
 build red over one of these. If your project treats warnings as errors, see
-[Turning one off](#turning-one-off). `WUH010` and `WUH013` go further and are off until you ask for them, because
+[Turning one off](#turning-one-off). `WUH010`, `WUH013`, and `WUH018` go further and are off until you ask for them, because
 their shapes are correct code far more often than they are defects.
 
 ## `WUH001`: a lookup factory passed as a method group
@@ -741,6 +747,34 @@ package's own `Helpers.GetComponent<T>`, whose null comparison tests the _target
 existence question. `GetComponentInChildren<T>() != null` stays as written; the fix this rule names
 must exist where the diagnostic fires.
 
+## `WUH018`: implicit string equality (opt-in)
+
+The string `==` and `!=` operators use ordinal, case-sensitive comparison. That behavior is often
+correct, but the source does not show whether the choice is deliberate. Enable `WUH018` when a
+project requires every non-null string comparison to state its policy:
+
+```xml
+<Rule Id="WUH018" Action="Warning" />
+```
+
+```csharp
+// WUH018: the intended policy is not visible.
+if (mode == "Deserialize") { }
+
+// The protocol token is ordinal and case-sensitive.
+if (string.Equals(mode, "Deserialize", StringComparison.Ordinal)) { }
+```
+
+The rule reports the binary operator when both operands resolve to `System.String`. It does not report null
+checks, pattern checks, `string.Equals`, `object.ReferenceEquals`, non-string operands, or
+user-defined equality operators. It is off by default because operator equality is valid and common;
+the diagnostic is an explicit-policy audit, not a claim that ordinal comparison is wrong.
+
+The package enables this rule, together with `WUH010` and `WUH013`, in every package-owned .NET
+project. Both analyzer implementations and their tooling self-host the shipped analyzer binaries;
+the five Unity source gates cover Runtime, Editor, integrations, runtime tests, and editor tests.
+All owned code therefore enforces every `WUH###` policy while the consumer default remains unchanged.
+
 ## Turning one off
 
 Suppress a single call site whose lookup is genuinely cold:
@@ -766,6 +800,7 @@ Or turn the rule off for the whole project in `Assets/Default.ruleset`:
     <Rule Id="WUH012" Action="None" />
     <Rule Id="WUH013" Action="Warning" />
     <Rule Id="WUH014" Action="None" />
+    <Rule Id="WUH018" Action="Warning" />
   </Rules>
 </RuleSet>
 ```

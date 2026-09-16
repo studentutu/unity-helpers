@@ -67,7 +67,13 @@ namespace WallstopStudios.UnityHelpers.Tests.Tools.OdinMigration
             OdinMigrationChange lockedChange = default;
             foreach (OdinMigrationChange change in analysis.Changes)
             {
-                if (change.From == "global::Sirenix.OdinInspector.ReadOnly")
+                if (
+                    string.Equals(
+                        change.From,
+                        "global::Sirenix.OdinInspector.ReadOnly",
+                        System.StringComparison.Ordinal
+                    )
+                )
                 {
                     lockedChange = change;
                     break;
@@ -164,7 +170,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Tools.OdinMigration
                 + "    [OdinSerialize] Dictionary<string, int> values;\n"
                 + "    [ShowIf(\"left\", Value = 3)] int conditional;\n"
                 + "    [ValueDropdown(\"Choices\")] int choice;\n"
-                + "    [Button(ButtonSizes.Large)] void Run() {}\n"
+                + "    [global::Sirenix.OdinInspector.Button(ButtonSizes.Large)] void Run() {}\n"
                 + "}\n";
 
             OdinMigrationAnalysis analysis = OdinMigrationSourceAnalyzer.Analyze(Source);
@@ -172,6 +178,16 @@ namespace WallstopStudios.UnityHelpers.Tests.Tools.OdinMigration
             Assert.AreEqual(0, analysis.ReplacementCount);
             Assert.GreaterOrEqual(analysis.Blockers.Count, 3);
             Assert.GreaterOrEqual(analysis.ManualReviews.Count, 4);
+            bool foundButtonGuidance = false;
+            foreach (OdinMigrationFinding finding in analysis.ManualReviews)
+            {
+                if (finding.Message.Contains("WButton supports methods on Unity objects"))
+                {
+                    foundButtonGuidance = true;
+                    break;
+                }
+            }
+            Assert.IsTrue(foundButtonGuidance);
             Assert.AreSame(Source, analysis.UpgradedSource);
         }
 
@@ -880,7 +896,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Tools.OdinMigration
 
             public void WriteBackup(string path, byte[] bytes)
             {
-                if (path == FailBackupPath)
+                if (string.Equals(path, FailBackupPath, System.StringComparison.Ordinal))
                 {
                     throw new IOException("Simulated backup failure.");
                 }
@@ -890,12 +906,12 @@ namespace WallstopStudios.UnityHelpers.Tests.Tools.OdinMigration
             public void WriteTarget(string path, byte[] bytes)
             {
                 TargetWrites++;
-                if (path == FailTargetPath)
+                if (string.Equals(path, FailTargetPath, System.StringComparison.Ordinal))
                 {
                     throw new IOException("Simulated write failure.");
                 }
                 Files[path] = bytes;
-                if (path == MutateAfterTargetPath)
+                if (string.Equals(path, MutateAfterTargetPath, System.StringComparison.Ordinal))
                 {
                     Files[path] = new byte[] { 99 };
                 }

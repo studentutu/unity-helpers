@@ -125,4 +125,81 @@ for (const analyzerDll of analyzerDlls) {
   );
 }
 
+const diagnosticsSource = fs.readFileSync(
+  path.join(
+    root,
+    "Generator~",
+    "WallstopStudios.UnityHelpers.Analyzers",
+    "UnityHelpersDiagnostics.cs"
+  ),
+  "utf8"
+);
+const policyWindowSource = fs.readFileSync(
+  path.join(root, "Editor", "Tools", "AnalyzerPolicyWindow.cs"),
+  "utf8"
+);
+const descriptorIds = [...diagnosticsSource.matchAll(/^\s+"(WUH\d{3})",\r?$/gm)].map(
+  (match) => match[1]
+);
+const catalogIds = [...policyWindowSource.matchAll(/new\(\s*"(WUH\d{3})",/g)].map(
+  (match) => match[1]
+);
+check(
+  "the analyzer-policy editor catalog matches every shipped WUH descriptor",
+  JSON.stringify(catalogIds) === JSON.stringify(descriptorIds),
+  `descriptors=${descriptorIds.join(",")} catalog=${catalogIds.join(",")}`
+);
+
+const checkRuleset = fs.readFileSync(
+  path.join(root, "Generator~", "CheckProjects.ruleset"),
+  "utf8"
+);
+const enabledOptInIds = [...checkRuleset.matchAll(/<Rule Id="(WUH\d{3})" Action="Warning" \/>/g)]
+  .map((match) => match[1])
+  .sort();
+check(
+  "all opt-in WUH policies are enabled for package-owned check projects",
+  JSON.stringify(enabledOptInIds) === JSON.stringify(["WUH010", "WUH013", "WUH018"]),
+  enabledOptInIds.join(",")
+);
+
+const generatorBuildPolicy = fs.readFileSync(
+  path.join(root, "Generator~", "Directory.Build.props"),
+  "utf8"
+);
+for (const analyzerDll of analyzerDlls) {
+  const analyzerFileName = path.basename(analyzerDll);
+  check(
+    `every owned .NET project loads ${analyzerFileName}`,
+    generatorBuildPolicy.includes(`Runtime/Analyzers/${analyzerFileName}`),
+    "Generator~/Directory.Build.props must load the shipped binary"
+  );
+}
+const generatorProjectFiles = fs
+  .readdirSync(path.join(root, "Generator~"), { withFileTypes: true })
+  .filter((entry) => entry.isDirectory())
+  .flatMap((entry) =>
+    fs
+      .readdirSync(path.join(root, "Generator~", entry.name))
+      .filter((fileName) => fileName.endsWith(".csproj"))
+      .map((fileName) => path.join(root, "Generator~", entry.name, fileName))
+  );
+check(
+  "owned projects inherit analyzer binaries exactly once",
+  generatorProjectFiles.every((projectFile) =>
+    analyzerDlls.every(
+      (analyzerDll) => !fs.readFileSync(projectFile, "utf8").includes(path.basename(analyzerDll))
+    )
+  ),
+  "individual projects must not duplicate the analyzer references from Directory.Build.props"
+);
+const promotedPolicyIds = [...generatorBuildPolicy.matchAll(/(?:^|;)(WUH\d{3})(?=;|<)/g)].map(
+  (match) => match[1]
+);
+check(
+  "every WUH policy is promoted independently of project warning settings",
+  JSON.stringify(promotedPolicyIds) === JSON.stringify(descriptorIds),
+  `descriptors=${descriptorIds.join(",")} promoted=${promotedPolicyIds.join(",")}`
+);
+
 process.stdout.write(`Analyzer placement contract passed (${passed} checks).\n`);

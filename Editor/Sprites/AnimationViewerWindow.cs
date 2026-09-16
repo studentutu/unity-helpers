@@ -8,7 +8,6 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
     using System;
     using System.Collections.Generic;
     using System.IO;
-    using System.Linq;
     using UnityEditor;
     using UnityEditor.UIElements;
     using UnityEngine;
@@ -97,6 +96,21 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
             AnimationViewerWindow wnd = GetWindow<AnimationViewerWindow>();
             wnd.titleContent = new GUIContent("2D Animation Viewer");
             wnd.minSize = new Vector2(750, 500);
+        }
+
+        internal static void PlaceFileSelectorFirst(VisualElement root, VisualElement fileSelector)
+        {
+            if (
+                root == null
+                || fileSelector == null
+                || fileSelector.parent != root
+                || root.childCount < 2
+            )
+            {
+                return;
+            }
+
+            fileSelector.SendToBack();
         }
 
         private static string GetLastAnimationDirectory()
@@ -305,19 +319,13 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
                 _fileSelector.OnFilesSelectedReadOnly += HandleFilesSelectedFromCustomBrowser;
                 _fileSelector.OnCancelled += HideMultiFileSelector;
                 root.Add(_fileSelector);
-                if (1 < root.childCount)
-                {
-                    _fileSelector.PlaceInFront(root.Children().FirstOrDefault());
-                }
+                PlaceFileSelectorFirst(root, _fileSelector);
             }
             else if (_fileSelector.parent == null)
             {
                 _fileSelector.ResetAndShow(GetLastAnimationDirectory());
                 root.Add(_fileSelector);
-                if (1 < root.childCount)
-                {
-                    _fileSelector.PlaceInFront(root.Children().FirstOrDefault());
-                }
+                PlaceFileSelectorFirst(root, _fileSelector);
             }
             else
             {

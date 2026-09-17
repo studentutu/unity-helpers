@@ -11,10 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Add an Odin migration preview/apply tool that reports every globally qualified inspector
-  attribute with safety guidance and only converts proven-equivalent `ReadOnly` and
-  `EnumToggleButtons` fields. Button findings now identify the Unity-object, argument, and method
-  signature checks that need manual review. It preserves formatting and backups, and blocks unsafe scans. See the
+- Add an Odin migration preview/apply tool for proven-equivalent `ReadOnly` and
+  `EnumToggleButtons` fields. Preview reports unsupported attributes and blocks source rewrites
+  when Odin serialization may own data. Apply preserves formatting and backups. See the
   [Odin Migration Guide](./docs/guides/odin-migration-guide.md)
   ([#794](https://github.com/Ambiguous-Interactive/unity-helpers/issues/794)).
 - Add opt-in `WUH018` warnings for string `==` and `!=` comparisons whose ordinal comparison policy
@@ -65,6 +64,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Improved
 
+- Avoid a staging copy for `ICollection<T>` sources in `OrderBy`, `Ordered`, and `Shuffled`, while
+  keeping compact returned lists for other sources
+  ([#781](https://github.com/Ambiguous-Interactive/unity-helpers/issues/781)).
+- Correct random reference documentation: identify `WyRandom`'s wyhash v1 stream, clarify
+  `XoroShiroRandom`'s high-half output, and distinguish the SplitMix design from Vigna's 2015
+  reference implementation without attributing an unsupported published PractRand result
+  ([#757](https://github.com/Ambiguous-Interactive/unity-helpers/issues/757)).
+- Describe `PatternDefeatingQuickSort` as the pdqsort-inspired introsort it implements; it does
+  not include upstream pattern-breaking heuristics
+  ([#756](https://github.com/Ambiguous-Interactive/unity-helpers/issues/756)).
 - Avoid an iterator allocation when the Animation Viewer opens or restores its
   multi-file selector ([#781](https://github.com/Ambiguous-Interactive/unity-helpers/issues/781)).
 
@@ -311,6 +320,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix reusable tag and effect query buffers retaining stale entries when a target, handler, or
+  requested tag is unavailable ([#633](https://github.com/Ambiguous-Interactive/unity-helpers/issues/633)).
+- Fix `LineHelper.SimplifyPrecise` leaving a supplied buffer stale for null or short paths, and
+  allow both polyline simplifiers to use their input list as the destination
+  ([#633](https://github.com/Ambiguous-Interactive/unity-helpers/issues/633)).
+- Fix per-destruction array allocation when cosmetic effects remove tracked targets. Cleanup still visits the original target snapshot when callbacks change the target list ([#781](https://github.com/Ambiguous-Interactive/unity-helpers/issues/781)).
 - Fix package compiler and analyzer warnings across supported Unity versions, including the 2021.3 serialization attribute conflict and Unity 6 obsolete build-target calls ([#766](https://github.com/Ambiguous-Interactive/unity-helpers/issues/766), [#770](https://github.com/Ambiguous-Interactive/unity-helpers/issues/770)).
 - Fix the seven UI Toolkit progress controls failing to compile on Unity 6000.6. Their UXML tags and attributes remain available on Unity 2021.3 and newer ([#759](https://github.com/Ambiguous-Interactive/unity-helpers/issues/759)).
 - Fix pooled serialization writes accepting negative or oversized advances and overflowing capacity calculations ([#760](https://github.com/Ambiguous-Interactive/unity-helpers/issues/760)).

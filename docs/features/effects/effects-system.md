@@ -441,6 +441,8 @@ player.ApplyEffect(levelUpEffect);
 
 Cosmetic effects handle the visual and audio presentation of effects. They provide a clean separation between gameplay logic (tags, attributes) and presentation (particles, sounds, UI).
 
+When a cosmetic component is destroyed, it calls `OnRemoveEffect` for each tracked target that still exists. Cleanup uses a snapshot, so a removal callback can change the tracked targets without skipping the remaining callbacks.
+
 ### Architecture Overview
 
 **Component Hierarchy:**
@@ -1301,6 +1303,11 @@ foreach (string tag in activeTags)
     Debug.Log($"Active tag: {tag}");
 }
 ```
+
+You can pass a reusable list to `GetActiveTags`, `GetHandlesWithTag`, or `GetActiveEffects`.
+Each query clears that list before returning, including when the target has no matching handler
+or the requested tag is empty. Reusing one list across targets therefore cannot leave the previous
+target's tags or effect handles in the result.
 
 **Collection Type Support:**
 

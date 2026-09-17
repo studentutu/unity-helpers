@@ -528,6 +528,9 @@ bool inside = PointPolygonCheck.IsPointInsidePolygon(clickPos, vertices);
 
 - Polyline simplification (Douglas–Peucker)
   - `Simplify` (float epsilon) and `SimplifyPrecise` (double tolerance) reduce vertex count while preserving shape.
+  - When a destination list is supplied to `SimplifyPrecise`, the result uses that list even for
+    null, empty, one-point, or two-point inputs. Both methods also accept the input list as the
+    destination, replacing its contents with the simplified path.
 
 Example:
 
@@ -942,6 +945,11 @@ using (var batchBuffer = items.PartitionPooled(10))
 var shuffled = items.Shuffled();
 // Original list unchanged
 ```
+
+`OrderBy`, `Ordered`, and `Shuffled` build their returned `List<T>` directly when the source exposes
+an `ICollection<T>` count. Other sources use a pooled staging list so the returned list has capacity
+for its actual element count instead of retaining growth headroom. Each source is enumerated once,
+and `Shuffled` keeps the same random draw order.
 
 ### IList Operations
 

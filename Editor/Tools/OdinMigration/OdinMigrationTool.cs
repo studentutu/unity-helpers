@@ -22,17 +22,30 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.OdinMigration
             IOdinMigrationScanContext context
         )
         {
+            return BuildPlans(assetPaths, Array.Empty<string>(), context);
+        }
+
+        internal static ScanResult BuildPlans(
+            IReadOnlyList<string> assetPaths,
+            IReadOnlyList<string> serializedAssetPaths,
+            IOdinMigrationScanContext context
+        )
+        {
             ScanResult result = new ScanResult();
-            if (assetPaths == null || context == null)
+            if (assetPaths == null || serializedAssetPaths == null || context == null)
             {
                 result.Failures.Add("The migration scan did not receive valid inputs.");
                 return result;
             }
 
-            for (int index = 0; index < assetPaths.Count; index++)
+            int sourceFileCount = assetPaths.Count;
+            int serializedFileCount = serializedAssetPaths.Count;
+            int totalFiles = sourceFileCount + serializedFileCount;
+
+            for (int index = 0; index < sourceFileCount; index++)
             {
                 string assetPath = assetPaths[index];
-                if (context.ShouldCancel(assetPath, index, assetPaths.Count))
+                if (context.ShouldCancel(assetPath, index, totalFiles))
                 {
                     result.Cancelled = true;
                     break;
@@ -95,6 +108,24 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.OdinMigration
                 );
                 result.Replacements += analysis.ReplacementCount;
             }
+
+            if (result.Cancelled)
+            {
+                return result;
+            }
+
+            for (int index = 0; index < serializedFileCount; index++)
+            {
+                string assetPath = serializedAssetPaths[index];
+                if (context.ShouldCancel(assetPath, sourceFileCount + index, totalFiles))
+                {
+                    result.Cancelled = true;
+                    break;
+                }
+
+                ScanSerializedAsset(assetPath, context, result);
+            }
+
             return result;
         }
 
@@ -104,6 +135,68 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.OdinMigration
                 && 0 < result.Plans.Count
                 && !result.Cancelled
                 && result.Failures.Count == 0;
+        }
+
+        private static void ScanSerializedAsset(
+            string assetPath,
+            IOdinMigrationScanContext context,
+            ScanResult result
+        )
+        {
+            try
+            {
+                ScanSerializedAssetContents(assetPath, context, result);
+            }
+            catch (Exception exception)
+            {
+                result.SerializedScanFailures.Add($"{assetPath}: {exception.Message}");
+            }
+        }
+
+        private static void ScanSerializedAssetContents(
+            string assetPath,
+            IOdinMigrationScanContext context,
+            ScanResult result
+        )
+        {
+            byte[] bytes = context.ReadAllBytes(context.GetFullPath(assetPath));
+            if (
+                !OdinMigrationEncodedSource.TryDecode(
+                    bytes,
+                    out OdinMigrationDecodedSource decoded,
+                    out string decodeFailure
+                )
+            )
+            {
+                result.SerializedScanFailures.Add($"{assetPath}: {decodeFailure}");
+                return;
+            }
+            if (!OdinMigrationSerializedDataScanner.LooksLikeUnityYaml(decoded.Source))
+            {
+                result.SerializedScanFailures.Add(
+                    $"{assetPath}: not Unity text YAML; serialized data cannot be checked."
+                );
+                return;
+            }
+
+            if (
+                !OdinMigrationSerializedDataScanner.TryAnalyze(
+                    decoded.Source,
+                    out IReadOnlyList<OdinMigrationFinding> findings
+                )
+            )
+            {
+                result.SerializedScanFailures.Add(
+                    $"{assetPath}: no Unity YAML documents were found; serialized data cannot be checked."
+                );
+                return;
+            }
+            result.SerializedAssetsScanned++;
+            result.SerializedDataFindings += findings.Count;
+            if (0 < findings.Count)
+            {
+                result.SerializedAnalyses.Add(new SerializedFileAnalysis(assetPath, findings));
+            }
         }
 
         [MenuItem(MenuRoot + "Preview Assets")]
@@ -132,8 +225,24 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.OdinMigration
 
         private static void Run(bool selectedOnly, bool apply)
         {
-            List<string> assetPaths = CollectAssetPaths(selectedOnly);
-            if (assetPaths.Count == 0)
+            List<string> assetPaths;
+            List<string> serializedAssetPaths;
+            try
+            {
+                assetPaths = CollectAssetPaths(selectedOnly);
+                serializedAssetPaths = CollectSerializedAssetPaths();
+            }
+            catch (Exception exception)
+            {
+                Debug.LogError($"Odin migration could not discover assets: {exception}");
+                EditorUtility.DisplayDialog(
+                    "Odin Migration Preview",
+                    $"Asset discovery failed: {exception.Message}",
+                    "OK"
+                );
+                return;
+            }
+            if (assetPaths.Count == 0 && (selectedOnly || serializedAssetPaths.Count == 0))
             {
                 EditorUtility.DisplayDialog(
                     "Odin Migration",
@@ -148,7 +257,11 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.OdinMigration
             ScanResult result;
             try
             {
-                result = BuildPlans(assetPaths, new PhysicalOdinMigrationScanContext(ProjectRoot));
+                result = BuildPlans(
+                    assetPaths,
+                    serializedAssetPaths,
+                    new PhysicalOdinMigrationScanContext(ProjectRoot)
+                );
             }
             finally
             {
@@ -250,9 +363,17 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.OdinMigration
                 AppendFindings(report, "BLOCKER", file.AssetPath, file.Analysis.Blockers);
                 AppendFindings(report, "REVIEW", file.AssetPath, file.Analysis.ManualReviews);
             }
+            foreach (SerializedFileAnalysis file in result.SerializedAnalyses)
+            {
+                AppendFindings(report, "DATA REVIEW", file.AssetPath, file.Findings);
+            }
             foreach (string failure in result.Failures)
             {
                 report.AppendLine($"FAILURE: {failure}");
+            }
+            foreach (string failure in result.SerializedScanFailures)
+            {
+                report.AppendLine($"DATA SCAN FAILURE: {failure}");
             }
             return report.ToString();
         }
@@ -275,6 +396,9 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.OdinMigration
             return $"Analyzed {result.AnalyzedFiles} file(s); "
                 + $"{result.Replacements} safe replacement(s) in {result.Plans.Count} file(s); "
                 + $"{result.Blockers} blocker(s); {result.ManualReviews} manual review item(s); "
+                + $"{result.SerializedAssetsScanned} serialized asset(s) checked; "
+                + $"{result.SerializedDataFindings} serialized-data review item(s); "
+                + $"{result.SerializedScanFailures.Count} serialized-data scan failure(s); "
                 + $"{result.Failures.Count} failure(s); {result.GeneratedFiles} generated file(s) skipped; "
                 + (result.Cancelled ? "scan cancelled." : "scan complete.");
         }
@@ -328,6 +452,35 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.OdinMigration
             return new List<string>(paths);
         }
 
+        private static List<string> CollectSerializedAssetPaths()
+        {
+            SortedSet<string> paths = new SortedSet<string>(StringComparer.Ordinal);
+            string assetsRoot = Application.dataPath;
+            foreach (
+                string fullPath in Directory.EnumerateFiles(
+                    assetsRoot,
+                    "*",
+                    SearchOption.AllDirectories
+                )
+            )
+            {
+                string path = fullPath.Substring(ProjectRoot.Length + 1).Replace('\\', '/');
+                if (
+                    path.StartsWith("Assets/", StringComparison.Ordinal)
+                    && (
+                        path.EndsWith(".unity", StringComparison.OrdinalIgnoreCase)
+                        || path.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase)
+                        || path.EndsWith(".asset", StringComparison.OrdinalIgnoreCase)
+                    )
+                )
+                {
+                    paths.Add(path);
+                }
+            }
+
+            return new List<string>(paths);
+        }
+
         internal sealed class FileAnalysis
         {
             internal readonly string AssetPath;
@@ -340,10 +493,28 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.OdinMigration
             }
         }
 
+        internal sealed class SerializedFileAnalysis
+        {
+            internal readonly string AssetPath;
+            internal readonly IReadOnlyList<OdinMigrationFinding> Findings;
+
+            internal SerializedFileAnalysis(
+                string assetPath,
+                IReadOnlyList<OdinMigrationFinding> findings
+            )
+            {
+                AssetPath = assetPath;
+                Findings = findings;
+            }
+        }
+
         internal sealed class ScanResult
         {
             internal readonly List<FileAnalysis> Analyses = new List<FileAnalysis>();
+            internal readonly List<SerializedFileAnalysis> SerializedAnalyses =
+                new List<SerializedFileAnalysis>();
             internal readonly List<string> Failures = new List<string>();
+            internal readonly List<string> SerializedScanFailures = new List<string>();
             internal readonly List<OdinMigrationFilePlan> Plans = new List<OdinMigrationFilePlan>();
             internal int AnalyzedFiles;
             internal int Blockers;
@@ -351,6 +522,8 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.OdinMigration
             internal int GeneratedFiles;
             internal int ManualReviews;
             internal int Replacements;
+            internal int SerializedAssetsScanned;
+            internal int SerializedDataFindings;
         }
 
         internal interface IOdinMigrationScanContext

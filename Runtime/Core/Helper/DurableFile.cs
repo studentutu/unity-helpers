@@ -129,63 +129,38 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
         /// <param name="contents">Text to write. Null is treated as empty.</param>
         /// <param name="cancellationToken">Optional cancellation token.</param>
         /// <returns>Null on success, otherwise the failure.</returns>
-        public static async ValueTask<Exception> WriteAllTextAsync(
+        public static ValueTask<Exception> WriteAllTextAsync(
             string path,
             string contents,
             CancellationToken cancellationToken = default
         )
         {
-            if (string.IsNullOrWhiteSpace(path))
-            {
-                return new ArgumentException("A destination path is required.", nameof(path));
-            }
+            return WriteStagedAsync(path, contents, null, cancellationToken);
+        }
 
-            SemaphoreLease gate;
-            try
-            {
-                gate = await EnterGateAsync(path, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception e)
-            {
-                return e;
-            }
-
-            using (gate)
-            {
-                string temporaryPath = path + TemporarySuffix;
-                FileStream staging;
-                byte[] bytes;
-                try
-                {
-                    bytes = Utf8NoByteOrderMark.GetBytes(contents ?? string.Empty);
-                    EnsureDirectory(path);
-                    staging = OpenStagingStream(temporaryPath, useAsync: true);
-                }
-                catch (Exception e)
-                {
-                    return e;
-                }
-
-                try
-                {
-                    // Synchronous disposal preserves compatibility with Unity profiles lacking IAsyncDisposable.
-                    using (staging)
-                    {
-                        await staging
-                            .WriteAsync(bytes, 0, bytes.Length, cancellationToken)
-                            .ConfigureAwait(false);
-                        staging.Flush(flushToDisk: true);
-                    }
-
-                    Swap(temporaryPath, path);
-                    return null;
-                }
-                catch (Exception e)
-                {
-                    DiscardStagedFile(temporaryPath);
-                    return e;
-                }
-            }
+        /// <summary>
+        /// Asynchronously replaces a file's bytes, staging and flushing before the swap.
+        /// </summary>
+        /// <remarks>
+        /// Carries the same durability guarantees as <see cref="TryWriteAllBytes"/>.
+        /// Keep the array unchanged until this call completes.
+        /// </remarks>
+        /// <param name="path">Destination file path. Missing directories are created.</param>
+        /// <param name="contents">Bytes to write. Null is treated as empty.</param>
+        /// <param name="cancellationToken">Optional cancellation token.</param>
+        /// <returns>Null on success, otherwise the failure.</returns>
+        /// <example>
+        /// <code>
+        /// Exception error = await DurableFile.WriteAllBytesAsync(savePath, serializedBytes, cancellationToken);
+        /// </code>
+        /// </example>
+        public static ValueTask<Exception> WriteAllBytesAsync(
+            string path,
+            byte[] contents,
+            CancellationToken cancellationToken = default
+        )
+        {
+            return WriteStagedAsync(path, null, contents, cancellationToken);
         }
 
         /// <summary>
@@ -462,6 +437,71 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
             catch (Exception)
             {
                 return false;
+            }
+        }
+
+        private static async ValueTask<Exception> WriteStagedAsync(
+            string path,
+            string textContents,
+            byte[] byteContents,
+            CancellationToken cancellationToken
+        )
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return new ArgumentException("A destination path is required.", nameof(path));
+            }
+
+            SemaphoreLease gate;
+            try
+            {
+                gate = await EnterGateAsync(path, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception e)
+            {
+                return e;
+            }
+
+            using (gate)
+            {
+                string temporaryPath = path + TemporarySuffix;
+                FileStream staging;
+                byte[] bytes;
+                try
+                {
+                    bytes =
+                        byteContents
+                        ?? (
+                            textContents == null
+                                ? Array.Empty<byte>()
+                                : Utf8NoByteOrderMark.GetBytes(textContents)
+                        );
+                    EnsureDirectory(path);
+                    staging = OpenStagingStream(temporaryPath, useAsync: true);
+                }
+                catch (Exception e)
+                {
+                    return e;
+                }
+
+                try
+                {
+                    using (staging)
+                    {
+                        await staging
+                            .WriteAsync(bytes, 0, bytes.Length, cancellationToken)
+                            .ConfigureAwait(false);
+                        staging.Flush(flushToDisk: true);
+                    }
+
+                    Swap(temporaryPath, path);
+                    return null;
+                }
+                catch (Exception e)
+                {
+                    DiscardStagedFile(temporaryPath);
+                    return e;
+                }
             }
         }
 

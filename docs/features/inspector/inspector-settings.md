@@ -447,7 +447,9 @@ See [Pagination Settings](#enumtogglebuttonspagesize).
 
 ## Creating the Settings Asset
 
-The `UnityHelpersSettings` asset is automatically created on first use, but you can create it manually:
+The `UnityHelpersSettings` asset is automatically created on first use. If an upgrade adds missing
+settings, the package saves those defaults when the editor finishes updating and compiling. You can also
+create the asset manually:
 
 ### Method 1: Automatic Creation
 

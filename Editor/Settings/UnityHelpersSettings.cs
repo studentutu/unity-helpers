@@ -1332,6 +1332,9 @@ namespace WallstopStudios.UnityHelpers.Editor.Settings
         [Range(MinFoldoutSpeed, MaxFoldoutSpeed)]
         private float _inlineEditorFoldoutSpeed = DefaultFoldoutSpeed;
 
+        [NonSerialized]
+        private bool _saveAfterLoadQueued;
+
         /// <summary>
         /// Returns the configured page size, falling back to defaults if unset.
         /// </summary>
@@ -3806,6 +3809,12 @@ namespace WallstopStudios.UnityHelpers.Editor.Settings
         /// </summary>
         public void SaveSettings()
         {
+            if (_saveAfterLoadQueued)
+            {
+                EditorApplication.update -= SaveAfterLoad;
+                _saveAfterLoadQueued = false;
+            }
+
             EnsureWButtonCustomColorDefaults();
             EnsureWEnumToggleButtonsCustomColorDefaults();
             ApplyRuntimeConfiguration();
@@ -3865,10 +3874,11 @@ namespace WallstopStudios.UnityHelpers.Editor.Settings
         }
 
         /// <summary>
-        /// Ensures persisted data stays within valid range.
+        /// Normalizes loaded settings and saves changes when the editor is idle.
         /// </summary>
         internal void OnEnable()
         {
+            bool settingsChanged = false;
             _stringInListPageSize = Mathf.Clamp(
                 _stringInListPageSize <= 0 ? DefaultStringInListPageSize : _stringInListPageSize,
                 MinPageSize,
@@ -3990,36 +4000,34 @@ namespace WallstopStudios.UnityHelpers.Editor.Settings
                 )
                 {
                     _failedTestsOutputDirectory = validatedDirectory;
-                    SaveSettings();
+                    settingsChanged = true;
                 }
             }
             if (EnsureFoldoutTweenDefaults())
             {
-                SaveSettings();
+                settingsChanged = true;
             }
             if (EnsureWButtonCustomColorDefaults())
             {
-                SaveSettings();
+                settingsChanged = true;
             }
             if (EnsureWEnumToggleButtonsCustomColorDefaults())
             {
-                SaveSettings();
+                settingsChanged = true;
             }
-
-            bool shouldApplyRuntimeConfig = true;
             if (EnsureSerializableTypePatternDefaults())
             {
-                SaveSettings();
-                shouldApplyRuntimeConfig = false;
+                settingsChanged = true;
             }
             if (EnsureSerializableSetTweenDefaults())
             {
-                SaveSettings();
-                shouldApplyRuntimeConfig = false;
+                settingsChanged = true;
             }
-            if (shouldApplyRuntimeConfig)
+            ApplyRuntimeConfiguration();
+            if (settingsChanged && !_saveAfterLoadQueued)
             {
-                ApplyRuntimeConfiguration();
+                _saveAfterLoadQueued = true;
+                EditorApplication.update += SaveAfterLoad;
             }
         }
 
@@ -4028,14 +4036,20 @@ namespace WallstopStudios.UnityHelpers.Editor.Settings
             _wbuttonCustomColors ??= new WButtonCustomColorDictionary();
 
             bool changed = false;
-            changed |= MigrateLegacyWButtonPalette();
+            if (MigrateLegacyWButtonPalette())
+            {
+                changed = true;
+            }
 
             // Migrate explicit-color flags before deriving colors can overwrite authored choices.
             foreach (WButtonCustomColor stored in _wbuttonCustomColors.Values)
             {
                 if (stored != null)
                 {
-                    changed |= stored.MigrateChosenTextColor();
+                    if (stored.MigrateChosenTextColor())
+                    {
+                        changed = true;
+                    }
                 }
             }
 
@@ -4064,16 +4078,26 @@ namespace WallstopStudios.UnityHelpers.Editor.Settings
                 changed = true;
             }
 
-            changed |= EnsureWButtonThemeEntry(
-                WButtonLightThemeColorKey,
-                DefaultLightThemeButtonColor,
-                Color.black
-            );
-            changed |= EnsureWButtonThemeEntry(
-                WButtonDarkThemeColorKey,
-                DefaultDarkThemeButtonColor,
-                Color.white
-            );
+            if (
+                EnsureWButtonThemeEntry(
+                    WButtonLightThemeColorKey,
+                    DefaultLightThemeButtonColor,
+                    Color.black
+                )
+            )
+            {
+                changed = true;
+            }
+            if (
+                EnsureWButtonThemeEntry(
+                    WButtonDarkThemeColorKey,
+                    DefaultDarkThemeButtonColor,
+                    Color.white
+                )
+            )
+            {
+                changed = true;
+            }
 
             int paletteIndex = 0;
             foreach (
@@ -4133,6 +4157,33 @@ namespace WallstopStudios.UnityHelpers.Editor.Settings
             }
 
             return changed;
+        }
+
+        internal void SaveAfterLoad()
+        {
+            SaveAfterLoad(EditorApplication.isUpdating || EditorApplication.isCompiling);
+        }
+
+        internal void SaveAfterLoad(bool editorIsBusy)
+        {
+            if (!_saveAfterLoadQueued)
+            {
+                return;
+            }
+
+            if (this == null)
+            {
+                EditorApplication.update -= SaveAfterLoad;
+                _saveAfterLoadQueued = false;
+                return;
+            }
+
+            if (editorIsBusy)
+            {
+                return;
+            }
+
+            SaveSettings();
         }
 
         private void InvalidateSerializableTypePatternCache()
@@ -4327,7 +4378,10 @@ namespace WallstopStudios.UnityHelpers.Editor.Settings
             {
                 if (stored != null)
                 {
-                    changed |= stored.MigrateChosenTextColors();
+                    if (stored.MigrateChosenTextColors())
+                    {
+                        changed = true;
+                    }
                 }
             }
 
@@ -4354,20 +4408,30 @@ namespace WallstopStudios.UnityHelpers.Editor.Settings
                 changed = true;
             }
 
-            changed |= EnsureWEnumToggleButtonsThemeEntry(
-                WEnumToggleButtonsLightThemeColorKey,
-                DefaultLightThemeEnumSelectedColor,
-                DefaultLightThemeEnumSelectedTextColor,
-                DefaultLightThemeEnumInactiveColor,
-                DefaultLightThemeEnumInactiveTextColor
-            );
-            changed |= EnsureWEnumToggleButtonsThemeEntry(
-                WEnumToggleButtonsDarkThemeColorKey,
-                DefaultDarkThemeEnumSelectedColor,
-                DefaultDarkThemeEnumSelectedTextColor,
-                DefaultDarkThemeEnumInactiveColor,
-                DefaultDarkThemeEnumInactiveTextColor
-            );
+            if (
+                EnsureWEnumToggleButtonsThemeEntry(
+                    WEnumToggleButtonsLightThemeColorKey,
+                    DefaultLightThemeEnumSelectedColor,
+                    DefaultLightThemeEnumSelectedTextColor,
+                    DefaultLightThemeEnumInactiveColor,
+                    DefaultLightThemeEnumInactiveTextColor
+                )
+            )
+            {
+                changed = true;
+            }
+            if (
+                EnsureWEnumToggleButtonsThemeEntry(
+                    WEnumToggleButtonsDarkThemeColorKey,
+                    DefaultDarkThemeEnumSelectedColor,
+                    DefaultDarkThemeEnumSelectedTextColor,
+                    DefaultDarkThemeEnumInactiveColor,
+                    DefaultDarkThemeEnumInactiveTextColor
+                )
+            )
+            {
+                changed = true;
+            }
 
             foreach (
                 KeyValuePair<

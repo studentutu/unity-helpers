@@ -290,8 +290,7 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                 try
                 {
                     // Open the source before creating destination directories so failed reads leave no new folders.
-                    source = OpenSourceStream(sourcePath, useAsync: false);
-                    EnsureDirectory(destinationPath);
+                    source = OpenCopySourceStream(sourcePath, destinationPath, useAsync: false);
                 }
                 catch (Exception e)
                 {
@@ -340,12 +339,51 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
         /// <param name="destinationPath">File to replace. Missing directories are created.</param>
         /// <param name="cancellationToken">Optional cancellation token.</param>
         /// <returns>Null on success, otherwise the failure.</returns>
-        public static async ValueTask<Exception> CopyAsync(
+        public static ValueTask<Exception> CopyAsync(
             string sourcePath,
             string destinationPath,
             CancellationToken cancellationToken = default
         )
         {
+            return CopyAsync(sourcePath, destinationPath, DefaultBufferSize, cancellationToken);
+        }
+
+        /// <summary>
+        /// Deletes a file, reporting failure rather than throwing. An absent file is successful;
+        /// another process can create the path after deletion completes.
+        /// </summary>
+        /// <param name="path">File to delete.</param>
+        /// <returns>True if <see cref="File.Delete(string)"/> completed without throwing.</returns>
+        public static bool TryDelete(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return false;
+            }
+
+            try
+            {
+                File.Delete(path);
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        internal static async ValueTask<Exception> CopyAsync(
+            string sourcePath,
+            string destinationPath,
+            int bufferSize,
+            CancellationToken cancellationToken
+        )
+        {
+            if (bufferSize <= 0)
+            {
+                return new ArgumentOutOfRangeException(nameof(bufferSize));
+            }
+
             Exception invalid = ValidateCopyPaths(sourcePath, destinationPath);
             if (invalid != null)
             {
@@ -371,8 +409,7 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                 try
                 {
                     // Source first, for the reason recorded in TryCopy.
-                    source = OpenSourceStream(sourcePath, useAsync: true);
-                    EnsureDirectory(destinationPath);
+                    source = OpenCopySourceStream(sourcePath, destinationPath, useAsync: true);
                 }
                 catch (Exception e)
                 {
@@ -395,7 +432,7 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                     using (staging)
                     {
                         await source
-                            .CopyToAsync(staging, DefaultBufferSize, cancellationToken)
+                            .CopyToAsync(staging, bufferSize, cancellationToken)
                             .ConfigureAwait(false);
 
                         staging.Flush(flushToDisk: true);
@@ -409,29 +446,6 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                     DiscardStagedFile(temporaryPath);
                     return e;
                 }
-            }
-        }
-
-        /// <summary>
-        /// Deletes a file, reporting failure rather than throwing.
-        /// </summary>
-        /// <param name="path">File to delete.</param>
-        /// <returns>True when no file remains at <paramref name="path"/>.</returns>
-        public static bool TryDelete(string path)
-        {
-            if (string.IsNullOrWhiteSpace(path))
-            {
-                return false;
-            }
-
-            try
-            {
-                File.Delete(path);
-                return true;
-            }
-            catch (Exception)
-            {
-                return false;
             }
         }
 
@@ -591,6 +605,25 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
 
             int hash = StringComparer.OrdinalIgnoreCase.GetHashCode(key);
             return Gates[hash.PositiveMod(GateCount)];
+        }
+
+        private static FileStream OpenCopySourceStream(
+            string sourcePath,
+            string destinationPath,
+            bool useAsync
+        )
+        {
+            FileStream source = OpenSourceStream(sourcePath, useAsync);
+            try
+            {
+                EnsureDirectory(destinationPath);
+                return source;
+            }
+            catch
+            {
+                source.Dispose();
+                throw;
+            }
         }
 
         private static FileStream OpenSourceStream(string sourcePath, bool useAsync)

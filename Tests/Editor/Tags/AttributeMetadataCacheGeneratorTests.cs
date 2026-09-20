@@ -29,9 +29,23 @@ namespace WallstopStudios.UnityHelpers.Tests.Tags
         private const string CacheAssetPath =
             "Assets/Resources/Wallstop Studios/Unity Helpers/AttributeMetadataCache.asset";
         private const string CacheFolder = "Assets/Resources/Wallstop Studios/Unity Helpers";
+        private const string CacheParentFolder = "Assets/Resources/Wallstop Studios";
+        private const string ResourcesFolder = "Assets/Resources";
+        private const string TempFolder = "Assets/Temp";
 
         private bool _assetExistedBefore;
-        private string _backupPath;
+        private bool _assetBackedUp;
+        private bool _setUpComplete;
+        private bool _suppressionCaptured;
+        private bool _cacheFolderExistedBefore;
+        private bool _cacheFolderRemovedForTest;
+        private bool _cacheParentFolderExistedBefore;
+        private bool _resourcesFolderExistedBefore;
+        private bool _tempFolderExistedBefore;
+        private byte[] _assetBackup;
+        private byte[] _assetMetaBackup;
+        private byte[] _cacheFolderMetaBackup;
+        private string _setUpTestId;
         private bool _previousAllowAssetCreationDuringSuppression;
 
         private static void ImportAssetIfExists(string assetPath)
@@ -86,6 +100,13 @@ namespace WallstopStudios.UnityHelpers.Tests.Tags
             return File.Exists(absolutePath);
         }
 
+        private static bool FolderExistsOnDisk(string folderPath)
+        {
+            string projectRoot = Path.GetDirectoryName(Application.dataPath);
+            return !string.IsNullOrEmpty(projectRoot)
+                && Directory.Exists(Path.Combine(projectRoot, folderPath));
+        }
+
         private static void DeleteFolderIfEmpty(string folderPath)
         {
             if (string.IsNullOrWhiteSpace(folderPath) || !AssetDatabase.IsValidFolder(folderPath))
@@ -105,42 +126,71 @@ namespace WallstopStudios.UnityHelpers.Tests.Tags
                 return;
             }
 
+            string projectRoot = Path.GetDirectoryName(Application.dataPath);
+            if (!string.IsNullOrEmpty(projectRoot))
+            {
+                string absolutePath = Path.Combine(projectRoot, folderPath);
+                if (Directory.Exists(absolutePath))
+                {
+                    foreach (string entry in Directory.EnumerateFileSystemEntries(absolutePath))
+                    {
+                        return;
+                    }
+                }
+            }
+
             AssetDatabase.DeleteAsset(folderPath);
         }
 
         [UnitySetUp]
         public IEnumerator SetUp()
         {
+            _setUpTestId = TestContext.CurrentContext.Test.ID;
+            _setUpComplete = false;
+            _suppressionCaptured = false;
+            _assetBackedUp = false;
+            _assetBackup = null;
+            _assetMetaBackup = null;
+            _cacheFolderMetaBackup = null;
+            _cacheFolderRemovedForTest = false;
+
             ScriptableObjectSingletonMetadataUtility.ResetAssetEditingDepthForTesting();
             ScriptableObjectSingleton<AttributeMetadataCache>.ClearInstance();
 
+            _assetExistedBefore =
+                FileExistsOnDisk(CacheAssetPath)
+                || AssetDatabase.LoadAssetAtPath<AttributeMetadataCache>(CacheAssetPath) != null;
+            _cacheFolderExistedBefore =
+                FolderExistsOnDisk(CacheFolder) || AssetDatabase.IsValidFolder(CacheFolder);
+            _cacheParentFolderExistedBefore =
+                FolderExistsOnDisk(CacheParentFolder)
+                || AssetDatabase.IsValidFolder(CacheParentFolder);
+            _resourcesFolderExistedBefore =
+                FolderExistsOnDisk(ResourcesFolder) || AssetDatabase.IsValidFolder(ResourcesFolder);
+            _tempFolderExistedBefore =
+                FolderExistsOnDisk(TempFolder) || AssetDatabase.IsValidFolder(TempFolder);
+
+            if (_assetExistedBefore)
+            {
+                string projectRoot = Path.GetDirectoryName(Application.dataPath);
+                Assert.IsFalse(string.IsNullOrEmpty(projectRoot));
+                string assetPath = Path.Combine(projectRoot, CacheAssetPath);
+                string metaPath = assetPath + ".meta";
+                Assert.IsTrue(File.Exists(assetPath), $"Cache file missing at {assetPath}");
+                Assert.IsTrue(File.Exists(metaPath), $"Cache meta file missing at {metaPath}");
+                _assetBackup = File.ReadAllBytes(assetPath);
+                _assetMetaBackup = File.ReadAllBytes(metaPath);
+                _assetBackedUp = true;
+            }
+
             _previousAllowAssetCreationDuringSuppression =
                 ScriptableObjectSingletonCreator.AllowAssetCreationDuringSuppression;
+            _suppressionCaptured = true;
             ScriptableObjectSingletonCreator.AllowAssetCreationDuringSuppression = true;
 
             AssetDatabaseBatchHelper.SaveAndRefreshIfNotBatching();
             yield return null;
-
-            _assetExistedBefore =
-                AssetDatabase.LoadAssetAtPath<AttributeMetadataCache>(CacheAssetPath) != null;
-
-            if (_assetExistedBefore)
-            {
-                _backupPath = "Assets/Temp/AttributeMetadataCache_Backup.asset";
-                if (!AssetDatabase.IsValidFolder("Assets/Temp"))
-                {
-                    AssetDatabase.CreateFolder("Assets", "Temp");
-                }
-
-                bool copySuccess = TryCopyAssetSilent(CacheAssetPath, _backupPath);
-                if (!copySuccess)
-                {
-                    Debug.LogWarning(
-                        $"[{nameof(AttributeMetadataCacheGeneratorTests)}] Failed to backup {CacheAssetPath} to {_backupPath}. Test may not properly restore state."
-                    );
-                }
-            }
-
+            _setUpComplete = true;
             yield return null;
         }
 
@@ -149,27 +199,72 @@ namespace WallstopStudios.UnityHelpers.Tests.Tags
         {
             yield return base.UnityTearDown();
 
-            if (_assetExistedBefore && !string.IsNullOrEmpty(_backupPath))
+            if (
+                string.IsNullOrEmpty(_setUpTestId)
+                || !string.Equals(
+                    _setUpTestId,
+                    TestContext.CurrentContext.Test.ID,
+                    StringComparison.Ordinal
+                )
+            )
             {
-                if (AssetDatabase.LoadAssetAtPath<AttributeMetadataCache>(_backupPath) != null)
-                {
-                    AssetDatabase.DeleteAsset(CacheAssetPath);
-                    string moveError = AssetDatabase.MoveAsset(_backupPath, CacheAssetPath);
-                    if (!string.IsNullOrEmpty(moveError))
-                    {
-                        Debug.LogWarning(
-                            $"[{nameof(AttributeMetadataCacheGeneratorTests)}] Failed to restore backup: {moveError}"
-                        );
-                    }
-                }
+                yield break;
+            }
+
+            if (_suppressionCaptured)
+            {
+                ScriptableObjectSingletonCreator.AllowAssetCreationDuringSuppression =
+                    _previousAllowAssetCreationDuringSuppression;
+            }
+            ScriptableObjectSingleton<AttributeMetadataCache>.ClearInstance();
+
+            if (!_setUpComplete)
+            {
+                yield break;
             }
 
             AssetDatabase.SaveAssets();
-            ImportAssetIfExists(CacheAssetPath);
-            ScriptableObjectSingletonCreator.AllowAssetCreationDuringSuppression =
-                _previousAllowAssetCreationDuringSuppression;
-            ScriptableObjectSingleton<AttributeMetadataCache>.ClearInstance();
-            DeleteFolderIfEmpty("Assets/Temp");
+            if (_cacheFolderRemovedForTest && _cacheFolderExistedBefore)
+            {
+                string projectRoot = Path.GetDirectoryName(Application.dataPath);
+                Assert.IsTrue(AssetDatabaseBatchHelper.EnsureAssetFolder(CacheFolder));
+                File.WriteAllBytes(
+                    Path.Combine(projectRoot, CacheFolder) + ".meta",
+                    _cacheFolderMetaBackup
+                );
+                AssetDatabase.ImportAsset(CacheFolder, ImportAssetOptions.ForceSynchronousImport);
+            }
+            if (_assetExistedBefore && _assetBackedUp)
+            {
+                string projectRoot = Path.GetDirectoryName(Application.dataPath);
+                string assetPath = Path.Combine(projectRoot, CacheAssetPath);
+                File.WriteAllBytes(assetPath, _assetBackup);
+                File.WriteAllBytes(assetPath + ".meta", _assetMetaBackup);
+                ImportAssetIfExists(CacheAssetPath);
+            }
+            else if (
+                !_assetExistedBefore
+                && AssetDatabase.LoadAssetAtPath<AttributeMetadataCache>(CacheAssetPath) != null
+            )
+            {
+                AssetDatabase.DeleteAsset(CacheAssetPath);
+            }
+            if (!_cacheFolderExistedBefore)
+            {
+                DeleteFolderIfEmpty(CacheFolder);
+            }
+            if (!_cacheParentFolderExistedBefore)
+            {
+                DeleteFolderIfEmpty(CacheParentFolder);
+            }
+            if (!_resourcesFolderExistedBefore)
+            {
+                DeleteFolderIfEmpty(ResourcesFolder);
+            }
+            if (!_tempFolderExistedBefore)
+            {
+                DeleteFolderIfEmpty(TempFolder);
+            }
             yield return null;
         }
 
@@ -247,7 +342,32 @@ namespace WallstopStudios.UnityHelpers.Tests.Tags
                 yield return null;
             }
 
+            if (_cacheFolderExistedBefore)
+            {
+                string projectRoot = Path.GetDirectoryName(Application.dataPath);
+                string metaPath = Path.Combine(projectRoot, CacheFolder) + ".meta";
+                Assert.IsTrue(
+                    File.Exists(metaPath),
+                    $"Cache folder meta file missing at {metaPath}"
+                );
+                _cacheFolderMetaBackup = File.ReadAllBytes(metaPath);
+            }
+            string cacheFolderPath = Path.Combine(
+                Path.GetDirectoryName(Application.dataPath),
+                CacheFolder
+            );
+            bool folderCanBeRemoved =
+                !Directory.Exists(cacheFolderPath)
+                || Directory.GetFileSystemEntries(cacheFolderPath).Length == 0;
             DeleteFolderIfEmpty(CacheFolder);
+            _cacheFolderRemovedForTest = !AssetDatabase.IsValidFolder(CacheFolder);
+            if (folderCanBeRemoved)
+            {
+                Assert.IsTrue(
+                    _cacheFolderRemovedForTest,
+                    $"Expected empty cache folder to be removed at {CacheFolder}"
+                );
+            }
             yield return null;
 
             bool folderExistsAfterDelete = AssetDatabase.IsValidFolder(CacheFolder);

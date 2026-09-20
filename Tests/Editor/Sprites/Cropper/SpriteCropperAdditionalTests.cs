@@ -229,17 +229,20 @@ namespace WallstopStudios.UnityHelpers.Tests.Sprites
                 "MirrorSource should copy original readability (unreadable)"
             );
 
-            window = Track(ScriptableObject.CreateInstance<SpriteCropper>());
-            window._overwriteOriginals = false;
-            window._outputDirectory = AssetDatabase.LoadAssetAtPath<Object>(Root);
-            window._inputDirectories = new System.Collections.Generic.List<Object>
-            {
-                AssetDatabase.LoadAssetAtPath<Object>(Root),
-            };
-            window._outputReadability = SpriteCropper.OutputReadability.Readable;
-
-            window.FindFilesToProcess();
-            window.ProcessFoundSprites();
+            SpriteCropperAPI.CropResult directResult = SpriteCropperAPI.Crop(
+                "aSsets\\" + src.Substring("Assets/".Length).Replace('/', '\\'),
+                new SpriteCropperAPI.CropOptions
+                {
+                    OutputFolder =
+                        "aSsets\\" + Root.Substring("Assets/".Length).Replace('/', '\\') + "\\",
+                    OutputReadability = SpriteCropperAPI.OutputReadability.Readable,
+                }
+            );
+            Assert.That(
+                directResult.Status,
+                Is.EqualTo(SpriteCropperAPI.CropStatus.Success),
+                directResult.Error
+            );
             AssetDatabaseBatchHelper.RefreshIfNotBatching();
 
             string dst2 = (Root + "/Cropped_readable_toggle.png").SanitizePath();
@@ -253,6 +256,9 @@ namespace WallstopStudios.UnityHelpers.Tests.Sprites
                 Is.True,
                 "OutputReadability.Readable should force output to be readable"
             );
+            imp = AssetImporter.GetAtPath(src) as TextureImporter;
+            Assert.IsTrue(imp != null);
+            Assert.That(imp.isReadable, Is.False);
         }
 
         [Test]

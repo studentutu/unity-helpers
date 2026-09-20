@@ -6,9 +6,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Tools
 #if UNITY_EDITOR
     using System;
     using System.IO;
+    using System.Text.RegularExpressions;
     using NUnit.Framework;
     using UnityEditor;
     using UnityEngine;
+    using UnityEngine.TestTools;
     using WallstopStudios.UnityHelpers.Core.Helper;
     using WallstopStudios.UnityHelpers.Editor.AssetProcessors;
     using WallstopStudios.UnityHelpers.Editor.Tools;
@@ -153,7 +155,44 @@ namespace WallstopStudios.UnityHelpers.Tests.Tools
         }
 
         [Test]
-        public void ProcessingFailureRestoresImporterSettingsAndCleansTemporaryTexture()
+        public void DirectApiWritesAndImportsBlurredAssetWithoutWindow()
+        {
+            string sourcePath = Path.Combine(_testRoot, "direct.png").SanitizePath();
+            string expectedOutputPath = Path.Combine(_testRoot, "direct_blurred_2.png")
+                .SanitizePath();
+            CreatePng(sourcePath, Color.magenta);
+            TrackAssetPath(expectedOutputPath);
+            ConfigureImporter(
+                sourcePath,
+                isReadable: false,
+                TextureImporterCompression.CompressedHQ
+            );
+            Texture2D source = AssetDatabase.LoadAssetAtPath<Texture2D>(sourcePath);
+            Assert.IsTrue(source != null);
+            int temporaryTextureCount = CountTemporaryTextures();
+
+            bool success = ImageBlurAPI.TryWriteAsset(
+                source,
+                2,
+                out string outputPath,
+                out string error
+            );
+
+            Assert.IsTrue(success, error);
+            Assert.IsTrue(error == null);
+            Assert.That(outputPath, Is.EqualTo(expectedOutputPath));
+            Assert.IsTrue(File.Exists(RelToFull(outputPath)));
+            Assert.IsTrue(AssetDatabase.LoadAssetAtPath<Texture2D>(outputPath) != null);
+            AssertImporterSettings(
+                sourcePath,
+                isReadable: false,
+                TextureImporterCompression.CompressedHQ
+            );
+            Assert.That(CountTemporaryTextures(), Is.EqualTo(temporaryTextureCount));
+        }
+
+        [Test]
+        public void InvalidRadiusRestoresImporterSettingsAndDoesNotLeakTexture()
         {
             string sourcePath = Path.Combine(_testRoot, "failure.png").SanitizePath();
             CreatePng(sourcePath, Color.green);
@@ -168,13 +207,11 @@ namespace WallstopStudios.UnityHelpers.Tests.Tools
             int temporaryTextureCount = CountTemporaryTextures();
             ImageBlurTool window = Track(ScriptableObject.CreateInstance<ImageBlurTool>());
 
-            /*
-                Negative radius fails after importer and destination changes, deterministically exercising both
-                cleanup paths.
-            */
-            Assert.Throws<OverflowException>(() =>
-                window.TryWriteBlurredTexture(source, radius: -1)
+            LogAssert.Expect(
+                LogType.Error,
+                new Regex("Failed to create blurred texture for: failure")
             );
+            Assert.IsFalse(window.TryWriteBlurredTexture(source, radius: -1));
 
             AssertImporterSettings(
                 sourcePath,

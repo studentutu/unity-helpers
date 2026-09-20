@@ -79,6 +79,32 @@ summary for the whole batch. Small images and one-row or one-column passes avoid
 larger images retain parallel processing. The new blurred files are permanent project changes and
 are not covered by Unity's undo history.
 
+Editor scripts can blur an already readable texture without opening the window. `ImageBlurAPI.TryBlur`
+returns a new texture owned by the caller; destroy it after encoding, saving, or displaying it:
+
+```csharp
+if (ImageBlurAPI.TryBlur(source, 12, out Texture2D blurred, out string error))
+{
+    try
+    {
+        // Use blurred here.
+    }
+    finally
+    {
+        UnityEngine.Object.DestroyImmediate(blurred);
+    }
+}
+```
+
+The API accepts radii from `1` through `200` and reports invalid or unreadable sources through
+`error`. It does not change importer settings or write files.
+
+For the same file output as the window, call `ImageBlurAPI.TryWriteAsset` with a project texture and
+radius. It temporarily makes the source readable, restores its importer,
+writes a uniquely named image beside it using the Unity project directory, and imports the result.
+This operation writes a file;
+Unity Undo cannot remove that output file.
+
 > **Visual Demo**
 >
 > ![Image Blur Tool showing before/after comparison as blur radius slider is adjusted](../../images/editor-tools/image-blur-before-after.gif)
@@ -111,6 +137,20 @@ Assets/Sprites/Characters/
 ```
 
 **Overwrite Originals** writes in place instead.
+
+Editor scripts can call `SpriteCropperAPI.TryFind(inputFolders, spriteNameRegex, singlePaths,
+multiPaths, out error)` with `Assets/...` folder paths. It returns project asset paths for
+single-sprite images and reports multi-sprite sheets separately. The window uses this same
+discovery path. Script paths may use backslashes or a differently cased `Assets` prefix; the API
+normalizes them before asset lookup. `SpriteCropperAPI.Crop(assetPath, options)` crops one sprite with explicit padding,
+destination, overwrite, readability, and platform-setting options, and returns the output path,
+status, and any error. The window uses the same crop operation for each selected sprite.
+`SpriteCropperAPI.TryBuildReplacementMap(folders, mapping, out error)` finds existing
+`Cropped_*` pairs, and `SpriteCropperAPI.ReplaceReferences(folders, applyChanges)` previews or
+applies reference changes across project assets. Both accept an optional output folder when
+cropped files were written away from their sources. Replacement is only for separate `Cropped_*`
+outputs; the Danger Zone button is disabled when **Overwrite Originals** is on. Script callers can
+pass `overwriteOriginals: true` to make `ReplaceReferences` reject that combination.
 
 **Before you run it:**
 
@@ -241,7 +281,7 @@ inside one `AssetDatabase.StartAssetEditing()` block. The default-platform name 
 
 A walk cycle where the character leans forward on some frames wobbles if every pivot is `(0.5, 0.5)`,
 because the geometric center of the texture is not the visual center of the character. This computes
-an alpha-weighted center of mass per sprite and writes it as a custom pivot.
+the center of pixels above the alpha cutoff and writes it as a custom pivot.
 
 1. Add `Assets/Sprites/Characters/Player` to **Input Directories**.
 2. Leave **Alpha Cutoff** at `0.01` so anti-aliased fringe pixels do not drag the pivot outward.
@@ -250,7 +290,15 @@ an alpha-weighted center of mass per sprite and writes it as a custom pivot.
 4. Click **Find Sprites To Process**, then **Dry Run** to see the counts, then
    **Adjust Pivots in Directory**.
 
-Import settings only; each changed importer is recorded as an `Adjust Sprite Pivot` undo step.
+Editor scripts can call `SpritePivotAdjusterAPI.TryFind(folders, nameRegex, paths, out error)`
+with `Assets/...` folders, then call `SpritePivotAdjusterAPI.Run(paths, options)` to preview or
+`Run(paths, options, applyChanges: true)` to apply. The result reports changes, skips, cancellation,
+warnings, and errors. These calls normalize backslashes, trailing folder slashes, and the `Assets`
+prefix casing. Invalid paths are counted as skipped and reported in the result errors. Neither call
+opens the window.
+
+Each changed importer is recorded as an `Adjust Sprite Pivot` undo step. The reimport side effect
+may require regeneration after Undo.
 Center-of-mass scans run directly below 65,536 pixels and for one-row sprites. Larger scans use
 parallel row partitions, so small sprite batches avoid worker startup without slowing large art.
 Folder and file-extension filtering also scans directly without per-file predicate allocations.
@@ -264,7 +312,7 @@ Folder and file-extension filtering also scans directly without per-file predica
 
 > **Visual Reference**
 >
-> ![Sprite Pivot Adjuster window showing alpha-weighted pivot calculation](../../images/editor-tools/sprite-pivot-adjuster.png)
+> ![Sprite Pivot Adjuster window showing cutoff-based pivot calculation](../../images/editor-tools/sprite-pivot-adjuster.png)
 >
 > _Sprite Pivot Adjuster with alpha cutoff slider and directory selection_
 
@@ -430,6 +478,37 @@ progress bar. **Apply to Standalone / Android / iOS** additionally writes a plat
 the same size. **Fit Mode** is not persisted across a domain reload — re-select it after a
 recompile.
 
+Scripts and batch-mode jobs can run the same operation without opening the window:
+
+```csharp
+List<string> textureGuids = new();
+if (FitTextureSizeAPI.TryFindTextures(new[] { "Assets/Sprites" }, true, textureGuids, out string error))
+{
+    FitTextureSizeAPI.Options options = new() { FitMode = FitMode.GrowAndShrink, OnlySprites = true };
+    FitTextureSizeAPI.Result preview = FitTextureSizeAPI.Run(textureGuids, options, false);
+    if (!preview.Succeeded)
+    {
+        Debug.LogError(preview.Error);
+    }
+    else if (preview.Changed > 0)
+    {
+        FitTextureSizeAPI.Result applied = FitTextureSizeAPI.Run(textureGuids, options, true);
+        if (!applied.Succeeded)
+        {
+            Debug.LogError(applied.Error);
+        }
+    }
+}
+else
+{
+    Debug.LogError(error);
+}
+```
+
+`Run` reports counts, cancellation, and errors; a failed apply may report partial changes. Import
+settings writes and reimports cannot be fully reversed by Unity Undo alone. Supply explicit asset
+paths or GUIDs instead of relying on the current editor selection.
+
 > **Visual Reference**
 >
 > ![Fit Texture Size window showing fit mode options and preview](../../images/editor-tools/fit-texture-size.png)
@@ -515,6 +594,14 @@ applying:
 There is no output folder picker — use [Animation Copier](#animation-copier) to move a generated set
 into `Assets/Animations`.
 
+Editor scripts can call `AnimationCreatorAPI.TryCreateClip(data, frames, out clip, out error)` to
+build a clip in the supplied frame order without writing an asset. Call
+`AnimationCreatorAPI.TryCreateAsset(data, out path, out error)` to ignore null frames, naturally
+sort the remaining sprites, and save a uniquely named `.anim` beside the first sprite. The
+sprite must already be an asset under `Assets`. When creating several clips inside an
+`AssetDatabaseBatchHelper` scope, pass `saveAssets: false` and call `AssetDatabase.SaveAssets()`
+after the batch.
+
 **Also worth knowing:**
 
 - **Prefix Leaf Folder Name** / **Prefix Full Folder Path** keep `Idle` from four different
@@ -557,8 +644,24 @@ apart and moves only what matters.
 5. Tick **Dry Run (no changes)** and run the copy once to see what it would do.
 6. Clear it, then click **Copy New (N)** or **Copy Changed (N)**.
 
+Dry runs leave destination files and folders untouched, including subfolders that a real copy would
+create for nested source clips.
+
+Scripts and batch jobs can use `AnimationCopierAPI.TryAnalyze` with explicit source and destination
+folders to receive source entries and destination orphans. Pass selected source paths to `Run` for
+`CopyNew`, `CopyChanged`, `CopyAll`, or `DeleteUnchangedSource`; pass selected destination paths
+for `DeleteDestinationOrphans`. Set `applyChanges: false` to preview eligible operations and
+`applyChanges: true` to perform them. The result reports processed, skipped, and failed counts,
+cancellation, and per-path diagnostics. The API makes no prompts, rechecks each selected clip before
+an operation, accepts standalone `.anim` files under distinct non-overlapping `Assets` folders,
+and never creates folders during a preview.
+
 Copying a changed clip preserves its GUID, so every Animator that already references it keeps
 working.
+
+Enable **Include Unchanged in Copy All (force replace)** when you need to refresh selected clips
+that the last analysis classified as unchanged. **Copy All** then replaces those destination files
+too and preserves their GUIDs.
 
 "Changed" is decided by comparing clip contents field by field — frame rate, length, wrap mode, every
 curve key, every event and its parameters — not by an asset hash, so a re-import that produces an
@@ -568,7 +671,8 @@ identical clip does not show up as a change.
 the redundant copies left behind in the source folder, and
 **Mirror Delete Destination Orphans (N)** deletes destination clips with no source any more. Both
 honour **Dry Run**. **Export Preview Report** writes the analysis to a file if you would rather review
-it outside the editor.
+it outside the editor. Copy, delete, and reimport operations change files on disk and cannot be
+fully reversed through Unity Undo.
 
 > **Visual Reference**
 >
@@ -636,6 +740,36 @@ whenever something downstream wants files rather than sub-assets — a third-par
 4. Choose a **Pivot Mode** — `Center`, the eight edge and corner presets, or `Custom` with explicit
    **X** / **Y**.
 5. Set **Output Directory**, then click **Extract N Sprite(s)**.
+
+Scripts and batch jobs can call `SpriteSheetExtractionAPI.Extract` with explicit source and output
+asset paths, a pixel rectangle, normalized pivot, and border. The output folder must already exist
+under `Assets` or a writable local `Packages` path. The API returns extracted and skipped counts
+plus errors, and never opens a window or displays a prompt. Set `dryRun: true` to preview the count
+without changing files or importers.
+
+Use `SpriteSheetExtractionAPI.Discover` with folder asset paths and an optional filename regex to
+get the same sprite texture list as the window. Its result includes warnings for invalid folders
+and an error for an invalid or timed-out regex.
+
+`SpriteSheetReferenceReplacementAPI.Run` accepts an explicit map from source sprites to extracted
+sprites and explicit asset paths. It previews matching references by default; pass
+`applyChanges: true` to write them. The window uses this API after its Danger Zone confirmation.
+Unity records object changes for Undo, but saved asset edits should still be protected by version
+control.
+
+```csharp
+using UnityEngine;
+using WallstopStudios.UnityHelpers.Editor.Sprites;
+
+SpriteSheetExtractionRequest request = new(
+    "Assets/Sprites/characters.png",
+    "Assets/Extracted/hero.png",
+    new Rect(0, 0, 32, 32),
+    new Vector2(0.5f, 0.5f),
+    Vector4.zero
+);
+SpriteSheetExtractionResult result = SpriteSheetExtractionAPI.Extract(new[] { request });
+```
 
 **Auto-detection:** with **Grid Size Mode** on `Auto`, the **Algorithm** dropdown picks how cell size
 is inferred: `AutoBest` (tries each and stops once one reaches 90% confidence), `UniformGrid`,

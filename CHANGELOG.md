@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add `SpritePivotAdjusterAPI` to find sprite textures and preview or apply center-of-mass pivots from editor scripts without opening the window. See [Sprite Pivot Adjuster](./docs/features/editor-tools/editor-tools-guide.md#sprite-pivot-adjuster) ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
+- Add `SpriteCropperAPI` to discover and crop sprite assets, build mappings for separate cropped outputs, and preview or replace references from scripts without opening the window. See [Sprite Cropper](./docs/features/editor-tools/editor-tools-guide.md#sprite-cropper) ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
+- Add `AnimationCreatorAPI` to build sprite clips and write uniquely named animation assets from editor scripts without opening the window. See [Animation Creator](./docs/features/editor-tools/editor-tools-guide.md#animation-creator) ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
+- Add `ImageBlurAPI` to blur textures or write blurred project assets from editor scripts without opening the window. See [Image Blur Tool](./docs/features/editor-tools/editor-tools-guide.md#image-blur-tool) ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
+- Batch sprite reference replacement asset edits and finalize one Undo record per changed object ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
+- Add `SpriteSheetExtractionAPI` to find sprite sheets and extract selected rectangles from scripts or batch mode without opening the window. See [Sprite Sheet Extractor](./docs/features/editor-tools/editor-tools-guide.md#sprite-sheet-extractor) ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
+- Add `SpriteSheetReferenceReplacementAPI` to preview and replace sprite references in explicit project assets from scripts. See [Sprite Sheet Extractor](./docs/features/editor-tools/editor-tools-guide.md#sprite-sheet-extractor) ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
+- Add `AnimationCopierAPI` to analyze, preview, copy, and clean up standalone animation clips from scripts or batch mode without opening its window. See [Animation Copier](./docs/features/editor-tools/editor-tools-guide.md#animation-copier) ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
+- Add `FitTextureSizeAPI` to preview and apply texture import sizes from scripts or batch mode without opening its window. See [Fit Texture Size](./docs/features/editor-tools/editor-tools-guide.md#fit-texture-size) ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
+- Add `ProtoSchemaExporter` to write selected or discovered project contracts from Editor code without opening a window. See [Serialization](./docs/features/serialization/serialization.md#exporting-a-proto3-schema) ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
 - Add a public sprite atlas API to scan and sync folders, generate and pack atlases, and detect config drift from code or batch mode. Matching atlases are left untouched. See [Sprite Atlas Generator](./docs/features/editor-tools/editor-tools-guide.md#sprite-atlas-generator) ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
 - Add `DurableFile.WriteAllBytesAsync` for staged, cancellable binary saves with the same durability guarantees as synchronous byte writes. See [Durable Writes for Player Data](./docs/features/utilities/helper-utilities.md#durable-writes-for-player-data) ([#816](https://github.com/Ambiguous-Interactive/unity-helpers/issues/816)).
 - Add an Odin migration preview/apply tool for proven-equivalent `ReadOnly` and
@@ -66,6 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Improved
 
+- Speed up `[DetectAssetChanged]` watcher initialization by finding handler methods through Unity's type cache instead of inspecting every method in loaded assemblies ([#783](https://github.com/Ambiguous-Interactive/unity-helpers/issues/783), [#818](https://github.com/Ambiguous-Interactive/unity-helpers/issues/818)).
 - Avoid a staging copy for `ICollection<T>` sources in `OrderBy`, `Ordered`, and `Shuffled`, while
   keeping compact returned lists for other sources
   ([#781](https://github.com/Ambiguous-Interactive/unity-helpers/issues/781)).
@@ -116,6 +127,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix Animation Copier dry runs creating destination subfolders during copy previews.
+- Fix Animation Copier's **Include Unchanged in Copy All** option so selected unchanged clips are actually replaced while preserving destination GUIDs.
 - Fix `DurableFile.TryDelete` reporting success for a directory or inaccessible target ([#817](https://github.com/Ambiguous-Interactive/unity-helpers/issues/817)).
 - Fix Editor startup errors when Unity Helpers loads saved project settings, including custom test output paths and pool purging options ([#814](https://github.com/Ambiguous-Interactive/unity-helpers/issues/814)).
 - Fix `NextSubset` reading a lazy source when asked for zero items. It now returns empty without enumerating the source. See [Random Generators](./docs/features/utilities/random-generators.md#subset-sampling) ([#781](https://github.com/Ambiguous-Interactive/unity-helpers/issues/781)).

@@ -4,6 +4,7 @@
 namespace WallstopStudios.UnityHelpers.Tests.Sprites
 {
 #if UNITY_EDITOR
+    using System.Collections.Generic;
     using System.IO;
     using NUnit.Framework;
     using UnityEditor;
@@ -173,6 +174,49 @@ namespace WallstopStudios.UnityHelpers.Tests.Sprites
                 guidAfter,
                 "Destination GUID should be preserved after overwrite."
             );
+        }
+
+        [Test]
+        public void CopyAllIncludingUnchangedReplacesSelectedClipAndPreservesGuid()
+        {
+            string sourceFolder = Path.Combine(SrcRoot, "ForceReplace").SanitizePath();
+            string destinationFolder = Path.Combine(DstRoot, "ForceReplace").SanitizePath();
+            EnsureFolder(sourceFolder);
+            EnsureFolder(destinationFolder);
+            string source = Path.Combine(sourceFolder, "ForceReplace.anim").SanitizePath();
+            string destination = Path.Combine(destinationFolder, "ForceReplace.anim")
+                .SanitizePath();
+            CreateEmptyClip(source);
+            AssetDatabase.SaveAssets();
+            ImportAssetIfExists(source);
+            Assert.IsTrue(AssetDatabase.CopyAsset(source, destination));
+            AssetDatabase.SaveAssets();
+            ImportAssetIfExists(destination);
+
+            AnimationCopierWindow window = CreateWindow();
+            window.AnimationSourcePathRelative = sourceFolder;
+            window.AnimationDestinationPathRelative = destinationFolder;
+            window.IncludeUnchangedInCopyAll = true;
+            window.AnalyzeAnimations();
+            Assert.AreEqual(1, window.UnchangedCount);
+
+            string destinationGuid = AssetDatabase.AssetPathToGUID(destination);
+            AnimationClip originalDestination = AssetDatabase.LoadAssetAtPath<AnimationClip>(
+                destination
+            );
+            float originalFrameRate = originalDestination.frameRate;
+            ModifyClip(source);
+            AssetDatabase.SaveAssets();
+            ImportAssetIfExists(source);
+
+            window.CopyAll();
+            ImportAssetIfExists(destination);
+
+            AnimationClip updatedDestination = AssetDatabase.LoadAssetAtPath<AnimationClip>(
+                destination
+            );
+            Assert.AreEqual(originalFrameRate + 1f, updatedDestination.frameRate);
+            Assert.AreEqual(destinationGuid, AssetDatabase.AssetPathToGUID(destination));
         }
 
         [Test]
@@ -379,6 +423,393 @@ namespace WallstopStudios.UnityHelpers.Tests.Sprites
                 window.UnchangedCount,
                 "All copied animations should be detected as unchanged"
             );
+        }
+
+        [Test]
+        public void DryRunCopyNewDoesNotCreateNestedDestinationDirectory()
+        {
+            string sourceFolder = Path.Combine(SrcRoot, "DryRunNestedDirectoryTest").SanitizePath();
+            string destinationFolder = Path.Combine(DstRoot, "DryRunNestedDirectoryTest")
+                .SanitizePath();
+            EnsureFolder(sourceFolder);
+            EnsureFolder(destinationFolder);
+
+            string sourceNestedFolder = Path.Combine(sourceFolder, "Nested").SanitizePath();
+            EnsureFolder(sourceNestedFolder);
+            string sourceClip = Path.Combine(sourceNestedFolder, "Clip.anim").SanitizePath();
+            CreateEmptyClip(sourceClip);
+            AssetDatabase.SaveAssets();
+            ImportAssetIfExists(sourceClip);
+
+            string destinationNestedFolder = Path.Combine(destinationFolder, "Nested")
+                .SanitizePath();
+            string destinationClip = Path.Combine(destinationNestedFolder, "Clip.anim")
+                .SanitizePath();
+            Assert.IsFalse(Directory.Exists(ToFull(destinationNestedFolder)));
+
+            AnimationCopierWindow window = CreateWindow();
+            window.AnimationSourcePathRelative = sourceFolder;
+            window.AnimationDestinationPathRelative = destinationFolder;
+            window.DryRun = true;
+            window.AnalyzeAnimations();
+            Assert.AreEqual(1, window.NewCount);
+
+            window.CopyNew();
+
+            Assert.IsFalse(Directory.Exists(ToFull(destinationNestedFolder)));
+            Assert.IsFalse(File.Exists(ToFull(destinationNestedFolder) + ".meta"));
+            Assert.IsFalse(File.Exists(ToFull(destinationClip)));
+            Assert.IsFalse(AssetDatabase.IsValidFolder(destinationNestedFolder));
+        }
+
+        [Test]
+        public void ApiCopiesClipsWithoutWindowAndPreservesDestinationGuid()
+        {
+            string sourceFolder = Path.Combine(SrcRoot, "DirectApiCopy").SanitizePath();
+            string destinationFolder = Path.Combine(DstRoot, "DirectApiCopy").SanitizePath();
+            string nestedSourceFolder = Path.Combine(sourceFolder, "Nested").SanitizePath();
+            EnsureFolder(nestedSourceFolder);
+            EnsureFolder(destinationFolder);
+            string source = Path.Combine(nestedSourceFolder, "Clip.anim").SanitizePath();
+            string destination = Path.Combine(destinationFolder, "Nested", "Clip.anim")
+                .SanitizePath();
+            CreateEmptyClip(source);
+            AssetDatabase.SaveAssets();
+            ImportAssetIfExists(source);
+
+            List<AnimationCopierAPI.Entry> entries = new();
+            List<AnimationCopierAPI.Entry> orphans = new();
+            Assert.IsTrue(
+                AnimationCopierAPI.TryAnalyze(
+                    sourceFolder,
+                    destinationFolder,
+                    entries,
+                    orphans,
+                    out string error
+                ),
+                error
+            );
+            Assert.AreEqual(1, entries.Count);
+            Assert.AreEqual(AnimationCopierAPI.Status.New, entries[0].Classification);
+            Assert.AreEqual(destination, entries[0].DestinationPath);
+
+            AnimationCopierAPI.Result preview = AnimationCopierAPI.Run(
+                sourceFolder,
+                destinationFolder,
+                new[] { source },
+                AnimationCopierAPI.Operation.CopyNew,
+                false
+            );
+            Assert.IsTrue(preview.Succeeded, preview.Error);
+            Assert.AreEqual(1, preview.ProcessedCount);
+            Assert.IsFalse(File.Exists(ToFull(destination)));
+
+            AnimationCopierAPI.Result cancelled = AnimationCopierAPI.Run(
+                sourceFolder,
+                destinationFolder,
+                new[] { source },
+                AnimationCopierAPI.Operation.CopyNew,
+                true,
+                cancelRequested: (path, current, total) => true
+            );
+            Assert.IsTrue(cancelled.Cancelled);
+            Assert.IsFalse(File.Exists(ToFull(destination)));
+
+            AnimationCopierAPI.Result copied = AnimationCopierAPI.Run(
+                sourceFolder,
+                destinationFolder,
+                new[] { source },
+                AnimationCopierAPI.Operation.CopyNew,
+                true
+            );
+            Assert.IsTrue(copied.Succeeded, copied.Error);
+            Assert.AreEqual(1, copied.ProcessedCount);
+            Assert.IsTrue(File.Exists(ToFull(destination)));
+            string destinationGuid = AssetDatabase.AssetPathToGUID(destination);
+            Assert.IsFalse(string.IsNullOrWhiteSpace(destinationGuid));
+
+            ModifyClip(source);
+            AssetDatabase.SaveAssets();
+            ImportAssetIfExists(source);
+            AnimationCopierAPI.Result replaced = AnimationCopierAPI.Run(
+                sourceFolder,
+                destinationFolder,
+                new[] { source },
+                AnimationCopierAPI.Operation.CopyChanged,
+                true
+            );
+            Assert.IsTrue(replaced.Succeeded, replaced.Error);
+            Assert.AreEqual(1, replaced.ProcessedCount);
+            Assert.AreEqual(destinationGuid, AssetDatabase.AssetPathToGUID(destination));
+            Assert.AreEqual(
+                AssetDatabase.LoadAssetAtPath<AnimationClip>(source).frameRate,
+                AssetDatabase.LoadAssetAtPath<AnimationClip>(destination).frameRate
+            );
+        }
+
+        [Test]
+        public void ApiAnalysisContinuesWhenDestinationAnimationCannotLoad()
+        {
+            string sourceFolder = Path.Combine(SrcRoot, "InvalidDestination").SanitizePath();
+            string destinationFolder = Path.Combine(DstRoot, "InvalidDestination").SanitizePath();
+            EnsureFolder(sourceFolder);
+            EnsureFolder(destinationFolder);
+            string firstSource = Path.Combine(sourceFolder, "First.anim").SanitizePath();
+            string secondSource = Path.Combine(sourceFolder, "Second.anim").SanitizePath();
+            string invalidDestination = Path.Combine(destinationFolder, "First.anim")
+                .SanitizePath();
+            CreateEmptyClip(firstSource);
+            CreateEmptyClip(secondSource);
+            AssetDatabase.SaveAssets();
+            File.WriteAllText(ToFull(invalidDestination), "invalid animation clip");
+            try
+            {
+                Assert.IsTrue(
+                    AssetDatabase.LoadAssetAtPath<AnimationClip>(invalidDestination) == null
+                );
+
+                List<AnimationCopierAPI.Entry> entries = new();
+                List<AnimationCopierAPI.Entry> orphans = new();
+                Assert.IsTrue(
+                    AnimationCopierAPI.TryAnalyze(
+                        sourceFolder,
+                        destinationFolder,
+                        entries,
+                        orphans,
+                        out string error
+                    ),
+                    error
+                );
+                Assert.AreEqual(2, entries.Count);
+                Assert.IsTrue(
+                    entries.Exists(entry =>
+                        string.Equals(
+                            entry.SourcePath,
+                            firstSource,
+                            System.StringComparison.Ordinal
+                        )
+                        && entry.Classification == AnimationCopierAPI.Status.Changed
+                    )
+                );
+                Assert.IsTrue(
+                    entries.Exists(entry =>
+                        string.Equals(
+                            entry.SourcePath,
+                            secondSource,
+                            System.StringComparison.Ordinal
+                        )
+                        && entry.Classification == AnimationCopierAPI.Status.New
+                    )
+                );
+            }
+            finally
+            {
+                File.Delete(ToFull(invalidDestination));
+            }
+        }
+
+        [Test]
+        public void ApiRechecksCurrentStateBeforeDeletingClips()
+        {
+            string sourceFolder = Path.Combine(SrcRoot, "DirectApiDelete").SanitizePath();
+            string destinationFolder = Path.Combine(DstRoot, "DirectApiDelete").SanitizePath();
+            EnsureFolder(sourceFolder);
+            EnsureFolder(destinationFolder);
+            string source = Path.Combine(sourceFolder, "Clip.anim").SanitizePath();
+            string destination = Path.Combine(destinationFolder, "Clip.anim").SanitizePath();
+            CreateEmptyClip(source);
+            AssetDatabase.SaveAssets();
+            ImportAssetIfExists(source);
+            Assert.IsTrue(AssetDatabase.CopyAsset(source, destination));
+            AssetDatabase.SaveAssets();
+            ImportAssetIfExists(destination);
+
+            List<AnimationCopierAPI.Entry> entries = new();
+            List<AnimationCopierAPI.Entry> orphans = new();
+            Assert.IsTrue(
+                AnimationCopierAPI.TryAnalyze(
+                    sourceFolder,
+                    destinationFolder,
+                    entries,
+                    orphans,
+                    out string error
+                ),
+                error
+            );
+            Assert.AreEqual(AnimationCopierAPI.Status.Unchanged, entries[0].Classification);
+            ModifyClip(source);
+            AssetDatabase.SaveAssets();
+            ImportAssetIfExists(source);
+
+            AnimationCopierAPI.Result deleteSource = AnimationCopierAPI.Run(
+                sourceFolder,
+                destinationFolder,
+                new[] { source },
+                AnimationCopierAPI.Operation.DeleteUnchangedSource,
+                true
+            );
+            Assert.IsTrue(deleteSource.Succeeded, deleteSource.Error);
+            Assert.AreEqual(1, deleteSource.SkippedCount);
+            Assert.IsTrue(File.Exists(ToFull(source)));
+
+            AnimationCopierAPI.Result deleteDestination = AnimationCopierAPI.Run(
+                sourceFolder,
+                destinationFolder,
+                new[] { destination },
+                AnimationCopierAPI.Operation.DeleteDestinationOrphans,
+                true
+            );
+            Assert.IsTrue(deleteDestination.Succeeded, deleteDestination.Error);
+            Assert.AreEqual(1, deleteDestination.SkippedCount);
+            Assert.IsTrue(File.Exists(ToFull(destination)));
+
+            AnimationCopierAPI.Result copied = AnimationCopierAPI.Run(
+                sourceFolder,
+                destinationFolder,
+                new[] { source },
+                AnimationCopierAPI.Operation.CopyChanged,
+                true
+            );
+            Assert.IsTrue(copied.Succeeded, copied.Error);
+            Assert.AreEqual(1, copied.ProcessedCount);
+            AnimationCopierAPI.Result deletedSource = AnimationCopierAPI.Run(
+                sourceFolder,
+                destinationFolder,
+                new[] { source },
+                AnimationCopierAPI.Operation.DeleteUnchangedSource,
+                true
+            );
+            Assert.IsTrue(deletedSource.Succeeded, deletedSource.Error);
+            Assert.AreEqual(1, deletedSource.ProcessedCount);
+            Assert.IsFalse(File.Exists(ToFull(source)));
+
+            AnimationCopierAPI.Result deletedOrphan = AnimationCopierAPI.Run(
+                sourceFolder,
+                destinationFolder,
+                new[] { destination },
+                AnimationCopierAPI.Operation.DeleteDestinationOrphans,
+                true
+            );
+            Assert.IsTrue(deletedOrphan.Succeeded, deletedOrphan.Error);
+            Assert.AreEqual(1, deletedOrphan.ProcessedCount);
+            Assert.IsFalse(File.Exists(ToFull(destination)));
+        }
+
+        [Test]
+        public void ApiRejectsOverlappingRoots()
+        {
+            string sourceFolder = Path.Combine(SrcRoot, "DirectApiOverlap").SanitizePath();
+            EnsureFolder(sourceFolder);
+            string destinationFolder = Path.Combine(sourceFolder, "Nested", "..").SanitizePath();
+            List<AnimationCopierAPI.Entry> entries = new();
+            List<AnimationCopierAPI.Entry> orphans = new();
+
+            Assert.IsFalse(
+                AnimationCopierAPI.TryAnalyze(
+                    sourceFolder,
+                    destinationFolder,
+                    entries,
+                    orphans,
+                    out string error
+                )
+            );
+            StringAssert.Contains("overlap", error);
+            AnimationCopierAPI.Result result = AnimationCopierAPI.Run(
+                sourceFolder,
+                destinationFolder,
+                new[] { Path.Combine(sourceFolder, "Clip.anim").SanitizePath() },
+                AnimationCopierAPI.Operation.CopyAll,
+                true
+            );
+            Assert.IsFalse(result.Succeeded);
+            StringAssert.Contains("overlap", result.Error);
+        }
+
+        [Test]
+        public void ApiExcludesAnimationClipsStoredInNonAnimFiles()
+        {
+            string sourceFolder = Path.Combine(SrcRoot, "DirectApiNonAnim").SanitizePath();
+            string destinationFolder = Path.Combine(DstRoot, "DirectApiNonAnim").SanitizePath();
+            EnsureFolder(sourceFolder);
+            EnsureFolder(destinationFolder);
+            string source = Path.Combine(sourceFolder, "Embedded.asset").SanitizePath();
+            AnimationClip clip = new();
+            Track(clip);
+            AssetDatabase.CreateAsset(clip, source);
+            AssetDatabase.SaveAssets();
+            ImportAssetIfExists(source);
+
+            List<AnimationCopierAPI.Entry> entries = new();
+            List<AnimationCopierAPI.Entry> orphans = new();
+            Assert.IsTrue(
+                AnimationCopierAPI.TryAnalyze(
+                    sourceFolder,
+                    destinationFolder,
+                    entries,
+                    orphans,
+                    out string error
+                ),
+                error
+            );
+            Assert.AreEqual(0, entries.Count);
+
+            AnimationCopierAPI.Result result = AnimationCopierAPI.Run(
+                sourceFolder,
+                destinationFolder,
+                new[] { source },
+                AnimationCopierAPI.Operation.CopyAll,
+                true
+            );
+            Assert.IsFalse(result.Succeeded);
+            Assert.AreEqual(1, result.FailedCount);
+            Assert.IsTrue(File.Exists(ToFull(source)));
+            Assert.IsFalse(File.Exists(ToFull(Path.Combine(destinationFolder, "Embedded.asset"))));
+        }
+
+        [Test]
+        public void ApiForceReplaceCopiesAnUnchangedClip()
+        {
+            string sourceFolder = Path.Combine(SrcRoot, "DirectApiForceReplace").SanitizePath();
+            string destinationFolder = Path.Combine(DstRoot, "DirectApiForceReplace")
+                .SanitizePath();
+            EnsureFolder(sourceFolder);
+            EnsureFolder(destinationFolder);
+            string source = Path.Combine(sourceFolder, "Clip.anim").SanitizePath();
+            string destination = Path.Combine(destinationFolder, "Clip.anim").SanitizePath();
+            CreateEmptyClip(source);
+            AssetDatabase.SaveAssets();
+            ImportAssetIfExists(source);
+            Assert.IsTrue(AssetDatabase.CopyAsset(source, destination));
+            AssetDatabase.SaveAssets();
+            ImportAssetIfExists(destination);
+
+            const string marker = "# Direct API force replacement marker";
+            File.AppendAllText(ToFull(source), "\n" + marker + "\n");
+            ImportAssetIfExists(source);
+            Assert.IsFalse(File.ReadAllText(ToFull(destination)).Contains(marker));
+
+            AnimationCopierAPI.Result skipped = AnimationCopierAPI.Run(
+                sourceFolder,
+                destinationFolder,
+                new[] { source },
+                AnimationCopierAPI.Operation.CopyAll,
+                true
+            );
+            Assert.IsTrue(skipped.Succeeded, skipped.Error);
+            Assert.AreEqual(1, skipped.SkippedCount);
+            Assert.IsFalse(File.ReadAllText(ToFull(destination)).Contains(marker));
+
+            AnimationCopierAPI.Result replaced = AnimationCopierAPI.Run(
+                sourceFolder,
+                destinationFolder,
+                new[] { source },
+                AnimationCopierAPI.Operation.CopyAll,
+                true,
+                forceReplaceUnchanged: true
+            );
+            Assert.IsTrue(replaced.Succeeded, replaced.Error);
+            Assert.AreEqual(1, replaced.ProcessedCount);
+            StringAssert.Contains(marker, File.ReadAllText(ToFull(destination)));
         }
 
         private void CreateEmptyClip(string relPath)

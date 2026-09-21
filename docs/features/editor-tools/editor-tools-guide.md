@@ -106,6 +106,7 @@ An occupied output name is preserved and the next numbered name is used, includi
 process creates the file while the blur is being written.
 New output files are copied from a staged image with exclusive creation. An interrupted copy can
 leave an incomplete new file; remove it before retrying.
+If staging cleanup also fails, the API reports that error alongside the write failure.
 This operation writes a file;
 Unity Undo cannot remove that output file.
 
@@ -682,7 +683,7 @@ identical clip does not show up as a change.
 the redundant copies left behind in the source folder, and
 **Mirror Delete Destination Orphans (N)** deletes destination clips with no source any more. Both
 honour **Dry Run**. **Export Preview Report** writes the analysis to a file if you would rather review
-it outside the editor. Copy, delete, and reimport operations change files on disk and cannot be
+it outside the editor. The complete report is staged before replacing an existing file. Copy, delete, and reimport operations change files on disk and cannot be
 fully reversed through Unity Undo.
 
 > **Visual Reference**
@@ -761,6 +762,7 @@ With the default `overwriteExisting: false`, an output that appears during extra
 and left unchanged. With `overwriteExisting: true`, the encoded PNG is staged before replacing the
 existing file. Extraction attempts to remove its temporary file if publishing fails. A failed or interrupted
 copy to a new output can leave an incomplete new file; remove it before retrying.
+If temporary-file cleanup fails, the result reports that error alongside the extraction failure.
 
 Use `SpriteSheetExtractionAPI.Discover` with folder asset paths and an optional filename regex to
 get the same sprite texture list as the window. Its result includes warnings for invalid folders
@@ -1063,7 +1065,7 @@ and **Deny Component Types (comma names)** flags prefabs carrying a component yo
 **Fixing and reporting:** **Fix Missing Scripts** strips dead component slots, but it stays disabled
 until you tick **Enable Auto-fix options** — the gate is deliberate, because the fix deletes data.
 **Export Report (JSON)** and **Export Report (CSV)** write the same findings to a file for a build
-step or a review.
+step or a review. The complete report is staged before replacing an existing file.
 
 Annotate the fields you actually care about so the null check stays useful:
 

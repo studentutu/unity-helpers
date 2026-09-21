@@ -67,6 +67,43 @@ namespace WallstopStudios.UnityHelpers.Tests.Sprites
         }
 
         [Test]
+        public void FailedPngEncodingPreservesExistingOutput()
+        {
+            string outputPath = RelToFull(Path.Combine(Root, "encoded.png"));
+            byte[] originalBytes = { 1, 2, 3 };
+            try
+            {
+                File.WriteAllBytes(outputPath, originalBytes);
+
+                Assert.That(
+                    SpriteCropperAPI.TryWriteCroppedPng(
+                        outputPath,
+                        null,
+                        out System.Exception nullError
+                    ),
+                    Is.False
+                );
+                Assert.That(nullError, Is.TypeOf<InvalidDataException>());
+                CollectionAssert.AreEqual(originalBytes, File.ReadAllBytes(outputPath));
+
+                Assert.That(
+                    SpriteCropperAPI.TryWriteCroppedPng(
+                        outputPath,
+                        System.Array.Empty<byte>(),
+                        out System.Exception emptyError
+                    ),
+                    Is.False
+                );
+                Assert.That(emptyError, Is.TypeOf<InvalidDataException>());
+                CollectionAssert.AreEqual(originalBytes, File.ReadAllBytes(outputPath));
+            }
+            finally
+            {
+                File.Delete(outputPath);
+            }
+        }
+
+        [Test]
         public void CropsTransparentMarginsAndPreservesPivot()
         {
             string src = Path.Combine(Root, "src.png").SanitizePath();
@@ -98,6 +135,27 @@ namespace WallstopStudios.UnityHelpers.Tests.Sprites
             );
             CollectionAssert.Contains(directPaths, src);
             Assert.IsEmpty(multiSpritePaths);
+
+            string fullPath = RelToFull(src);
+            byte[] originalBytes = File.ReadAllBytes(fullPath);
+            string stagingPath = fullPath + DurableFile.TemporarySuffix;
+            Directory.CreateDirectory(stagingPath);
+            try
+            {
+                SpriteCropperAPI.CropResult failedResult = SpriteCropperAPI.Crop(
+                    src,
+                    new SpriteCropperAPI.CropOptions { OverwriteOriginals = true }
+                );
+                Assert.That(
+                    failedResult.Status,
+                    Is.EqualTo(SpriteCropperAPI.CropStatus.RetryableError)
+                );
+                CollectionAssert.AreEqual(originalBytes, File.ReadAllBytes(fullPath));
+            }
+            finally
+            {
+                Directory.Delete(stagingPath, recursive: true);
+            }
 
             SpriteCropperAPI.CropResult result = SpriteCropperAPI.Crop(
                 "aSsets\\" + src.Substring("Assets/".Length).Replace('/', '\\'),

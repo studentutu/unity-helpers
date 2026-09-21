@@ -6,6 +6,8 @@ namespace WallstopStudios.UnityHelpers.Tests.Editor.Sprites
 #if UNITY_EDITOR
     using System.Collections.Generic;
     using System.IO;
+    using System.Threading;
+    using System.Threading.Tasks;
     using NUnit.Framework;
     using UnityEditor;
     using UnityEngine;
@@ -155,7 +157,9 @@ namespace WallstopStudios.UnityHelpers.Tests.Editor.Sprites
         public void ExistingOutputIsSkippedUnlessOverwriteRequested()
         {
             SpriteSheetExtractionResult first = SpriteSheetExtractionAPI.Extract(Requests());
+            byte[] firstBytes = File.ReadAllBytes(ToFullPath(Output));
             SpriteSheetExtractionResult skipped = SpriteSheetExtractionAPI.Extract(Requests());
+            Assert.That(File.ReadAllBytes(ToFullPath(Output)), Is.EqualTo(firstBytes));
             SpriteSheetExtractionRequest replacement = new(
                 Source,
                 Output,
@@ -178,6 +182,102 @@ namespace WallstopStudios.UnityHelpers.Tests.Editor.Sprites
             Color32 pixel = output.GetPixels32()[0];
             Assert.That(pixel.r, Is.EqualTo(0));
             Assert.That(pixel.g, Is.EqualTo(255));
+        }
+
+        [Test]
+        public void PublishSkipsOutputCreatedAfterPathSelection()
+        {
+            string stagedPath = Path.GetTempFileName();
+            string destinationPath = stagedPath + ".png";
+            byte[] stagedBytes = { 1, 2, 3 };
+            byte[] occupantBytes = { 4, 5, 6 };
+            try
+            {
+                File.WriteAllBytes(stagedPath, stagedBytes);
+                File.WriteAllBytes(destinationPath, occupantBytes);
+
+                Assert.That(
+                    SpriteSheetExtractionAPI.TryPublishNewFile(stagedPath, destinationPath),
+                    Is.False
+                );
+                Assert.That(File.ReadAllBytes(destinationPath), Is.EqualTo(occupantBytes));
+                Assert.That(File.ReadAllBytes(stagedPath), Is.EqualTo(stagedBytes));
+            }
+            finally
+            {
+                File.Delete(stagedPath);
+                File.Delete(destinationPath);
+            }
+        }
+
+        [Test]
+        public void ConcurrentPublishKeepsFirstCompletedOutput()
+        {
+            string firstStage = Path.GetTempFileName();
+            string secondStage = Path.GetTempFileName();
+            string destinationPath = firstStage + ".png";
+            byte[] firstBytes = { 1, 2, 3 };
+            byte[] secondBytes = { 4, 5, 6 };
+            using ManualResetEventSlim start = new(false);
+            try
+            {
+                File.WriteAllBytes(firstStage, firstBytes);
+                File.WriteAllBytes(secondStage, secondBytes);
+
+                Task<bool> first = Task.Run(() =>
+                {
+                    start.Wait();
+                    return SpriteSheetExtractionAPI.TryPublishNewFile(firstStage, destinationPath);
+                });
+                Task<bool> second = Task.Run(() =>
+                {
+                    start.Wait();
+                    return SpriteSheetExtractionAPI.TryPublishNewFile(secondStage, destinationPath);
+                });
+                start.Set();
+                Task.WaitAll(first, second);
+
+                Assert.That(first.Result, Is.Not.EqualTo(second.Result));
+                CollectionAssert.AreEqual(
+                    first.Result ? firstBytes : secondBytes,
+                    File.ReadAllBytes(destinationPath)
+                );
+                Assert.That(File.Exists(first.Result ? firstStage : secondStage), Is.False);
+                Assert.That(File.Exists(first.Result ? secondStage : firstStage), Is.True);
+            }
+            finally
+            {
+                File.Delete(firstStage);
+                File.Delete(secondStage);
+                File.Delete(destinationPath);
+            }
+        }
+
+        [Test]
+        public void FailedPublishRemovesStagedFileAndRestoresReadability()
+        {
+            string outputPath = ToFullPath(Output);
+            Directory.CreateDirectory(outputPath);
+            int initialFileCount = Directory.GetFiles(ToFullPath(Root)).Length;
+            try
+            {
+                SpriteSheetExtractionResult result = SpriteSheetExtractionAPI.Extract(Requests());
+
+                Assert.That(result.ExtractedCount, Is.Zero);
+                Assert.That(result.SkippedCount, Is.Zero);
+                Assert.That(result.Errors, Is.Not.Empty);
+                Assert.That(
+                    Directory.GetFiles(ToFullPath(Root)).Length,
+                    Is.EqualTo(initialFileCount)
+                );
+                TextureImporter importer = AssetImporter.GetAtPath(Source) as TextureImporter;
+                Assert.IsTrue(importer != null);
+                Assert.That(importer.isReadable, Is.False);
+            }
+            finally
+            {
+                Directory.Delete(outputPath);
+            }
         }
 
         [Test]

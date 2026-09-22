@@ -75,7 +75,7 @@ namespace WallstopStudios.UnityHelpers.Tests.AssetProcessors
                 return false;
             }
 
-            for (int i = 0; i < recordedContexts.Count; i++)
+            for (int i = 0; i < recordedContexts.Count; ++i)
             {
                 AssetChangeContext context = recordedContexts[i];
                 if (context == null)
@@ -84,7 +84,7 @@ namespace WallstopStudios.UnityHelpers.Tests.AssetProcessors
                 }
 
                 IReadOnlyList<string> createdPaths = context.CreatedAssetPaths;
-                for (int j = 0; j < createdPaths.Count; j++)
+                for (int j = 0; j < createdPaths.Count; ++j)
                 {
                     if (
                         string.Equals(
@@ -109,7 +109,7 @@ namespace WallstopStudios.UnityHelpers.Tests.AssetProcessors
         private static void AssertNoSendMessageErrors(EditorLogScope logScope)
         {
             IReadOnlyList<EditorLogScope.LogRecord> errors = logScope.Errors;
-            for (int i = 0; i < errors.Count; i++)
+            for (int i = 0; i < errors.Count; ++i)
             {
                 EditorLogScope.LogRecord record = errors[i];
                 Assert.IsFalse(
@@ -136,7 +136,7 @@ namespace WallstopStudios.UnityHelpers.Tests.AssetProcessors
             try
             {
                 Color[] pixels = new Color[width * height];
-                for (int i = 0; i < pixels.Length; i++)
+                for (int i = 0; i < pixels.Length; ++i)
                 {
                     pixels[i] = color;
                 }
@@ -350,6 +350,110 @@ namespace WallstopStudios.UnityHelpers.Tests.AssetProcessors
                 ),
                 $"A watcher on {nameof(TestDetectableAsset)} should still match '{containerPath}' "
                     + "through its nested sub-asset"
+            );
+        }
+
+        [Test]
+        public void NestedSubAssetMatchingDoesNotDeserializeContainer()
+        {
+            string containerPath = TestRoot + "/UnloadedSubAssetContainer.asset";
+            TrackAssetPath(containerPath);
+
+            TestSubAssetContainerAsset container = Track(
+                ScriptableObject.CreateInstance<TestSubAssetContainerAsset>()
+            );
+            TestDetectableAsset nested = Track(
+                ScriptableObject.CreateInstance<TestDetectableAsset>()
+            );
+            ExecuteWithImmediateImport(() =>
+            {
+                AssetDatabaseBatchHelper.EnsureAssetParentFolder(containerPath);
+                AssetDatabase.CreateAsset(container, containerPath);
+                AssetDatabase.AddObjectToAsset(nested, container);
+                AssetDatabase.SaveAssets();
+                AssetDatabase.ImportAsset(containerPath, ImportAssetOptions.ForceSynchronousImport);
+            });
+
+            AssetPostprocessorDeferral.FlushForTesting();
+            AssetPostprocessorTestHandlers.FlushAndClearAll();
+            DetectAssetChangeProcessor.EnsureInitializedForTesting();
+            DetectAssetChangeProcessor.AssetWatcherSettings settings =
+                DetectAssetChangeProcessor.GetSettingsForTesting();
+            Assert.IsTrue(
+                settings.WatchersByAssetType.TryGetValue(
+                    typeof(TestDetectableAsset),
+                    out DetectAssetChangeProcessor.AssetWatcher watcher
+                )
+            );
+            settings.WatchersByAssetType.Clear();
+            settings.WatchersByAssetType.Add(typeof(TestDetectableAsset), watcher);
+            for (int i = watcher.Subscriptions.Count - 1; 0 <= i; i--)
+            {
+                if (watcher.Subscriptions[i]._declaringType != typeof(TestDetectAssetChangeHandler))
+                {
+                    watcher.Subscriptions.RemoveAt(i);
+                }
+            }
+            Assert.AreEqual(1, watcher.Subscriptions.Count);
+            DetectAssetChangeProcessor.ResetForTesting(settings);
+
+            Resources.UnloadAsset(container);
+            Resources.UnloadAsset(nested);
+            TestSubAssetContainerAsset.ResetOnValidateCount();
+
+            DetectAssetChangeProcessor.ProcessChangesForTesting(
+                new[] { containerPath },
+                null,
+                null,
+                null
+            );
+            AssetPostprocessorDeferral.FlushForTesting();
+
+            Assert.AreEqual(0, TestSubAssetContainerAsset.OnValidateCount);
+            Assert.IsTrue(
+                RecordedCreatedPathsContain(
+                    TestDetectAssetChangeHandler.RecordedContexts,
+                    containerPath
+                )
+            );
+
+            AssetDatabase.LoadAllAssetsAtPath(containerPath);
+            Assert.Greater(TestSubAssetContainerAsset.OnValidateCount, 0);
+        }
+
+        [Test]
+        public void ContainerWithoutMatchingSubAssetDoesNotNotifyNestedTypeWatcher()
+        {
+            string containerPath = TestRoot + "/UnrelatedSubAssetContainer.asset";
+            TrackAssetPath(containerPath);
+
+            ExecuteWithImmediateImport(() =>
+            {
+                AssetDatabaseBatchHelper.EnsureAssetParentFolder(containerPath);
+                TestSubAssetContainerAsset container = Track(
+                    ScriptableObject.CreateInstance<TestSubAssetContainerAsset>()
+                );
+                AssetDatabase.CreateAsset(container, containerPath);
+            });
+
+            AssetPostprocessorDeferral.FlushForTesting();
+            AssetPostprocessorTestHandlers.FlushAndClearAll();
+
+            DetectAssetChangeProcessor.ProcessChangesForTesting(
+                new[] { containerPath },
+                null,
+                null,
+                null
+            );
+            AssetPostprocessorDeferral.FlushForTesting();
+
+            Assert.IsFalse(
+                RecordedCreatedPathsContain(
+                    TestDetectAssetChangeHandler.RecordedContexts,
+                    containerPath
+                ),
+                $"A watcher on {nameof(TestDetectableAsset)} must ignore '{containerPath}' "
+                    + "when it has no matching sub-asset"
             );
         }
 

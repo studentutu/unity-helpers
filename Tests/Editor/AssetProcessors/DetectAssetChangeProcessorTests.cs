@@ -165,6 +165,66 @@ namespace WallstopStudios.UnityHelpers.Tests.AssetProcessors
         }
 
         [Test]
+        public void CreatedPathsRemainStableAfterLaterChangeBatch()
+        {
+            CreatePayloadAssetAt(PayloadPath);
+            CreatePayloadAssetAt(AlternatePayloadPath);
+            ClearTestState();
+
+            DetectAssetChangeProcessor.ProcessChangesForTesting(
+                new[] { PayloadPath },
+                null,
+                null,
+                null
+            );
+
+            Assert.AreEqual(1, TestDetectAssetChangeHandler.RecordedContexts.Count);
+            AssetChangeContext firstContext = TestDetectAssetChangeHandler.RecordedContexts[0];
+            CollectionAssert.AreEqual(new[] { PayloadPath }, firstContext.CreatedAssetPaths);
+
+            DetectAssetChangeProcessor.ProcessChangesForTesting(
+                new[] { AlternatePayloadPath },
+                null,
+                null,
+                null
+            );
+
+            Assert.AreEqual(2, TestDetectAssetChangeHandler.RecordedContexts.Count);
+            CollectionAssert.AreEqual(new[] { PayloadPath }, firstContext.CreatedAssetPaths);
+            CollectionAssert.AreEqual(
+                new[] { AlternatePayloadPath },
+                TestDetectAssetChangeHandler.RecordedContexts[1].CreatedAssetPaths
+            );
+        }
+
+        [Test]
+        public void DeletedContextPathsAreIndependentFromDetailedHandlerArray()
+        {
+            CreatePayloadAssetAt(PayloadPath);
+            ClearTestState();
+            DetectAssetChangeProcessor.ProcessChangesForTesting(
+                new[] { PayloadPath },
+                null,
+                null,
+                null
+            );
+            ClearTestState();
+
+            DetectAssetChangeProcessor.ProcessChangesForTesting(
+                null,
+                new[] { PayloadPath },
+                null,
+                null
+            );
+
+            Assert.AreEqual(1, TestDetectAssetChangeHandler.RecordedContexts.Count);
+            Assert.AreEqual(1, TestDetailedSignatureHandler.LastDeletedPaths.Length);
+            AssetChangeContext context = TestDetectAssetChangeHandler.RecordedContexts[0];
+            TestDetailedSignatureHandler.LastDeletedPaths[0] = AlternatePayloadPath;
+            CollectionAssert.AreEqual(new[] { PayloadPath }, context.DeletedAssetPaths);
+        }
+
+        [Test]
         public void InheritedHandlerOverrideIsRegistered()
         {
             Assert.IsTrue(
@@ -430,14 +490,14 @@ namespace WallstopStudios.UnityHelpers.Tests.AssetProcessors
             // Clear state after asset creation since Unity's OnPostprocessAllAssets may have fired
             ClearTestState();
 
-            ResetProcessorWithFixtureState();
+            ResetProcessorWithOnlyLoopHandler();
 
             double fakeTime = 0;
             DetectAssetChangeProcessor.TimeProvider = () => fakeTime;
             DetectAssetChangeProcessor.LoopWindowSecondsOverride = 5d;
 
             int iterations = DetectAssetChangeProcessor.MaxConsecutiveChangeSetsWithinWindow + 1;
-            for (int i = 0; i < iterations; i++)
+            for (int i = 0; i < iterations; ++i)
             {
                 fakeTime += 6d;
                 DetectAssetChangeProcessor.ProcessChangesForTesting(
@@ -460,7 +520,7 @@ namespace WallstopStudios.UnityHelpers.Tests.AssetProcessors
         {
             CreatePayloadAssetAt(PayloadPath);
             ClearTestState();
-            ResetProcessorWithFixtureState();
+            ResetProcessorWithOnlyLoopHandler();
 
             double fakeTime = 0;
             DetectAssetChangeProcessor.TimeProvider = () => fakeTime;
@@ -471,7 +531,7 @@ namespace WallstopStudios.UnityHelpers.Tests.AssetProcessors
             );
 
             int iterations = DetectAssetChangeProcessor.MaxConsecutiveChangeSetsWithinWindow;
-            for (int i = 0; i < iterations; i++)
+            for (int i = 0; i < iterations; ++i)
             {
                 DetectAssetChangeProcessor.ProcessChangesForTesting(
                     new[] { PayloadPath },
@@ -1077,6 +1137,30 @@ namespace WallstopStudios.UnityHelpers.Tests.AssetProcessors
             DetectAssetChangeProcessor.EnabledOverride = true;
             DetectAssetChangeProcessor.IncludeTestAssets = true;
             DetectAssetChangeProcessor.TestAssetFolderAllowlist = FixtureAllowlist;
+        }
+
+        private void ResetProcessorWithOnlyLoopHandler()
+        {
+            ResetProcessorWithFixtureState();
+            DetectAssetChangeProcessor.AssetWatcherSettings settings =
+                DetectAssetChangeProcessor.GetSettingsForTesting();
+            Assert.IsTrue(
+                settings.WatchersByAssetType.TryGetValue(
+                    typeof(TestDetectableAsset),
+                    out DetectAssetChangeProcessor.AssetWatcher payloadWatcher
+                )
+            );
+            settings.WatchersByAssetType.Clear();
+            settings.WatchersByAssetType.Add(typeof(TestDetectableAsset), payloadWatcher);
+            for (int i = payloadWatcher.Subscriptions.Count - 1; 0 <= i; i--)
+            {
+                if (payloadWatcher.Subscriptions[i]._declaringType != typeof(TestLoopingHandler))
+                {
+                    payloadWatcher.Subscriptions.RemoveAt(i);
+                }
+            }
+            Assert.AreEqual(1, payloadWatcher.Subscriptions.Count);
+            DetectAssetChangeProcessor.ResetForTesting(settings);
         }
 
         private abstract class InheritedHandlerBase

@@ -75,6 +75,24 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
             Assert.IsFalse(result);
         }
 
+        [TestCase(null, TestName = "InitializePath.Invalid.Null.ReturnsFalse")]
+        [TestCase("", TestName = "InitializePath.Invalid.Empty.ReturnsFalse")]
+        public void InitializePathReturnsFalseForInvalidPath(string path)
+        {
+            Assert.IsFalse(FileHelper.InitializePath(path));
+        }
+
+        [Test]
+        public void InitializePathReturnsFalseWhenParentIsAFile()
+        {
+            string parentPath = Path.Combine(_testDirectory, "occupied.txt");
+            File.WriteAllText(parentPath, "existing content");
+            string childPath = Path.Combine(parentPath, "child.txt");
+
+            Assert.IsFalse(FileHelper.InitializePath(childPath));
+            Assert.AreEqual("existing content", File.ReadAllText(parentPath));
+        }
+
         [Test]
         public void InitializePathCreatesFileWithProvidedContents()
         {
@@ -160,7 +178,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
         public void InitializePathWithVeryLongPathCreatesFile()
         {
             string longPath = _testDirectory;
-            for (int i = 0; i < 10; i++)
+            for (int i = 0; i < 10; ++i)
             {
                 longPath = Path.Combine(longPath, $"Dir{i}");
             }
@@ -199,7 +217,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
         {
             string testFile = Path.Combine(_testDirectory, "large.txt");
             byte[] largeContents = new byte[1024 * 1024];
-            for (int i = 0; i < largeContents.Length; i++)
+            for (int i = 0; i < largeContents.Length; ++i)
             {
                 largeContents[i] = (byte)(i % 256);
             }
@@ -296,7 +314,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Helper
             string sourceFile = Path.Combine(_testDirectory, "large_source.txt");
             string destinationFile = Path.Combine(_testDirectory, "large_destination.txt");
             byte[] largeContent = new byte[5 * 1024 * 1024];
-            for (int i = 0; i < largeContent.Length; i++)
+            for (int i = 0; i < largeContent.Length; ++i)
             {
                 largeContent[i] = (byte)(i % 256);
             }

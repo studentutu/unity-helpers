@@ -10,6 +10,7 @@ namespace WallstopStudios.UnityHelpers.Utils
     using System.Text;
     using System.Threading;
     using WallstopStudios.UnityHelpers.Core.DataStructure;
+    using WallstopStudios.UnityHelpers.Core.Helper;
 
     /// <summary>
     /// Utility class for resolving and matching types, with special support for generic types.
@@ -144,6 +145,10 @@ namespace WallstopStudios.UnityHelpers.Utils
         /// <returns>
         /// The resolved <see cref="Type"/>, or <c>null</c> if the type could not be resolved.
         /// </returns>
+        /// <remarks>
+        /// A stored constructed generic name can recover after an assembly move only when each
+        /// component type has one matching full name in loaded assemblies.
+        /// </remarks>
         public static Type ResolveType(string typeName)
         {
             if (string.IsNullOrWhiteSpace(typeName))
@@ -158,9 +163,9 @@ namespace WallstopStudios.UnityHelpers.Utils
                 return cached;
             }
 
-            Type resolved = ResolveTypeInternal(trimmed);
+            Type resolved = ResolveTypeInternal(trimmed, out bool cacheResult);
 
-            if (resolved != null)
+            if (resolved != null && cacheResult)
             {
                 SimplifiedTypeNameCache.Set(trimmed, resolved);
             }
@@ -562,30 +567,38 @@ namespace WallstopStudios.UnityHelpers.Utils
             }
         }
 
-        private static Type ResolveTypeInternal(string typeName)
+        private static Type ResolveTypeInternal(string typeName, out bool cacheResult)
         {
-            Type directResolve = Type.GetType(typeName, throwOnError: false);
+            Type directResolve = TryGetType(typeName);
             if (directResolve != null)
             {
+                cacheResult = true;
                 return directResolve;
             }
 
             if (BuiltInTypeAliases.TryGetValue(typeName, out Type aliasType))
             {
+                cacheResult = true;
                 return aliasType;
             }
 
             if (typeName.Contains("<"))
             {
-                return ParseSimplifiedGeneric(typeName);
+                Type simplified = ParseSimplifiedGeneric(typeName);
+                cacheResult = true;
+                return simplified;
             }
 
-            if (typeName.Contains("`"))
+            if (0 <= typeName.IndexOf('['))
             {
-                return ResolveBySearchingAssemblies(typeName);
+                Type composite = ReflectionHelpers.TryResolveType(typeName);
+                cacheResult = false;
+                return composite;
             }
 
-            return ResolveBySearchingAssemblies(typeName);
+            Type searched = ResolveBySearchingAssemblies(typeName);
+            cacheResult = true;
+            return searched;
         }
 
         private static Type ParseSimplifiedGeneric(string typeName)
@@ -690,7 +703,7 @@ namespace WallstopStudios.UnityHelpers.Utils
 
             string clrName = $"{typeName}`{arity}";
 
-            Type resolved = Type.GetType(clrName, throwOnError: false);
+            Type resolved = TryGetType(clrName);
             if (resolved != null)
             {
                 return resolved;
@@ -750,7 +763,7 @@ namespace WallstopStudios.UnityHelpers.Utils
             foreach (string ns in commonNamespaces)
             {
                 string fullName = $"{ns}.{typeName}";
-                Type resolved = Type.GetType(fullName, throwOnError: false);
+                Type resolved = TryGetType(fullName);
                 if (resolved != null)
                 {
                     return resolved;
@@ -787,6 +800,18 @@ namespace WallstopStudios.UnityHelpers.Utils
             }
 
             return null;
+        }
+
+        private static Type TryGetType(string typeName)
+        {
+            try
+            {
+                return Type.GetType(typeName, throwOnError: false);
+            }
+            catch
+            {
+                return null;
+            }
         }
     }
 }

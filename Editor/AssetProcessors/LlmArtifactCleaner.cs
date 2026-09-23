@@ -17,6 +17,8 @@ namespace WallstopStudios.UnityHelpers.Editor.AssetProcessors
             get { return PendingDeletions.Count; }
         }
 
+        internal static Action<string> DeleteAssetAction = DeleteAssetThroughDatabase;
+
         private static readonly string[] BlockedSegments = { LlmPrefix };
         private static readonly HashSet<string> PendingDeletions = new(
             StringComparer.OrdinalIgnoreCase
@@ -24,7 +26,6 @@ namespace WallstopStudios.UnityHelpers.Editor.AssetProcessors
         private static readonly Action DrainAction = DrainPendingDeletions;
 
         private static bool _isDeleting;
-        private static Action<string> DeleteAssetOverrideForTesting;
 
         internal static void DeleteBlockedAssets(string[] assetPaths)
         {
@@ -35,13 +36,8 @@ namespace WallstopStudios.UnityHelpers.Editor.AssetProcessors
         internal static void ResetForTesting()
         {
             PendingDeletions.Clear();
-            DeleteAssetOverrideForTesting = null;
+            DeleteAssetAction = DeleteAssetThroughDatabase;
             _isDeleting = false;
-        }
-
-        internal static void SetDeleteAssetOverrideForTesting(Action<string> deleteAction)
-        {
-            DeleteAssetOverrideForTesting = deleteAction;
         }
 
         internal static bool ShouldDelete(string assetPath)
@@ -77,6 +73,11 @@ namespace WallstopStudios.UnityHelpers.Editor.AssetProcessors
             }
 
             return false;
+        }
+
+        private static void DeleteAssetThroughDatabase(string assetPath)
+        {
+            AssetDatabase.DeleteAsset(assetPath);
         }
 
         private static void OnPostprocessAllAssets(
@@ -147,13 +148,7 @@ namespace WallstopStudios.UnityHelpers.Editor.AssetProcessors
                 return;
             }
 
-            if (DeleteAssetOverrideForTesting != null)
-            {
-                DeleteAssetOverrideForTesting(assetPath);
-                return;
-            }
-
-            AssetDatabase.DeleteAsset(assetPath);
+            DeleteAssetAction(assetPath);
         }
     }
 }

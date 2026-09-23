@@ -8,6 +8,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools
     using System.IO;
     using UnityEditor;
     using UnityEngine;
+    using WallstopStudios.UnityHelpers.Core.Helper;
     using WallstopStudios.UnityHelpers.Editor.Utils;
 
     /// <summary>
@@ -156,11 +157,24 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools
                                             ? newPathBase + outputExtension
                                             : $"{newPathBase}_{counter}{outputExtension}";
                                     string absolutePath = Path.Combine(projectRoot, finalPath);
-                                    if (TryPublishNewFile(stagedPath, absolutePath))
+                                    if (
+                                        TryPublishNewFile(
+                                            stagedPath,
+                                            absolutePath,
+                                            out Exception publishCleanupWarning
+                                        )
+                                    )
                                     {
-                                        stagedOwned = false;
-                                        producedPath = finalPath.Replace('\\', '/');
+                                        stagedOwned = publishCleanupWarning != null;
+                                        producedPath = finalPath.SanitizePath();
                                         wroteOutput = true;
+                                        if (publishCleanupWarning != null)
+                                        {
+                                            failure = AppendError(
+                                                failure,
+                                                publishCleanupWarning.Message
+                                            );
+                                        }
                                         break;
                                     }
 
@@ -247,7 +261,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools
                 }
             }
 
-            if (wroteOutput && importOutput && string.IsNullOrEmpty(failure))
+            if (wroteOutput && importOutput)
             {
                 try
                 {
@@ -258,8 +272,10 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools
                 }
                 catch (Exception exception)
                 {
-                    failure =
-                        $"Could not import blurred image '{producedPath}': {exception.Message}";
+                    failure = AppendError(
+                        failure,
+                        $"Could not import blurred image '{producedPath}': {exception.Message}"
+                    );
                 }
             }
 
@@ -322,9 +338,17 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools
             }
         }
 
-        internal static bool TryPublishNewFile(string stagedPath, string destinationPath)
+        internal static bool TryPublishNewFile(
+            string stagedPath,
+            string destinationPath,
+            out Exception cleanupWarning
+        )
         {
-            return ExclusiveFilePublisher.TryPublishNewFile(stagedPath, destinationPath);
+            return ExclusiveFilePublisher.TryPublishNewFile(
+                stagedPath,
+                destinationPath,
+                out cleanupWarning
+            );
         }
 
         private static string AppendError(string existing, string additional)

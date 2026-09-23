@@ -11,6 +11,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
     using UnityEngine;
     using WallstopStudios.UnityHelpers.Core.Animation;
     using WallstopStudios.UnityHelpers.Core.Extension;
+    using WallstopStudios.UnityHelpers.Core.Helper;
     using WallstopStudios.UnityHelpers.Editor.Utils;
     using WallstopStudios.UnityHelpers.Utils;
 
@@ -19,6 +20,8 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
     /// </summary>
     public static class AnimationCreatorAPI
     {
+        internal static Action SaveAssetsAction = AssetDatabase.SaveAssets;
+
         private static readonly char[] InvalidNameCharacters =
         {
             '/',
@@ -52,7 +55,8 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
                     return false;
                 }
 
-                for (int index = 0; index < frames.Count; index++)
+                int frameCount = frames.Count;
+                for (int index = 0; index < frameCount; index++)
                 {
                     if (frames[index] == null)
                     {
@@ -69,14 +73,14 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
                         ? data.framesPerSecond
                         : AnimationData.DefaultFramesPerSecond;
                 createdClip = new AnimationClip { frameRate = baseFrameRate };
-                ObjectReferenceKeyframe[] keyframes = new ObjectReferenceKeyframe[frames.Count];
+                ObjectReferenceKeyframe[] keyframes = new ObjectReferenceKeyframe[frameCount];
                 float currentTime = 0f;
 
-                for (int index = 0; index < frames.Count; index++)
+                for (int index = 0; index < frameCount; index++)
                 {
                     keyframes[index].time = currentTime;
                     keyframes[index].value = frames[index];
-                    if (index == frames.Count - 1)
+                    if (index == frameCount - 1)
                     {
                         continue;
                     }
@@ -88,7 +92,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
                     )
                     {
                         float normalizedPosition =
-                            1 < frames.Count ? (float)index / (frames.Count - 1) : 0f;
+                            1 < frameCount ? (float)index / (frameCount - 1) : 0f;
                         fps = data.framesPerSecondCurve.Evaluate(normalizedPosition);
                         if (fps <= 0 || float.IsNaN(fps) || float.IsInfinity(fps))
                         {
@@ -132,6 +136,9 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
         /// <summary>
         /// Creates a uniquely named clip beside the first naturally sorted valid sprite.
         /// </summary>
+        /// <remarks>
+        /// If saving fails after creation, the created asset path remains in <c>assetPath</c>.
+        /// </remarks>
         public static bool TryCreateAsset(
             AnimationData data,
             out string assetPath,
@@ -207,7 +214,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
                 return false;
             }
 
-            string directory = Path.GetDirectoryName(firstFramePath)?.Replace('\\', '/');
+            string directory = Path.GetDirectoryName(firstFramePath).SanitizePath();
             if (string.IsNullOrWhiteSpace(directory))
             {
                 error = "The first sprite has no project asset directory.";
@@ -222,6 +229,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
             }
 
             string finalPath = null;
+            bool createdAsset = false;
             try
             {
                 finalPath = AssetDatabase.GenerateUniqueAssetPath(
@@ -236,9 +244,10 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
                     assetPath = null;
                     return false;
                 }
+                createdAsset = true;
                 if (saveAssets)
                 {
-                    AssetDatabase.SaveAssets();
+                    SaveAssetsAction();
                 }
                 error = null;
                 assetPath = finalPath;
@@ -250,8 +259,10 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
                 {
                     UnityEngine.Object.DestroyImmediate(clip);
                 }
-                error = exception.Message;
-                assetPath = null;
+                error = createdAsset
+                    ? $"Animation asset was created at '{finalPath}', but saving failed: {exception.Message}"
+                    : exception.Message;
+                assetPath = createdAsset ? finalPath : null;
                 return false;
             }
         }

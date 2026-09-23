@@ -157,7 +157,8 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
             }
 
             HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
-            for (int i = 0; i < folderAssetPaths.Count; ++i)
+            int folderCount = folderAssetPaths.Count;
+            for (int i = 0; i < folderCount; ++i)
             {
                 string folder = folderAssetPaths[i];
                 if (string.IsNullOrWhiteSpace(folder) || !AssetDatabase.IsValidFolder(folder))
@@ -376,9 +377,17 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
             return result;
         }
 
-        internal static bool TryPublishNewFile(string stagedPath, string destinationPath)
+        internal static bool TryPublishNewFile(
+            string stagedPath,
+            string destinationPath,
+            out Exception cleanupWarning
+        )
         {
-            return ExclusiveFilePublisher.TryPublishNewFile(stagedPath, destinationPath);
+            return ExclusiveFilePublisher.TryPublishNewFile(
+                stagedPath,
+                destinationPath,
+                out cleanupWarning
+            );
         }
 
         private static bool Validate(
@@ -399,7 +408,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
                 )
                 || !request.OutputAssetPath.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
                 || !AssetDatabase.IsValidFolder(
-                    Path.GetDirectoryName(request.OutputAssetPath)?.Replace('\\', '/')
+                    Path.GetDirectoryName(request.OutputAssetPath)?.SanitizePath()
                 )
             )
             {
@@ -587,9 +596,19 @@ namespace WallstopStudios.UnityHelpers.Editor.Sprites
                                 stream.Flush(flushToDisk: true);
                             }
 
-                            if (TryPublishNewFile(stagedPath, outputPath))
+                            if (
+                                TryPublishNewFile(
+                                    stagedPath,
+                                    outputPath,
+                                    out Exception publishCleanupWarning
+                                )
+                            )
                             {
-                                stagedOwned = false;
+                                stagedOwned = publishCleanupWarning != null;
+                                if (publishCleanupWarning != null)
+                                {
+                                    result.AddError(publishCleanupWarning.Message);
+                                }
                             }
                             else
                             {

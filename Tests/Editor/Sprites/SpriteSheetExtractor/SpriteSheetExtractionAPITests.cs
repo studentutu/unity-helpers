@@ -4,13 +4,16 @@
 namespace WallstopStudios.UnityHelpers.Tests.Editor.Sprites
 {
 #if UNITY_EDITOR
+    using System;
     using System.Collections.Generic;
     using System.IO;
+    using System.Runtime.InteropServices;
     using System.Threading;
     using System.Threading.Tasks;
     using NUnit.Framework;
     using UnityEditor;
     using UnityEngine;
+    using WallstopStudios.UnityHelpers.Core.Helper;
     using WallstopStudios.UnityHelpers.Editor.Sprites;
     using WallstopStudios.UnityHelpers.Editor.Utils;
     using WallstopStudios.UnityHelpers.Tests.Core;
@@ -37,6 +40,20 @@ namespace WallstopStudios.UnityHelpers.Tests.Editor.Sprites
         {
             string projectRoot = Directory.GetParent(Application.dataPath).FullName;
             return Path.Combine(projectRoot, assetPath);
+        }
+
+        private static int CountNonMetaFiles()
+        {
+            int count = 0;
+            foreach (string path in Directory.GetFiles(ToFullPath(Root)))
+            {
+                if (!path.EndsWith(".meta", StringComparison.OrdinalIgnoreCase))
+                {
+                    ++count;
+                }
+            }
+
+            return count;
         }
 
         [OneTimeSetUp]
@@ -197,7 +214,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Editor.Sprites
                 File.WriteAllBytes(destinationPath, occupantBytes);
 
                 Assert.That(
-                    SpriteSheetExtractionAPI.TryPublishNewFile(stagedPath, destinationPath),
+                    SpriteSheetExtractionAPI.TryPublishNewFile(stagedPath, destinationPath, out _),
                     Is.False
                 );
                 Assert.That(File.ReadAllBytes(destinationPath), Is.EqualTo(occupantBytes));
@@ -227,12 +244,20 @@ namespace WallstopStudios.UnityHelpers.Tests.Editor.Sprites
                 Task<bool> first = Task.Run(() =>
                 {
                     start.Wait();
-                    return SpriteSheetExtractionAPI.TryPublishNewFile(firstStage, destinationPath);
+                    return SpriteSheetExtractionAPI.TryPublishNewFile(
+                        firstStage,
+                        destinationPath,
+                        out _
+                    );
                 });
                 Task<bool> second = Task.Run(() =>
                 {
                     start.Wait();
-                    return SpriteSheetExtractionAPI.TryPublishNewFile(secondStage, destinationPath);
+                    return SpriteSheetExtractionAPI.TryPublishNewFile(
+                        secondStage,
+                        destinationPath,
+                        out _
+                    );
                 });
                 start.Set();
                 Task.WaitAll(first, second);
@@ -277,6 +302,37 @@ namespace WallstopStudios.UnityHelpers.Tests.Editor.Sprites
             finally
             {
                 Directory.Delete(outputPath);
+            }
+        }
+
+        [Test]
+        public void PublishedOutputIsImportedWhenStagedCleanupWarns()
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                Assert.Ignore("Windows moves the staged file and has no post-publish cleanup.");
+            }
+
+            int initialFileCount = CountNonMetaFiles();
+            RestorableGlobal<Action<string>> deleteStagedFile = new(
+                () => ExclusiveFilePublisher.DeleteStagedFile,
+                action => ExclusiveFilePublisher.DeleteStagedFile = action
+            );
+            using (
+                deleteStagedFile.Borrow(_ =>
+                    throw new IOException("Simulated staged cleanup failure.")
+                )
+            )
+            {
+                SpriteSheetExtractionResult result = SpriteSheetExtractionAPI.Extract(Requests());
+
+                Assert.That(result.ExtractedCount, Is.EqualTo(1));
+                Assert.That(result.SkippedCount, Is.Zero);
+                Assert.That(result.Errors, Has.Count.EqualTo(1));
+                StringAssert.Contains("Published", result.Errors[0]);
+                Assert.That(File.Exists(ToFullPath(Output)), Is.True);
+                Assert.That(AssetDatabase.LoadAssetAtPath<Texture2D>(Output), Is.Not.Null);
+                Assert.That(CountNonMetaFiles(), Is.EqualTo(initialFileCount + 1));
             }
         }
 

@@ -85,12 +85,13 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                 return false;
             }
 
+            string temporaryPath = path + TemporarySuffix;
             using (EnterGate(path))
             {
                 try
                 {
                     byte[] bytes = Utf8NoByteOrderMark.GetBytes(contents ?? string.Empty);
-                    return TryWriteStagedBytes(path, bytes, out error);
+                    return TryWriteStagedBytes(path, temporaryPath, bytes, out error);
                 }
                 catch (Exception e)
                 {
@@ -178,9 +179,15 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                 return false;
             }
 
+            string temporaryPath = path + TemporarySuffix;
             using (EnterGate(path))
             {
-                return TryWriteStagedBytes(path, contents ?? Array.Empty<byte>(), out error);
+                return TryWriteStagedBytes(
+                    path,
+                    temporaryPath,
+                    contents ?? Array.Empty<byte>(),
+                    out error
+                );
             }
         }
 
@@ -344,9 +351,9 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                 return false;
             }
 
+            string temporaryPath = destinationPath + TemporarySuffix;
             using (EnterGate(destinationPath))
             {
-                string temporaryPath = destinationPath + TemporarySuffix;
                 FileStream source;
                 FileStream ownership = null;
                 FileStream staging;
@@ -450,6 +457,89 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
             }
         }
 
+        internal static bool TryCompareExchangeAllText(
+            string path,
+            bool expectedExists,
+            string expectedContents,
+            string replacementContents,
+            out bool exchanged,
+            out Exception error
+        )
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                error = new ArgumentException("A destination path is required.", nameof(path));
+                exchanged = false;
+                return false;
+            }
+
+            string temporaryPath = path + TemporarySuffix;
+            using (EnterGate(path))
+            {
+                FileStream ownership = null;
+                FileStream staging = null;
+                bool ownsStaging = false;
+                try
+                {
+                    EnsureDirectory(path);
+                    ownership = OpenStagingOwnership(temporaryPath);
+                    bool exists;
+                    string current;
+                    try
+                    {
+                        current = File.ReadAllText(path);
+                        exists = true;
+                    }
+                    catch (FileNotFoundException)
+                    {
+                        current = string.Empty;
+                        exists = false;
+                    }
+
+                    if (
+                        exists != expectedExists
+                        || !string.Equals(current, expectedContents, StringComparison.Ordinal)
+                    )
+                    {
+                        error = null;
+                        exchanged = false;
+                        return true;
+                    }
+
+                    staging = OpenStagingStream(temporaryPath, useAsync: false);
+                    ownsStaging = true;
+                    byte[] bytes = Utf8NoByteOrderMark.GetBytes(
+                        replacementContents ?? string.Empty
+                    );
+                    staging.Write(bytes, 0, bytes.Length);
+                    staging.Flush(flushToDisk: true);
+                    staging.Dispose();
+                    staging = null;
+#if UNITY_EDITOR
+                    BeforeStagedSwapForTests?.Invoke(temporaryPath);
+#endif
+                    Swap(temporaryPath, path);
+                    ownsStaging = false;
+                    error = null;
+                    exchanged = true;
+                    return true;
+                }
+                catch (Exception failure)
+                {
+                    error = failure;
+                    exchanged = false;
+                    return false;
+                }
+                finally
+                {
+                    ReleaseFileStream(staging);
+                    if (ownsStaging)
+                        DiscardStagedFile(temporaryPath);
+                    ReleaseStagingOwnership(ownership);
+                }
+            }
+        }
+
         internal static async ValueTask<Exception> CopyAsync(
             string sourcePath,
             string destinationPath,
@@ -468,6 +558,7 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                 return invalid;
             }
 
+            string temporaryPath = destinationPath + TemporarySuffix;
             SemaphoreLease gate;
             try
             {
@@ -481,7 +572,6 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
 
             using (gate)
             {
-                string temporaryPath = destinationPath + TemporarySuffix;
                 FileStream source;
                 FileStream ownership = null;
                 FileStream staging;
@@ -555,6 +645,7 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                 return new ArgumentException("A destination path is required.", nameof(path));
             }
 
+            string temporaryPath = path + TemporarySuffix;
             SemaphoreLease gate;
             try
             {
@@ -567,7 +658,6 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
 
             using (gate)
             {
-                string temporaryPath = path + TemporarySuffix;
                 FileStream ownership = null;
                 FileStream staging;
                 byte[] bytes;
@@ -622,9 +712,13 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
             }
         }
 
-        private static bool TryWriteStagedBytes(string path, byte[] contents, out Exception error)
+        private static bool TryWriteStagedBytes(
+            string path,
+            string temporaryPath,
+            byte[] contents,
+            out Exception error
+        )
         {
-            string temporaryPath = path + TemporarySuffix;
             FileStream ownership = null;
             FileStream staging;
             try

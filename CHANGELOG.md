@@ -11,12 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add `AnimationClipFrameSaveAPI.TrySaveFrames` so editor scripts can save sprite frames and FPS to an existing clip without opening the window. See [Sprite Animation Editor](./docs/features/editor-tools/editor-tools-guide.md#sprite-animation-editor-animation-viewer-window) ([#851](https://github.com/Ambiguous-Interactive/unity-helpers/issues/851)).
 - Add `PrefabChecker.ScanFolders` so editor scripts can inspect prefab findings from explicit folders and options without opening the window ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
 - Add `TextureResizerAPI.TryResizeTextures` so editor scripts can resize or preview PNGs from explicit textures and asset folders without opening the window. Textures process in natural name order ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
 - Add an encoding-aware `DurableFile.TryWriteAllText` overload that preserves the encoding's byte order mark for staged writes.
 
 ### Fixed
 
+- Fix the Sprite Animation Editor's Preview FPS field on Unity 2021.3 so its window opens correctly ([#851](https://github.com/Ambiguous-Interactive/unity-helpers/issues/851)).
+- Fix Sprite Animation Editor saves for clips with multiple sprite bindings so frames from other bindings are not written into the selected curve ([#851](https://github.com/Ambiguous-Interactive/unity-helpers/issues/851)).
 - Fix Odin Migration menu placement under **Tools > Wallstop Studios > Unity Helpers** ([#849](https://github.com/Ambiguous-Interactive/unity-helpers/issues/849)).
 - Fix JSON `Type` values and pool type settings to recover constructed generics after unique component assembly moves ([#846](https://github.com/Ambiguous-Interactive/unity-helpers/issues/846)).
 - Fix `SerializableType` references to constructed generic types after their component types move between assemblies ([#845](https://github.com/Ambiguous-Interactive/unity-helpers/issues/845)).
@@ -31,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Improved
 
+- Improve `JesseSort` on large, sustained random-looking inputs with a direct-sort route while retaining pile merging for structured runs ([#747](https://github.com/Ambiguous-Interactive/unity-helpers/issues/747)).
 - Improve subset sampling from queues and hash sets by copying each source once ([#781](https://github.com/Ambiguous-Interactive/unity-helpers/issues/781)).
 - Improve loading of missing `SerializableType` references without building the type-picker catalog ([#783](https://github.com/Ambiguous-Interactive/unity-helpers/issues/783)).
 

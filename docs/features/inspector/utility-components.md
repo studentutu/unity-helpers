@@ -587,6 +587,12 @@ metadata.PushMaterial(this, glowMaterial);
 metadata.PopMaterial(this);
 ```
 
+`SpriteRendererMetadata` owns the material copies it creates. It keeps a copy while the stack or
+disable/enable restoration needs it, then destroys it after the claim is removed. It also destroys
+its initial copy when the component is destroyed. Keep ownership of the source material you pass to
+`PushMaterial` or `PushBackMaterial`; do not destroy the returned copy yourself.
+Moving the current material to the back restores the previous top material immediately.
+
 ### Original State
 
 ```csharp

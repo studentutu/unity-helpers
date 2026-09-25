@@ -68,6 +68,7 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
 #if UNITY_EDITOR
         internal static Action<string> BeforeStagedSwapForTests { get; set; }
         internal static Action<string> BeforeStagedCleanupForTests { get; set; }
+        internal static Action<string> BeforeCompareReadForTests { get; set; }
 #endif
 
         /// <summary>
@@ -457,7 +458,92 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
             }
         }
 
-        internal static bool TryCompareExchangeAllText(
+        /// <summary>Compares current bytes, then stages and replaces the file.</summary>
+        /// <remarks>
+        /// The staging-file ownership spans the read, staging write, and replacement, so cooperating
+        /// staged-replacement DurableFile writers cannot change the destination during this operation.
+        /// A writer that does not acquire that ownership can change it after the read and before replacement.
+        /// </remarks>
+        internal static bool TryCompareThenReplaceBytes(
+            string path,
+            byte[] expected,
+            byte[] replacement,
+            out Exception error
+        )
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                error = new ArgumentException("A destination path is required.", nameof(path));
+                return false;
+            }
+
+            if (expected == null || replacement == null)
+            {
+                error = new ArgumentNullException(
+                    expected == null ? nameof(expected) : nameof(replacement)
+                );
+                return false;
+            }
+
+            using (EnterGate(path))
+            {
+                string temporaryPath = path + TemporarySuffix;
+                FileStream ownership = null;
+                FileStream staging = null;
+                bool ownsStaging = false;
+                try
+                {
+                    ownership = OpenStagingOwnership(temporaryPath);
+#if UNITY_EDITOR
+                    BeforeCompareReadForTests?.Invoke(temporaryPath);
+#endif
+                    byte[] current = File.ReadAllBytes(path);
+                    if (!BytesEqual(current, expected))
+                    {
+                        error = new InvalidOperationException(
+                            "The file changed since it was read."
+                        );
+                        return false;
+                    }
+
+                    staging = OpenStagingStream(temporaryPath, useAsync: false);
+                    ownsStaging = true;
+                    staging.Write(replacement, 0, replacement.Length);
+                    staging.Flush(flushToDisk: true);
+                    staging.Dispose();
+                    staging = null;
+#if UNITY_EDITOR
+                    BeforeStagedSwapForTests?.Invoke(temporaryPath);
+#endif
+                    Swap(temporaryPath, path);
+                    ownsStaging = false;
+                    error = null;
+                    return true;
+                }
+                catch (Exception e)
+                {
+                    error = e;
+                    return false;
+                }
+                finally
+                {
+                    ReleaseFileStream(staging);
+                    if (ownsStaging)
+                    {
+                        DiscardStagedFile(temporaryPath);
+                    }
+                    ReleaseStagingOwnership(ownership);
+                }
+            }
+        }
+
+        /// <summary>Compares current text, then stages and replaces the file.</summary>
+        /// <remarks>
+        /// The staging-file ownership spans the read, staging write, and replacement, so cooperating
+        /// staged-replacement DurableFile writers cannot change the destination during this operation.
+        /// A writer that does not acquire that ownership can change it after the read and before replacement.
+        /// </remarks>
+        internal static bool TryCompareThenReplaceAllText(
             string path,
             bool expectedExists,
             string expectedContents,
@@ -781,6 +867,11 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
             }
 
             return null;
+        }
+
+        private static bool BytesEqual(byte[] first, byte[] second)
+        {
+            return first.AsSpan().SequenceEqual(second);
         }
 
         private static SemaphoreSlim[] CreateGates()

@@ -365,12 +365,15 @@ Reloading unchanged ordinary persistent references preserves eligibility. Manage
 data is retained conservatively and can require a fresh scan after reload, as can unsaved references.
 
 Scene component removal uses Unity's ordinary **Edit > Undo** history. Other supported fixes expose
-a targeted toast **Undo**, which refuses restoration when the affected asset has since changed or
-been replaced. Prefab undo stages the previous bytes before replacement, so a staging failure leaves
-the current prefab intact. On platforms without `File.Replace`, a failed fallback swap can still
-lose it. Importer and prefab restoration performs a new import; it does not reverse unrelated
-side effects caused by other import processors. A mixed batch's toast excludes scene removals and
-says to use Edit > Undo for those changes.
+a targeted toast **Undo**. Importer fixes check asset identity and the setting they wrote; prefab
+undo compares the file's current bytes with its saved snapshot before restoring it. A byte-identical
+replacement at the same prefab path cannot be distinguished by that check. Prefab undo stages the
+previous bytes before replacement, so a staging failure leaves the current prefab intact. The byte
+comparison and replacement share a lock with cooperating staged-replacement `DurableFile` writers.
+Other tools can still edit the prefab after the check and before replacement. On platforms without
+`File.Replace`, a failed fallback swap can still lose it. Importer and prefab restoration perform
+a new import; they do not reverse unrelated side effects caused by other import processors. A mixed
+batch's toast excludes scene removals and says to use Edit > Undo for those changes.
 
 The Scene view's Sentinel overlay, scene toolbar control, Inspector finding actions and, on
 Unity 6000.3 or newer, the main toolbar badge all read the same result store. Their counts exclude
@@ -384,15 +387,23 @@ removes one identity; Settings also lists entries whose finding is absent from t
 The Suppressed navigation item and Show suppressed toggle let you inspect those decisions.
 Saving or undoing a suppression stages the complete file before replacement. A failure while
 staging leaves the previous decisions intact. Competing Sentinel actions compare the file while
-holding the writer lock, so a stale action reports a conflict and keeps the newer decisions. Undo
-also refuses to replace a newer Sentinel edit. Reload the workspace and repeat the action against
-the current decisions. A simultaneous action can report write contention and can be retried.
+holding the staged-replacement writer lock, so a stale action reports a conflict and keeps the newer
+decisions. Undo also refuses to replace a newer Sentinel edit it observes. Reload the workspace and
+repeat the action against the current decisions. A simultaneous action can report write contention
+and can be retried.
 Direct writes outside Sentinel do not use this lock.
 
 JSON and JUnit exports use the last completed interactive run. JUnit marks suppressed findings as
 skipped and fails on the selected severity threshold, execution failures and missing coverage.
 Changing configuration requires a new completed run before exporting. The optional build gate runs
 validation before a player build and stops the build on blocking findings or incomplete coverage.
+
+Editor scripts can write reports without opening the workspace by calling
+`ValidationReportExportAPI.TryExportJson(path, run, suppressions, out error)` or
+`ValidationReportExportAPI.TryExportJUnit(path, run, suppressions, threshold, out error)`. Both require
+a `ValidationRun` and return an error without writing for invalid input. Cancelled and incomplete
+runs retain their coverage status in the report. A successful export replaces the target file through a staged write. File replacement is outside
+Unity Undo and cannot be reversed from the editor history.
 
 ## Turning Sentinel off
 

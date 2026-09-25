@@ -11,6 +11,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Validation.Continuous
     using UnityEditor;
     using UnityEngine.UIElements;
     using WallstopStudios.UnityHelpers.Core.Helper;
+    using WallstopStudios.UnityHelpers.Utils;
 
     public sealed partial class ValidationWindow
     {
@@ -70,7 +71,9 @@ namespace WallstopStudios.UnityHelpers.Editor.Validation.Continuous
 
         private static string WithoutSuppression(string text, string id)
         {
-            StringBuilder remaining = new StringBuilder();
+            using PooledResource<StringBuilder> remainingLease = Buffers.StringBuilder.Get(
+                out StringBuilder remaining
+            );
             foreach (string line in text.Replace("\r\n", "\n").Split('\n'))
                 if (!string.Equals(line.Trim(), id, StringComparison.Ordinal))
                     remaining.Append(line).Append('\n');
@@ -130,7 +133,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Validation.Continuous
                     return;
                 }
                 if (
-                    !DurableFile.TryCompareExchangeAllText(
+                    !DurableFile.TryCompareThenReplaceAllText(
                         DefaultSuppressionsPath,
                         previousExists,
                         previous,
@@ -159,7 +162,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Validation.Continuous
                         try
                         {
                             if (
-                                !DurableFile.TryCompareExchangeAllText(
+                                !DurableFile.TryCompareThenReplaceAllText(
                                     DefaultSuppressionsPath,
                                     true,
                                     updated,
@@ -295,18 +298,25 @@ namespace WallstopStudios.UnityHelpers.Editor.Validation.Continuous
             try
             {
                 ValidationWorkspaceSettings settings = ValidationWorkspaceSettings.instance;
-                string report = junit
-                    ? ValidationWorkspaceReport.ToJUnit(
+                bool exported = junit
+                    ? ValidationReportExportAPI.TryExportJUnit(
+                        path,
                         _lastCompletedRun,
                         _suppressions,
-                        settings.ActiveProfile.failOn
+                        settings.ActiveProfile.failOn,
+                        out string error
                     )
-                    : ValidationReport.ToJson(_lastCompletedRun, _suppressions);
-                if (!DurableFile.TryWriteAllText(path, report, out Exception writeError))
-                {
-                    throw writeError;
-                }
-                Say("Exported " + Path.GetFileName(path) + ".");
+                    : ValidationReportExportAPI.TryExportJson(
+                        path,
+                        _lastCompletedRun,
+                        _suppressions,
+                        out error
+                    );
+                Say(
+                    exported
+                        ? "Exported " + Path.GetFileName(path) + "."
+                        : "Export failed: " + error
+                );
             }
             catch (Exception thrown)
             {

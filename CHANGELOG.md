@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add `UnityMethodAnalyzerReportExportAPI` so editor scripts can save Markdown and JSON findings with compiler coverage status without opening the window ([#861](https://github.com/Ambiguous-Interactive/unity-helpers/issues/861)).
+- Add `ValidationReportExportAPI` so editor scripts can write Sentinel JSON and JUnit reports from a validation run without opening the workspace ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
 - Add `SpriteSheetAnimationAPI.TryCreate` so editor scripts can preview or create sprite sheet animation clips from ordered frames without opening the window ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
 - Add `AnimationClipFrameSaveAPI.TrySaveFrames` so editor scripts can save sprite frames and FPS to an existing clip without opening the window. See [Sprite Animation Editor](./docs/features/editor-tools/editor-tools-guide.md#sprite-animation-editor-animation-viewer-window) ([#851](https://github.com/Ambiguous-Interactive/unity-helpers/issues/851)).
 - Add `PrefabChecker.ScanFolders` so editor scripts can inspect prefab findings from explicit folders and options without opening the window ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
@@ -19,9 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Ignore whitespace-only file paths in Unity Method Analyzer source selection, compiler messages, navigation, and report export ([#867](https://github.com/Ambiguous-Interactive/unity-helpers/issues/867)).
 - Fix `SpriteRendererMetadata` so material copies are released after replacement, pop, or destruction, and moving the top material to the back restores the prior top ([#855](https://github.com/Ambiguous-Interactive/unity-helpers/issues/855)).
 - Fix Sprite Cropper padding so borderless sprites stay borderless and larger outputs retain their full resolution ([#857](https://github.com/Ambiguous-Interactive/unity-helpers/issues/857)).
 - Fix competing Sentinel suppression edits and Undo so a stale action reports a conflict instead of replacing another action's decisions ([#817](https://github.com/Ambiguous-Interactive/unity-helpers/issues/817)).
+- Fix prefab validation Undo and stale-key repair rollback so they reject observed byte changes before restoring a snapshot; competing staged-replacement `DurableFile` writers share the check's lock ([#817](https://github.com/Ambiguous-Interactive/unity-helpers/issues/817), [#827](https://github.com/Ambiguous-Interactive/unity-helpers/issues/827)).
 - Fix animation creation APIs to return the created asset path when saving fails after Unity creates the clip ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
 - Fix Image Blur and Sprite Sheet Extractor new image publication so readers see complete outputs and competing publishers preserve the first file ([#827](https://github.com/Ambiguous-Interactive/unity-helpers/issues/827)).
 - Fix the Sprite Animation Editor's Preview FPS field on Unity 2021.3 so its window opens correctly ([#851](https://github.com/Ambiguous-Interactive/unity-helpers/issues/851)).

@@ -8,7 +8,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.UnityMethodAnalyzer
     using System.Collections.Generic;
     using System.IO;
     using System.Linq;
-    using System.Text.Json.Serialization;
+    using System.Text;
     using System.Threading;
     using System.Threading.Tasks;
     using UnityEditor;
@@ -16,9 +16,9 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.UnityMethodAnalyzer
     using UnityEngine;
     using WallstopStudios.UnityHelpers.Core.Extension;
     using WallstopStudios.UnityHelpers.Core.Helper;
-    using WallstopStudios.UnityHelpers.Core.Serialization;
     using WallstopStudios.UnityHelpers.Editor.Utils;
     using WallstopStudios.UnityHelpers.Editor.Utils.WButton;
+    using WallstopStudios.UnityHelpers.Utils;
     using Object = UnityEngine.Object;
 #if !UNITY_2021 && !UNITY_2022 && !UNITY_2023
     using UnityMethodAnalyzerTreeViewState = UnityEditor.IMGUI.Controls.TreeViewState<int>;
@@ -244,7 +244,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.UnityMethodAnalyzer
 
         private static string ConvertToAssetPath(string fullPath)
         {
-            if (string.IsNullOrEmpty(fullPath))
+            if (string.IsNullOrWhiteSpace(fullPath))
             {
                 return null;
             }
@@ -418,7 +418,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.UnityMethodAnalyzer
             {
                 foreach (string sourcePath in _sourcePaths)
                 {
-                    if (string.IsNullOrEmpty(sourcePath))
+                    if (string.IsNullOrWhiteSpace(sourcePath))
                     {
                         continue;
                     }
@@ -550,6 +550,40 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.UnityMethodAnalyzer
             _infoCount = infoCount;
         }
 
+        internal void ExportReportToPath(string path, bool json)
+        {
+            string error;
+            bool exported = json
+                ? UnityMethodAnalyzerReportExportAPI.TryExportJson(
+                    path,
+                    _analyzer?.Issues,
+                    _analyzer?.Status,
+                    out error
+                )
+                : UnityMethodAnalyzerReportExportAPI.TryExportMarkdown(
+                    path,
+                    _analyzer?.Issues,
+                    _analyzer?.Status,
+                    out error
+                );
+            if (!exported)
+            {
+                _statusMessage = "Export failed";
+                this.LogError($"Export failed: {error}", new IOException(error));
+                return;
+            }
+            try
+            {
+                _statusMessage = $"Report exported to: {Path.GetFileName(path)}";
+                EditorUtility.RevealInFinder(path);
+            }
+            catch (Exception exception)
+            {
+                _statusMessage = "Report exported, but could not reveal the file";
+                this.LogError($"Could not reveal exported report: {path}", exception);
+            }
+        }
+
         private void OnEnable()
         {
             Initialize();
@@ -595,7 +629,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.UnityMethodAnalyzer
             if (GUILayout.Button("+", GUILayout.Width(25)))
             {
                 string browsePath =
-                    0 < _sourcePaths?.Count && !string.IsNullOrEmpty(_sourcePaths[^1])
+                    0 < _sourcePaths?.Count && !string.IsNullOrWhiteSpace(_sourcePaths[^1])
                         ? _sourcePaths[^1]
                         : GetProjectRoot();
 
@@ -605,7 +639,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.UnityMethodAnalyzer
                     ""
                 );
 
-                if (!string.IsNullOrEmpty(selectedPath))
+                if (!string.IsNullOrWhiteSpace(selectedPath))
                 {
                     _sourcePaths ??= new List<string>();
                     if (!_sourcePaths.Contains(selectedPath))
@@ -643,7 +677,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.UnityMethodAnalyzer
                     string displayPath = _sourcePaths[i];
                     string projectRoot = GetProjectRoot();
                     if (
-                        !string.IsNullOrEmpty(displayPath)
+                        !string.IsNullOrWhiteSpace(displayPath)
                         && displayPath.StartsWith(projectRoot, StringComparison.OrdinalIgnoreCase)
                     )
                     {
@@ -654,7 +688,8 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.UnityMethodAnalyzer
                     }
 
                     bool pathExists =
-                        !string.IsNullOrEmpty(_sourcePaths[i]) && Directory.Exists(_sourcePaths[i]);
+                        !string.IsNullOrWhiteSpace(_sourcePaths[i])
+                        && Directory.Exists(_sourcePaths[i]);
                     GUIStyle pathStyle = pathExists
                         ? EditorStyles.label
                         : new GUIStyle(EditorStyles.label)
@@ -674,7 +709,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.UnityMethodAnalyzer
                     if (GUILayout.Button("...", GUILayout.Width(30)))
                     {
                         string browsePath =
-                            !string.IsNullOrEmpty(_sourcePaths[i])
+                            !string.IsNullOrWhiteSpace(_sourcePaths[i])
                             && Directory.Exists(_sourcePaths[i])
                                 ? _sourcePaths[i]
                                 : GetProjectRoot();
@@ -685,7 +720,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.UnityMethodAnalyzer
                             ""
                         );
 
-                        if (!string.IsNullOrEmpty(selectedPath))
+                        if (!string.IsNullOrWhiteSpace(selectedPath))
                         {
                             _sourcePaths[i] = selectedPath;
                         }
@@ -719,7 +754,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.UnityMethodAnalyzer
 
             bool hasValidPaths =
                 _sourcePaths != null
-                && _sourcePaths.Any(p => !string.IsNullOrEmpty(p) && Directory.Exists(p));
+                && _sourcePaths.Any(p => !string.IsNullOrWhiteSpace(p) && Directory.Exists(p));
 
             bool analyzeEnabled = !_isAnalyzing && hasValidPaths;
             Color analyzeColor = analyzeEnabled ? AnalyzeButtonColor : DisabledButtonColor;
@@ -1194,7 +1229,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.UnityMethodAnalyzer
                 GUILayout.Label("Recommended Fix:", EditorStyles.boldLabel);
                 EditorGUILayout.HelpBox(_selectedIssue.RecommendedFix, MessageType.Info);
 
-                if (!string.IsNullOrEmpty(_selectedIssue.BaseClassName))
+                if (!string.IsNullOrWhiteSpace(_selectedIssue.BaseClassName))
                 {
                     GUILayout.Space(10);
                     GUILayout.Label("Inheritance Details:", EditorStyles.boldLabel);
@@ -1205,7 +1240,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.UnityMethodAnalyzer
                     GUILayout.FlexibleSpace();
                     GUILayout.EndHorizontal();
 
-                    if (!string.IsNullOrEmpty(_selectedIssue.BaseMethodSignature))
+                    if (!string.IsNullOrWhiteSpace(_selectedIssue.BaseMethodSignature))
                     {
                         GUILayout.BeginHorizontal();
                         GUILayout.Label("Base Method:", GUILayout.Width(100));
@@ -1214,7 +1249,7 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.UnityMethodAnalyzer
                         GUILayout.EndHorizontal();
                     }
 
-                    if (!string.IsNullOrEmpty(_selectedIssue.DerivedMethodSignature))
+                    if (!string.IsNullOrWhiteSpace(_selectedIssue.DerivedMethodSignature))
                     {
                         GUILayout.BeginHorizontal();
                         GUILayout.Label("Derived Method:", GUILayout.Width(100));
@@ -1412,126 +1447,10 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.UnityMethodAnalyzer
                 defaultName,
                 "md"
             );
-
-            if (string.IsNullOrEmpty(path))
+            if (!string.IsNullOrWhiteSpace(path))
             {
-                return;
+                ExportReportToPath(path, false);
             }
-
-            try
-            {
-                string report = GenerateMarkdownReport();
-                if (!DurableFile.TryWriteAllText(path, report, out Exception writeError))
-                {
-                    throw writeError;
-                }
-                _statusMessage = $"Report exported to: {Path.GetFileName(path)}";
-                EditorUtility.RevealInFinder(path);
-            }
-            catch (Exception e)
-            {
-                _statusMessage = $"Export failed";
-                this.LogError($"Export failed", e);
-            }
-        }
-
-        private string GenerateMarkdownReport()
-        {
-            System.Text.StringBuilder sb = new();
-            IReadOnlyList<AnalyzerIssue> issues = _analyzer.Issues;
-
-            sb.AppendLine("# Unity Method Analysis Report");
-            sb.AppendLine();
-            sb.AppendLine($"**Generated:** {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-            sb.AppendLine($"**Compiler coverage:** {_analyzer.Status}");
-            sb.AppendLine();
-            sb.AppendLine($"**Total Issues Found:** {issues.Count}");
-            sb.AppendLine();
-
-            sb.AppendLine("## Summary by Severity");
-            sb.AppendLine();
-            sb.AppendLine("| Severity | Count |");
-            sb.AppendLine("|----------|-------|");
-            sb.AppendLine($"| 🔴 Critical | {_criticalCount} |");
-            sb.AppendLine($"| 🟠 High | {_highCount} |");
-            sb.AppendLine($"| 🟡 Medium | {_mediumCount} |");
-            sb.AppendLine($"| 🟢 Low | {_lowCount} |");
-            sb.AppendLine($"| 🔵 Info | {_infoCount} |");
-            sb.AppendLine();
-
-            sb.AppendLine("## Summary by Category");
-            sb.AppendLine();
-            sb.AppendLine("| Category | Count |");
-            sb.AppendLine("|----------|-------|");
-            sb.AppendLine(
-                $"| 🎮 Unity Lifecycle | {issues.Count(i => i.Category == IssueCategory.UnityLifecycle)} |"
-            );
-            sb.AppendLine(
-                $"| 🔷 Unity Inheritance | {issues.Count(i => i.Category == IssueCategory.UnityInheritance)} |"
-            );
-            sb.AppendLine(
-                $"| 📦 General Inheritance | {issues.Count(i => i.Category == IssueCategory.GeneralInheritance)} |"
-            );
-            sb.AppendLine();
-
-            sb.AppendLine("## Detailed Issues");
-            sb.AppendLine();
-
-            IOrderedEnumerable<IGrouping<string, AnalyzerIssue>> issuesByFile = issues
-                .OrderBy(i => (int)i.Severity)
-                .ThenBy(i => i.FilePath)
-                .GroupBy(i => i.FilePath)
-                .OrderBy(g => g.Key);
-
-            foreach (IGrouping<string, AnalyzerIssue> fileGroup in issuesByFile)
-            {
-                sb.AppendLine($"### `{fileGroup.Key}`");
-                sb.AppendLine();
-
-                foreach (AnalyzerIssue issue in fileGroup.OrderBy(i => i.LineNumber))
-                {
-                    string severityEmoji = issue.Severity switch
-                    {
-                        IssueSeverity.Critical => "🔴",
-                        IssueSeverity.High => "🟠",
-                        IssueSeverity.Medium => "🟡",
-                        IssueSeverity.Low => "🟢",
-                        IssueSeverity.Info => "🔵",
-                        _ => "⚪",
-                    };
-
-                    sb.AppendLine(
-                        $"#### {severityEmoji} Line {issue.LineNumber}: `{issue.ClassName}.{issue.MethodName}` - {issue.IssueType}"
-                    );
-                    sb.AppendLine();
-                    sb.AppendLine($"**Category:** {issue.Category}");
-                    sb.AppendLine();
-                    sb.AppendLine($"**Description:** {issue.Description}");
-                    sb.AppendLine();
-
-                    if (!string.IsNullOrEmpty(issue.BaseClassName))
-                    {
-                        sb.AppendLine($"**Base Class:** `{issue.BaseClassName}`");
-                        if (!string.IsNullOrEmpty(issue.BaseMethodSignature))
-                        {
-                            sb.AppendLine($"**Base Method:** `{issue.BaseMethodSignature}`");
-                        }
-                    }
-
-                    if (!string.IsNullOrEmpty(issue.DerivedMethodSignature))
-                    {
-                        sb.AppendLine($"**Derived Method:** `{issue.DerivedMethodSignature}`");
-                    }
-
-                    sb.AppendLine();
-                    sb.AppendLine($"**Recommended Fix:** {issue.RecommendedFix}");
-                    sb.AppendLine();
-                    sb.AppendLine("---");
-                    sb.AppendLine();
-                }
-            }
-
-            return sb.ToString();
         }
 
         private void ShowExportMenu()
@@ -1599,7 +1518,10 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.UnityMethodAnalyzer
 
             try
             {
-                string json = GenerateJsonReport();
+                string json = UnityMethodAnalyzerReportExportAPI.RenderJson(
+                    _analyzer.Issues,
+                    _analyzer.Status
+                );
                 GUIUtility.systemCopyBuffer = json;
                 _statusMessage = $"Copied {_analyzer.Issues.Count} issues to clipboard as JSON";
             }
@@ -1620,7 +1542,10 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.UnityMethodAnalyzer
 
             try
             {
-                string markdown = GenerateMarkdownReport();
+                string markdown = UnityMethodAnalyzerReportExportAPI.RenderMarkdown(
+                    _analyzer.Issues,
+                    _analyzer.Status
+                );
                 GUIUtility.systemCopyBuffer = markdown;
                 _statusMessage = $"Copied {_analyzer.Issues.Count} issues to clipboard as Markdown";
             }
@@ -1640,38 +1565,22 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.UnityMethodAnalyzer
                 defaultName,
                 "json"
             );
-
-            if (string.IsNullOrEmpty(path))
+            if (!string.IsNullOrWhiteSpace(path))
             {
-                return;
-            }
-
-            try
-            {
-                string report = GenerateJsonReport();
-                if (!DurableFile.TryWriteAllText(path, report, out Exception writeError))
-                {
-                    throw writeError;
-                }
-                _statusMessage = $"Report exported to: {Path.GetFileName(path)}";
-                EditorUtility.RevealInFinder(path);
-            }
-            catch (Exception e)
-            {
-                _statusMessage = $"Export failed";
-                this.LogError($"Export failed", e);
+                ExportReportToPath(path, true);
             }
         }
 
         private string GenerateIssueJson(AnalyzerIssue issue)
         {
-            IssueJsonModel model = new(issue);
-            return Serializer.JsonStringify(model, pretty: true);
+            return UnityMethodAnalyzerReportExportAPI.RenderIssueJson(issue);
         }
 
         private string GenerateIssueMarkdown(AnalyzerIssue issue)
         {
-            System.Text.StringBuilder sb = new();
+            using PooledResource<StringBuilder> builderLease = Buffers.StringBuilder.Get(
+                out StringBuilder sb
+            );
 
             string severityEmoji = issue.Severity switch
             {
@@ -1696,16 +1605,16 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.UnityMethodAnalyzer
             sb.AppendLine($"**Description:** {issue.Description}");
             sb.AppendLine();
 
-            if (!string.IsNullOrEmpty(issue.BaseClassName))
+            if (!string.IsNullOrWhiteSpace(issue.BaseClassName))
             {
                 sb.AppendLine($"**Base Class:** `{issue.BaseClassName}`");
-                if (!string.IsNullOrEmpty(issue.BaseMethodSignature))
+                if (!string.IsNullOrWhiteSpace(issue.BaseMethodSignature))
                 {
                     sb.AppendLine($"**Base Method:** `{issue.BaseMethodSignature}`");
                 }
             }
 
-            if (!string.IsNullOrEmpty(issue.DerivedMethodSignature))
+            if (!string.IsNullOrWhiteSpace(issue.DerivedMethodSignature))
             {
                 sb.AppendLine($"**Derived Method:** `{issue.DerivedMethodSignature}`");
             }
@@ -1714,158 +1623,6 @@ namespace WallstopStudios.UnityHelpers.Editor.Tools.UnityMethodAnalyzer
             sb.AppendLine($"**Recommended Fix:** {issue.RecommendedFix}");
 
             return sb.ToString();
-        }
-
-        private string GenerateJsonReport()
-        {
-            IReadOnlyList<AnalyzerIssue> issues = _analyzer.Issues;
-
-            AnalysisReportJsonModel report = new()
-            {
-                GeneratedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-                CoverageStatus = _analyzer.Status,
-                TotalIssues = issues.Count,
-                Summary = new SummaryJsonModel
-                {
-                    BySeverity = new SeveritySummaryJsonModel
-                    {
-                        Critical = _criticalCount,
-                        High = _highCount,
-                        Medium = _mediumCount,
-                        Low = _lowCount,
-                        Info = _infoCount,
-                    },
-                    ByCategory = new CategorySummaryJsonModel
-                    {
-                        UnityLifecycle = issues.Count(i =>
-                            i.Category == IssueCategory.UnityLifecycle
-                        ),
-                        UnityInheritance = issues.Count(i =>
-                            i.Category == IssueCategory.UnityInheritance
-                        ),
-                        GeneralInheritance = issues.Count(i =>
-                            i.Category == IssueCategory.GeneralInheritance
-                        ),
-                    },
-                },
-                Issues = issues.Select(i => new IssueJsonModel(i)).ToList(),
-            };
-
-            return Serializer.JsonStringify(report, pretty: true);
-        }
-
-        private sealed class AnalysisReportJsonModel
-        {
-            [JsonPropertyName("generatedAt")]
-            public string GeneratedAt { get; set; }
-
-            [JsonPropertyName("coverageStatus")]
-            public string CoverageStatus { get; set; }
-
-            [JsonPropertyName("totalIssues")]
-            public int TotalIssues { get; set; }
-
-            [JsonPropertyName("summary")]
-            public SummaryJsonModel Summary { get; set; }
-
-            [JsonPropertyName("issues")]
-            public List<IssueJsonModel> Issues { get; set; }
-        }
-
-        private sealed class SummaryJsonModel
-        {
-            [JsonPropertyName("bySeverity")]
-            public SeveritySummaryJsonModel BySeverity { get; set; }
-
-            [JsonPropertyName("byCategory")]
-            public CategorySummaryJsonModel ByCategory { get; set; }
-        }
-
-        private sealed class SeveritySummaryJsonModel
-        {
-            [JsonPropertyName("critical")]
-            public int Critical { get; set; }
-
-            [JsonPropertyName("high")]
-            public int High { get; set; }
-
-            [JsonPropertyName("medium")]
-            public int Medium { get; set; }
-
-            [JsonPropertyName("low")]
-            public int Low { get; set; }
-
-            [JsonPropertyName("info")]
-            public int Info { get; set; }
-        }
-
-        private sealed class CategorySummaryJsonModel
-        {
-            [JsonPropertyName("unityLifecycle")]
-            public int UnityLifecycle { get; set; }
-
-            [JsonPropertyName("unityInheritance")]
-            public int UnityInheritance { get; set; }
-
-            [JsonPropertyName("generalInheritance")]
-            public int GeneralInheritance { get; set; }
-        }
-
-        private sealed class IssueJsonModel
-        {
-            [JsonPropertyName("filePath")]
-            public string FilePath { get; set; }
-
-            [JsonPropertyName("lineNumber")]
-            public int LineNumber { get; set; }
-
-            [JsonPropertyName("className")]
-            public string ClassName { get; set; }
-
-            [JsonPropertyName("methodName")]
-            public string MethodName { get; set; }
-
-            [JsonPropertyName("issueType")]
-            public string IssueType { get; set; }
-
-            [JsonPropertyName("severity")]
-            public string Severity { get; set; }
-
-            [JsonPropertyName("category")]
-            public string Category { get; set; }
-
-            [JsonPropertyName("description")]
-            public string Description { get; set; }
-
-            [JsonPropertyName("recommendedFix")]
-            public string RecommendedFix { get; set; }
-
-            [JsonPropertyName("baseClassName")]
-            public string BaseClassName { get; set; }
-
-            [JsonPropertyName("baseMethodSignature")]
-            public string BaseMethodSignature { get; set; }
-
-            [JsonPropertyName("derivedMethodSignature")]
-            public string DerivedMethodSignature { get; set; }
-
-            public IssueJsonModel() { }
-
-            public IssueJsonModel(AnalyzerIssue issue)
-            {
-                FilePath = issue.FilePath;
-                LineNumber = issue.LineNumber;
-                ClassName = issue.ClassName;
-                MethodName = issue.MethodName;
-                IssueType = issue.IssueType;
-                Severity = issue.Severity.ToString();
-                Category = issue.Category.ToString();
-                Description = issue.Description;
-                RecommendedFix = issue.RecommendedFix;
-                BaseClassName = issue.BaseClassName;
-                BaseMethodSignature = issue.BaseMethodSignature;
-                DerivedMethodSignature = issue.DerivedMethodSignature;
-            }
         }
     }
 #endif

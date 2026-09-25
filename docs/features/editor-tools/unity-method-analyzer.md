@@ -16,7 +16,7 @@ It no longer guesses declarations or inheritance from source text.
 Recompilation is asynchronous and may reload the editor domain. Captured reports survive that
 reload within the editor session. Refreshing a report does not compile scripts or walk directories.
 The directory list filters files already included in Unity's compilation; files outside the
-project's compiled assemblies are not analyzed.
+project's compiled assemblies are not analyzed. Empty or whitespace-only source paths are ignored.
 
 The status reports how many current editor assemblies have captured results. **No captured
 compilation, partial coverage, compilation in progress, and compiler errors are explicit states.**
@@ -117,6 +117,10 @@ compiler severity: `WUH015` and `WUH016` are suppressible warnings.
 
 **Export** copies or saves the currently displayed diagnostics as JSON or Markdown. Per-row context
 menus copy an individual issue. Reports preserve diagnostic IDs, messages, paths, source lines, and compiler coverage status.
+Editor scripts can call `UnityMethodAnalyzerReportExportAPI.TryExportMarkdown` or `TryExportJson`
+with an explicit output path, `IReadOnlyList<AnalyzerIssue>`, and coverage status. Both return
+`false` with an error message for invalid input or failed writes and do not open a save dialog.
+Whitespace-only output paths are invalid.
 The complete report is staged before replacing an existing file.
 Read that status with the diagnostic list: a partial report is not a build-success gate.
 CI should run the compiler with the shipped analyzers enabled and use its exit status and diagnostics.
@@ -124,8 +128,9 @@ CI should run the compiler with the shipped analyzers enabled and use its exit s
 ## Running it from a script
 
 `MethodAnalyzer.Refresh(rootPath, directories)` filters the captured compiler snapshot. `Issues`
-contains the report and `Status` describes compiler coverage. `AnalyzeAsync` remains available as a
-cancellable snapshot read; it does not initiate compilation.
+contains the report and `Status` describes compiler coverage. Pass both to the export API to write
+a report without opening the window. `AnalyzeAsync` remains available as a cancellable snapshot
+read; it does not initiate compilation.
 
 The old synchronous `Analyze` method is deprecated and delegates to `Refresh`. Its old
 arbitrary-directory source parsing is retired. `Classes` is also deprecated and returns no symbol

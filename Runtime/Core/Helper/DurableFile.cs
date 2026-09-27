@@ -5,6 +5,7 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
 {
     using System;
     using System.IO;
+    using System.Runtime.CompilerServices;
     using System.Runtime.InteropServices;
     using System.Text;
     using System.Threading;
@@ -30,10 +31,10 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
     /// It is <b>not</b> full crash safety — .NET cannot flush a <i>directory</i>, so a filesystem
     /// may still reorder the rename behind the data write. On platforms without
     /// <c>File.Replace</c>, the delete-then-move fallback briefly exposes an absent destination
-    /// and can lose it if the move fails. A second process using this type cannot take ownership of
-    /// the same staging path while a write is active; its operation reports failure instead. This is
-    /// ownership isolation, not a cross-process transaction or a multi-file lock. Do not describe
-    /// consumers of this type as crash-safe.
+    /// and can lose it if the move fails. A second process using the public write, append, or delete
+    /// APIs cannot take ownership of the same destination while one of them is active; its operation
+    /// reports failure instead. This is ownership isolation, not a cross-process transaction or a
+    /// multi-file lock. Do not describe consumers of this type as crash-safe.
     /// </para>
     /// <para>
     /// Where the format allows a log of records, <see cref="TryAppendAllText"/> is strictly stronger
@@ -55,13 +56,13 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
         public const string TemporarySuffix = ".tmp";
 
         internal const string PreservedStagingPathDataKey = nameof(PreservedStagingPathDataKey);
+        internal const string OwnershipSuffix = ".lock";
 
         private const int UnixNameAlreadyExists = 17;
         private const int DefaultBufferSize = 4096;
 
         // FileMode.Append does not provide atomic append; bounded per-path gates prevent writer overlap.
         private const int GateCount = 32;
-        private const string OwnershipSuffix = ".lock";
 
         private static readonly SemaphoreSlim[] Gates = CreateGates();
 
@@ -243,8 +244,9 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
         /// <remarks>
         /// An append never rewrites bytes that are already on disk, so it cannot damage an earlier
         /// record. Concurrent appends from this process interleave whole records; an append from
-        /// another process while one is in flight fails rather than corrupting the file. Empty or
-        /// null <paramref name="contents"/> is a no-op success and does not create the file.
+        /// another process while one is in flight fails rather than corrupting the file. Appends also
+        /// share the staging ownership used by this type's writes, creates, and deletes. Empty or null
+        /// <paramref name="contents"/> is a no-op success and does not create the file.
         /// </remarks>
         /// <param name="path">Destination file path. Missing directories are created.</param>
         /// <param name="contents">Text to append.</param>
@@ -266,9 +268,14 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
 
             using (EnterGate(path))
             {
+                FileStream ownership = null;
                 try
                 {
                     EnsureDirectory(path);
+                    if (!TryOpenStagingOwnership(path + TemporarySuffix, out ownership, out error))
+                    {
+                        return false;
+                    }
                     byte[] bytes = Utf8NoByteOrderMark.GetBytes(contents);
                     using FileStream stream = OpenAppendStream(path, useAsync: false);
                     stream.Write(bytes, 0, bytes.Length);
@@ -280,6 +287,10 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                 {
                     error = e;
                     return false;
+                }
+                finally
+                {
+                    ReleaseStagingOwnership(ownership);
                 }
             }
         }
@@ -322,9 +333,20 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
 
             using (gate)
             {
+                FileStream ownership = null;
                 try
                 {
                     EnsureDirectory(path);
+                    if (
+                        !TryOpenStagingOwnership(
+                            path + TemporarySuffix,
+                            out ownership,
+                            out Exception ownershipError
+                        )
+                    )
+                    {
+                        return ownershipError;
+                    }
                     byte[] bytes = Utf8NoByteOrderMark.GetBytes(contents);
                     using FileStream stream = OpenAppendStream(path, useAsync: true);
                     await stream
@@ -336,6 +358,10 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                 catch (Exception e)
                 {
                     return e;
+                }
+                finally
+                {
+                    ReleaseStagingOwnership(ownership);
                 }
             }
         }
@@ -375,7 +401,11 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
 
                 try
                 {
-                    ownership = OpenStagingOwnership(temporaryPath);
+                    if (!TryOpenStagingOwnership(temporaryPath, out ownership, out error))
+                    {
+                        ReleaseFileStream(source);
+                        return false;
+                    }
                     staging = OpenStagingStream(temporaryPath, useAsync: false);
                 }
                 catch (Exception e)
@@ -440,10 +470,11 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
 
         /// <summary>
         /// Deletes a file, reporting failure rather than throwing. An absent file is successful;
-        /// another process can create the path after deletion completes.
+        /// another process can create the path after deletion completes. A competing operation using
+        /// this type reports failure while another operation owns the destination.
         /// </summary>
         /// <param name="path">File to delete.</param>
-        /// <returns>True if <see cref="File.Delete(string)"/> completed without throwing.</returns>
+        /// <returns>True if the file was deleted or its parent directory is absent.</returns>
         public static bool TryDelete(string path)
         {
             if (string.IsNullOrWhiteSpace(path))
@@ -451,14 +482,42 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                 return false;
             }
 
-            try
+            using (EnterGate(path))
             {
-                File.Delete(path);
-                return true;
-            }
-            catch (Exception)
-            {
-                return false;
+                FileStream ownership = null;
+                try
+                {
+                    string parent = Path.GetDirectoryName(Path.GetFullPath(path));
+                    if (string.IsNullOrEmpty(parent))
+                    {
+                        return false;
+                    }
+
+                    if (
+                        !TryOpenStagingOwnership(
+                            path + TemporarySuffix,
+                            out ownership,
+                            out Exception ownershipError
+                        )
+                    )
+                    {
+                        return ownershipError is DirectoryNotFoundException;
+                    }
+                    File.Delete(path);
+                    return true;
+                }
+                catch (DirectoryNotFoundException)
+                {
+                    return true;
+                }
+                catch (Exception)
+                {
+                    return false;
+                }
+                finally
+                {
+                    ReleaseStagingOwnership(ownership);
+                }
             }
         }
 
@@ -468,7 +527,8 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
         /// name is removed after publication and verification; if that cleanup fails, the
         /// destination remains in place and this method reports a failure for inspection.
         /// A noncooperating writer can replace the staged name before cleanup, so that cleanup
-        /// does not provide exclusive ownership against external writers.
+        /// does not provide exclusive ownership against external writers. Public DurableFile write,
+        /// append, and delete operations cannot mutate the destination while this create owns it.
         /// </remarks>
         /// <param name="path">Destination file path. Missing directories are created.</param>
         /// <param name="contents">Bytes to write.</param>
@@ -501,11 +561,16 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
             {
                 string temporaryPath =
                     path + ".create." + Guid.NewGuid().ToString("N") + TemporarySuffix;
+                FileStream ownership = null;
                 bool ownsTemporary = false;
                 bool moved = false;
                 try
                 {
                     EnsureDirectory(path);
+                    if (!TryOpenStagingOwnership(path + TemporarySuffix, out ownership, out error))
+                    {
+                        return false;
+                    }
                     using (
                         FileStream staging = new(
                             temporaryPath,
@@ -563,6 +628,10 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                     }
                     error = failure;
                     return false;
+                }
+                finally
+                {
+                    ReleaseStagingOwnership(ownership);
                 }
             }
         }
@@ -665,7 +734,10 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                 bool ownsStaging = false;
                 try
                 {
-                    ownership = OpenStagingOwnership(temporaryPath);
+                    if (!TryOpenStagingOwnership(temporaryPath, out ownership, out error))
+                    {
+                        return false;
+                    }
 #if UNITY_EDITOR
                     BeforeCompareReadForTests?.Invoke(temporaryPath);
 #endif
@@ -740,7 +812,11 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                 try
                 {
                     EnsureDirectory(path);
-                    ownership = OpenStagingOwnership(temporaryPath);
+                    if (!TryOpenStagingOwnership(temporaryPath, out ownership, out error))
+                    {
+                        exchanged = false;
+                        return false;
+                    }
                     bool exists;
                     string current;
                     try
@@ -845,7 +921,17 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
 
                 try
                 {
-                    ownership = OpenStagingOwnership(temporaryPath);
+                    if (
+                        !TryOpenStagingOwnership(
+                            temporaryPath,
+                            out ownership,
+                            out Exception ownershipError
+                        )
+                    )
+                    {
+                        ReleaseFileStream(source);
+                        return ownershipError;
+                    }
                     staging = OpenStagingStream(temporaryPath, useAsync: true);
                 }
                 catch (Exception e)
@@ -940,7 +1026,16 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
                                 : Utf8NoByteOrderMark.GetBytes(textContents)
                         );
                     EnsureDirectory(path);
-                    ownership = OpenStagingOwnership(temporaryPath);
+                    if (
+                        !TryOpenStagingOwnership(
+                            temporaryPath,
+                            out ownership,
+                            out Exception ownershipError
+                        )
+                    )
+                    {
+                        return ownershipError;
+                    }
                     staging = OpenStagingStream(temporaryPath, useAsync: true);
                 }
                 catch (Exception e)
@@ -993,7 +1088,10 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
             try
             {
                 EnsureDirectory(path);
-                ownership = OpenStagingOwnership(temporaryPath);
+                if (!TryOpenStagingOwnership(temporaryPath, out ownership, out error))
+                {
+                    return false;
+                }
                 staging = OpenStagingStream(temporaryPath, useAsync: false);
             }
             catch (Exception e)
@@ -1141,16 +1239,39 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
             );
         }
 
-        private static FileStream OpenStagingOwnership(string temporaryPath)
+        // Isolate expected sharing failures from IL2CPP callers and async state machines.
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static bool TryOpenStagingOwnership(
+            string temporaryPath,
+            out FileStream ownership,
+            out Exception error
+        )
         {
-            return new FileStream(
-                temporaryPath + OwnershipSuffix,
-                FileMode.OpenOrCreate,
-                FileAccess.ReadWrite,
-                FileShare.Read,
-                bufferSize: 1,
-                FileOptions.DeleteOnClose
-            );
+            try
+            {
+                ownership = new FileStream(
+                    temporaryPath + OwnershipSuffix,
+                    FileMode.OpenOrCreate,
+                    FileAccess.ReadWrite,
+                    FileShare.Read,
+                    bufferSize: 1,
+                    FileOptions.DeleteOnClose
+                );
+                error = null;
+                return true;
+            }
+            catch (IOException e)
+            {
+                ownership = null;
+                error = e;
+                return false;
+            }
+            catch (Exception e)
+            {
+                ownership = null;
+                error = e;
+                return false;
+            }
         }
 
         private static void ReleaseStagingOwnership(FileStream ownership)
@@ -1194,7 +1315,11 @@ namespace WallstopStudios.UnityHelpers.Core.Helper
 
         private static void DiscardStagedFile(string temporaryPath)
         {
-            TryDelete(temporaryPath);
+            try
+            {
+                File.Delete(temporaryPath);
+            }
+            catch (Exception) { }
         }
 
         // The destination can change after the existence probe; retry the matching alternative on that race.

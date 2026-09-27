@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix `DurableFile` ownership so append, create, and delete operations cannot change a destination during a staged write; competing operations also report failure without crashing Windows IL2CPP players ([#871](https://github.com/Ambiguous-Interactive/unity-helpers/issues/871)).
 - Fix cached package path conversion so blank package IDs return no path ([#867](https://github.com/Ambiguous-Interactive/unity-helpers/issues/867)).
 - Fix Sentinel validation runs so targets with whitespace-only GUIDs or asset paths are skipped ([#867](https://github.com/Ambiguous-Interactive/unity-helpers/issues/867)).
 - Ignore whitespace-only file paths in Unity Method Analyzer source selection, compiler messages, navigation, and report export ([#867](https://github.com/Ambiguous-Interactive/unity-helpers/issues/867)).
@@ -47,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Improved
 
+- Improve Sprite Cropper scan speed for images of at least one million pixels ([#782](https://github.com/Ambiguous-Interactive/unity-helpers/issues/782)).
 - Improve `JesseSort` on large, sustained random-looking inputs with a direct-sort route while retaining pile merging for structured runs ([#747](https://github.com/Ambiguous-Interactive/unity-helpers/issues/747)).
 - Improve subset sampling from queues and hash sets by copying each source once ([#781](https://github.com/Ambiguous-Interactive/unity-helpers/issues/781)).
 - Improve loading of missing `SerializableType` references without building the type-picker catalog ([#783](https://github.com/Ambiguous-Interactive/unity-helpers/issues/783)).

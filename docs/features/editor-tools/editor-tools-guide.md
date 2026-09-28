@@ -222,9 +222,9 @@ Settings that tend to travel together:
 `Switch`, ...). Each entry has its own apply toggles, so you can cap Android at `1024` while
 Standalone keeps `2048`.
 
-Nothing on disk is rewritten — only import settings — and the change is recorded as a single
-`Apply Texture Settings` undo step. **Require Changes Before Apply** (on by default) skips the
-reimport entirely when nothing would differ.
+Source image bytes stay unchanged; Unity saves importer settings and reimports changed textures.
+The settings change is recorded as an `Apply Texture Settings` undo step. **Require Changes Before
+Apply** (on by default) skips the reimport entirely when nothing would differ.
 
 #### Applying texture settings from a script
 
@@ -233,13 +233,13 @@ The same logic is public, so a build step or a custom importer can use it direct
 <!-- doc-sample: compiles-editor -->
 
 ```csharp
-using UnityEditor;
+using System.Collections.Generic;
 using UnityEngine;
 using WallstopStudios.UnityHelpers.Editor.Sprites;
 
 public static class TileImportStandard
 {
-    public static void ApplyTo(string assetPath)
+    public static bool ApplyTo(IReadOnlyList<string> assetPaths)
     {
         TextureSettingsApplierAPI.Config config = new()
         {
@@ -260,28 +260,31 @@ public static class TileImportStandard
             },
         };
 
-        if (!TextureSettingsApplierAPI.WillTextureSettingsChange(assetPath, in config))
-        {
-            return;
-        }
-
         if (
-            TextureSettingsApplierAPI.TryUpdateTextureSettings(
-                assetPath,
+            !TextureSettingsApplierAPI.TryApplyTextureSettings(
+                assetPaths,
                 in config,
-                out TextureImporter importer
+                out int changed,
+                out bool canceled,
+                out string error
             )
         )
         {
-            importer.SaveAndReimport();
+            Debug.LogError(error);
+            return false;
         }
+
+        Debug.Log($"Updated {changed} texture importers.");
+        return !canceled;
     }
 }
 ```
 
 `Config` is a struct with no defaults, so every field you care about must be set explicitly, and the
-API never calls `SaveAndReimport()` for you — that is deliberate, so you can batch a whole folder
-inside one `AssetDatabase.StartAssetEditing()` block. The default-platform name string is
+batch API reimports and saves changed textures. Its optional cancellation callback keeps completed
+changes and reports `canceled`; an error can also leave earlier textures changed. For one texture,
+`WillTextureSettingsChange` and `TryUpdateTextureSettings` remain available. The latter returns an
+importer for the caller to reimport. The default-platform name string is
 `"DefaultTexturePlatform"`.
 
 > **Visual Reference**
@@ -402,7 +405,6 @@ fails, the error also identifies the staged restore bytes for inspection.
 
 ```csharp
 using System.Collections.Generic;
-using UnityEditor;
 using UnityEngine;
 using WallstopStudios.UnityHelpers.Editor.Sprites;
 
@@ -432,33 +434,32 @@ public static class SpriteImportStandard
         },
     };
 
-    public static void ApplyTo(string assetPath)
+    public static bool ApplyTo(
+        IReadOnlyList<string> assetPaths,
+        out int changed,
+        out bool canceled)
     {
-        List<SpriteSettingsApplierAPI.PreparedProfile> prepared =
-            SpriteSettingsApplierAPI.PrepareProfiles(Profiles);
-
-        if (!SpriteSettingsApplierAPI.WillTextureSettingsChange(assetPath, prepared))
+        bool succeeded = SpriteSettingsApplierAPI.TryApplyProfiles(
+            assetPaths,
+            Profiles,
+            out changed,
+            out canceled,
+            out string error);
+        if (!succeeded)
         {
-            return;
+            Debug.LogError(error);
         }
-
-        if (
-            SpriteSettingsApplierAPI.TryUpdateTextureSettings(
-                assetPath,
-                prepared,
-                out TextureImporter importer
-            )
-        )
-        {
-            importer.SaveAndReimport();
-        }
+        return succeeded;
     }
 }
 ```
 
-`PrepareProfiles` compiles the regexes once — hoist it out of the per-asset loop. `NameContains`
-matches the file name, `PathContains` and `Regex` match the full asset path, and `Regex` is always
-case-insensitive. Applying a `pivot` also forces `Sprite Alignment` to `Custom`.
+The batch API reimports and saves changed sprites. An optional cancellation callback keeps completed
+changes and reports `canceled`; an error can also leave earlier sprites changed. For one sprite,
+`PrepareProfiles`, `WillTextureSettingsChange`, and `TryUpdateTextureSettings` remain available;
+the latter returns an importer for the caller to reimport. `NameContains` matches the file name,
+`PathContains` and `Regex` match the full asset path, and `Regex` is always case-insensitive.
+Applying a `pivot` also forces `Sprite Alignment` to `Custom`.
 
 > **Visual Reference**
 >
@@ -584,7 +585,8 @@ progress bar. **Apply to Standalone / Android / iOS** additionally writes a plat
 the same size. **Fit Mode** is not persisted across a domain reload — re-select it after a
 recompile.
 
-Scripts and batch-mode jobs can run the same operation without opening the window:
+Scripts and batch-mode jobs can run the same operation without opening the window. Folder paths
+accept forward or back slashes:
 
 ```csharp
 List<string> textureGuids = new();
@@ -905,7 +907,7 @@ output and includes the cleanup error in `Errors`.
 
 Use `SpriteSheetExtractionAPI.Discover` with folder asset paths and an optional filename regex to
 get the same sprite texture list as the window. Its result includes warnings for invalid folders
-and an error for an invalid or timed-out regex.
+and an error for an invalid or timed-out regex. Folder paths accept forward or back slashes.
 
 `SpriteSheetReferenceReplacementAPI.Run` accepts an explicit map from source sprites to extracted
 sprites and explicit asset paths. It previews matching references by default; pass
@@ -1077,8 +1079,17 @@ Closing the window releases its cached state.
    or **Generate + Pack** to do both.
 
 Scripts and batch jobs can use the same configuration without opening the window. Call
+`ScriptableSpriteAtlasGenerator.TryCreateConfig("Assets/Data/CharacterAtlas.asset", out config, out error)`
+to create a config at an explicit path outside an active asset batch. The parent folder must exist;
+the API refuses an occupied
+path at preflight. External writers are not locked out between that check and Unity asset creation.
+The window chooses a unique path before calling this API.
+Creation writes an asset file, which Unity Undo cannot fully reverse. If finalization fails after
+creation, the returned config remains at that path for inspection.
+Call
 `ScriptableSpriteAtlasGenerator.Scan(config, toAdd, toRemove)` to preview folder changes, then
 `Synchronize(config, toAdd, toRemove)` to add found sprites while keeping existing manual entries.
+Source folder paths in the config accept forward or back slashes.
 If a source folder or filter is invalid, `Scan` returns `false` with empty results; fix the config
 before synchronizing.
 Pass `removeUnmatchedSprites: true` to remove every sprite absent from the scanned folders, including
@@ -1093,6 +1104,16 @@ mode, use `-executeMethod WallstopStudios.UnityHelpers.Editor.Sprites.Scriptable
 That command skips packing and exits with code 1 if a config has an invalid or occupied output path.
 Generation and packing write assets and may trigger imports; Unity Undo cannot reverse all file and
 import effects.
+
+`ScriptableSpriteAtlasGenerator.TrySetSourceTexturesUncompressed(config, applyChanges, out count, out error)`
+previews how many distinct source textures need uncompressed importer settings when `applyChanges`
+is `false`, and applies those settings without a window or prompt when it is `true`. It disables
+crunch and compression, sets the default platform to RGB24 or RGBA32 based on source alpha, and leaves PNG bytes
+untouched. Applying reimports textures, so Unity Undo cannot fully reverse the import effects.
+If a later texture fails, the call returns `false` with an error and the count of textures whose
+final reimport succeeded. Earlier changes can remain in place, and a failed import may need
+inspection. The API also reports failure if Unity reimports a texture but its resulting settings
+do not match the requested values.
 
 A character atlas that picks up every new idle frame automatically:
 
@@ -1233,6 +1254,23 @@ and **Deny Component Types (comma names)** skips those component types during ch
 
 **Fixing and reporting:** **Fix Missing Scripts** strips dead component slots, but it stays disabled
 until you tick **Enable Auto-fix options** — the gate is deliberate, because the fix deletes data.
+Editor scripts can call `PrefabChecker.TryRemoveMissingScripts` with explicit `Assets` folders. A
+dry run counts affected prefabs and missing scripts without changing assets; an apply run removes
+missing slots from prefab roots and children. The call opens no window or dialog, and reports an
+error through its final output parameter. Folder paths accept forward or back slashes. It may leave
+earlier prefabs repaired if a later prefab fails. Applying the repair writes prefab files, which
+Unity Undo cannot fully reverse.
+
+```csharp
+bool repaired = PrefabChecker.TryRemoveMissingScripts(
+    new[] { "Assets/Prefabs" },
+    false,
+    out int changedPrefabs,
+    out int removedScripts,
+    out string repairError
+);
+```
+
 **Export Report (JSON)** and **Export Report (CSV)** write the same findings to a file for a build
 step or a review. The complete report is staged before replacing an existing file.
 
@@ -1286,6 +1324,12 @@ leaving a partly written ruleset. The ruleset is a project file change outside U
 so commit it when the policy should be shared with the team. The window lists every diagnostic
 with a short explanation; the [Analyzer reference](../../performance/analyzers.md) has examples and
 fixes.
+
+Editor scripts and batch mode can call `AnalyzerPolicyAPI.TrySetEnabled(true, out string message)`
+to enable all Unity Helpers policies in `Assets/Default.ruleset`, or pass `false` to disable them.
+The overload accepting an asset path manages another `.ruleset` under `Assets`. Both calls import
+the written ruleset immediately and return `false` with a message when the path, ruleset, write, or
+import fails. Ruleset file changes cannot be reversed through Unity Undo.
 
 ### Unity Method Analyzer
 

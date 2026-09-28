@@ -141,7 +141,7 @@ What does not auto‑fix:
 ## Run Checks Locally
 
 - Install tools once:
-  - `npm ci` (or `npm i --no-audit --no-fund`)
+  - `npm install --no-audit --no-fund` (the generated root lockfile stays ignored)
   - `dotnet tool restore`
   - `npm run hooks:install`: installs git hooks. The install script also configures `push.autoSetupRemote=true` and `push.default=simple` locally, so `git push` on a new branch sets tracking automatically.
 - Verify all tools: `npm run verify:tools`

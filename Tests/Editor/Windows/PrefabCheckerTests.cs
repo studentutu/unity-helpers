@@ -35,6 +35,12 @@ namespace WallstopStudios.UnityHelpers.Tests.Windows
             RegexOptions.Compiled
         );
 
+        private static IEnumerable<string> ThrowingFolders()
+        {
+            yield return Root;
+            throw new System.InvalidOperationException("Enumeration failed.");
+        }
+
         [TearDown]
         public override void TearDown()
         {
@@ -95,6 +101,133 @@ namespace WallstopStudios.UnityHelpers.Tests.Windows
         }
 
         [Test]
+        public void RemoveMissingScriptsPreviewsAndRepairsNestedPrefabWithoutWindow()
+        {
+            ExecuteWithImmediateImport(() =>
+            {
+                string folder = Path.Combine(ApiRoot, "MissingScriptRepair").SanitizePath();
+                EnsureFolder(folder);
+                string prefabPath = Path.Combine(folder, "MissingScript.prefab").SanitizePath();
+                GameObject source = Track(new GameObject("Root"));
+                GameObject child = Track(new GameObject("Child"));
+                child.transform.SetParent(source.transform);
+                AssignmentComponent component = child.AddComponent<AssignmentComponent>();
+                string scriptPath = AssetDatabase.GetAssetPath(
+                    MonoScript.FromMonoBehaviour(component)
+                );
+                string scriptGuid = AssetDatabase.AssetPathToGUID(scriptPath);
+                Assert.IsNotEmpty(scriptGuid);
+                PrefabUtility.SaveAsPrefabAsset(source, prefabPath);
+                TrackAssetPath(prefabPath);
+
+                string fullPath = Path.GetFullPath(
+                    Path.Combine(Application.dataPath, "..", prefabPath)
+                );
+                string originalYaml = File.ReadAllText(fullPath);
+                string missingYaml = originalYaml.Replace(
+                    $"guid: {scriptGuid}, type: 3",
+                    "guid: ffffffffffffffffffffffffffffffff, type: 3"
+                );
+                Assert.AreNotEqual(originalYaml, missingYaml);
+                File.WriteAllText(fullPath, missingYaml);
+                AssetDatabase.ImportAsset(prefabPath, ImportAssetOptions.ForceSynchronousImport);
+                string windowsFolder = folder.Replace('/', '\\');
+
+                bool preview = PrefabChecker.TryRemoveMissingScripts(
+                    new[] { folder, windowsFolder },
+                    true,
+                    out int previewPrefabs,
+                    out int previewScripts,
+                    out string previewError
+                );
+                Assert.IsTrue(preview, previewError);
+                Assert.AreEqual(1, previewPrefabs);
+                Assert.AreEqual(1, previewScripts);
+                Assert.AreEqual(missingYaml, File.ReadAllText(fullPath));
+
+                bool applied;
+                int changedPrefabs;
+                int removedScripts;
+                string applyError;
+                AssetDatabase.StartAssetEditing();
+                try
+                {
+                    applied = PrefabChecker.TryRemoveMissingScripts(
+                        new[] { windowsFolder },
+                        false,
+                        out changedPrefabs,
+                        out removedScripts,
+                        out applyError
+                    );
+                }
+                finally
+                {
+                    AssetDatabase.StopAssetEditing();
+                }
+                Assert.IsTrue(applied, applyError);
+                Assert.AreEqual(1, changedPrefabs);
+                Assert.AreEqual(1, removedScripts);
+                GameObject repaired = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
+                Assert.IsTrue(repaired != null);
+                Assert.AreEqual(1, repaired.transform.childCount);
+                Assert.AreEqual(
+                    0,
+                    GameObjectUtility.GetMonoBehavioursWithMissingScriptCount(
+                        repaired.transform.GetChild(0).gameObject
+                    )
+                );
+
+                bool repeated = PrefabChecker.TryRemoveMissingScripts(
+                    new[] { folder },
+                    false,
+                    out int repeatedPrefabs,
+                    out int repeatedScripts,
+                    out string repeatedError
+                );
+                Assert.IsTrue(repeated, repeatedError);
+                Assert.AreEqual(0, repeatedPrefabs);
+                Assert.AreEqual(0, repeatedScripts);
+            });
+        }
+
+        [Test]
+        public void RemoveMissingScriptsRejectsInvalidFoldersWithoutOpeningWindow()
+        {
+            int windowsBefore = Resources.FindObjectsOfTypeAll<PrefabChecker>().Length;
+
+            bool succeeded = PrefabChecker.TryRemoveMissingScripts(
+                new[] { " ", "Packages/com.wallstop-studios.unity-helpers" },
+                false,
+                out int changedPrefabs,
+                out int missingScripts,
+                out string error
+            );
+
+            Assert.IsFalse(succeeded);
+            Assert.IsNotEmpty(error);
+            Assert.AreEqual(0, changedPrefabs);
+            Assert.AreEqual(0, missingScripts);
+            Assert.AreEqual(windowsBefore, Resources.FindObjectsOfTypeAll<PrefabChecker>().Length);
+        }
+
+        [Test]
+        public void RemoveMissingScriptsReportsFolderEnumerationFailure()
+        {
+            bool succeeded = PrefabChecker.TryRemoveMissingScripts(
+                ThrowingFolders(),
+                false,
+                out int changedPrefabs,
+                out int missingScripts,
+                out string error
+            );
+
+            Assert.IsFalse(succeeded);
+            StringAssert.Contains("Enumeration failed", error);
+            Assert.AreEqual(0, changedPrefabs);
+            Assert.AreEqual(0, missingScripts);
+        }
+
+        [Test]
         public void ScanFoldersReportsDisabledRootAndHonorsExplicitOptions()
         {
             ExecuteWithImmediateImport(() =>
@@ -122,7 +255,7 @@ namespace WallstopStudios.UnityHelpers.Tests.Windows
                         return false;
                     };
                     EditorUi.ProgressClearedForTesting = () => clearCalls++;
-                    found = PrefabChecker.ScanFolders(new[] { folder }, options);
+                    found = PrefabChecker.ScanFolders(new[] { folder.Replace('/', '\\') }, options);
                 }
                 finally
                 {

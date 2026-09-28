@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add `SpriteSettingsApplierAPI.TryApplyProfiles` to batch-apply and save sprite importer profiles from scripts without opening the window ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
+- Add `TextureSettingsApplierAPI.TryApplyTextureSettings` to apply and save texture import settings from scripts without opening the window ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
+- Add `AnalyzerPolicyAPI.TrySetEnabled` so editor scripts can enable or disable Unity Helpers analyzer policies without opening the window ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
+- Add `ScriptableSpriteAtlasGenerator.TryCreateConfig` and `TrySetSourceTexturesUncompressed` to create atlas configs and manage source sprite import settings without opening the window ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
 - Add `DisposableScope` for allocation-free `using` cleanup with copy-safe, reverse-order disposal ([#875](https://github.com/Ambiguous-Interactive/unity-helpers/issues/875)).
 - Add `SpriteSettingsApplierAPI.TrySaveProfiles` and `TryLoadProfiles` so editor scripts can persist sprite settings without opening the window, with explicit overwrite and independent profile copies ([#862](https://github.com/Ambiguous-Interactive/unity-helpers/issues/862)).
 - Add `UnityMethodAnalyzerReportExportAPI` so editor scripts can save Markdown and JSON findings with compiler coverage status without opening the window ([#861](https://github.com/Ambiguous-Interactive/unity-helpers/issues/861)).
@@ -19,11 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add `SpriteSheetAnimationAPI.TryDiscoverFrames` so editor scripts can load ordered sprite frames and choose whether to update import settings without opening the window ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
 - Add `AnimationClipFrameSaveAPI.TrySaveFrames` so editor scripts can save sprite frames and FPS to an existing clip without opening the window. See [Sprite Animation Editor](./docs/features/editor-tools/editor-tools-guide.md#sprite-animation-editor-animation-viewer-window) ([#851](https://github.com/Ambiguous-Interactive/unity-helpers/issues/851)).
 - Add `PrefabChecker.ScanFolders` so editor scripts can inspect prefab findings from explicit folders and options without opening the window ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
+- Add `PrefabChecker.TryRemoveMissingScripts` so editor scripts can preview or repair missing script slots in prefabs without opening the window ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
 - Add `TextureResizerAPI.TryResizeTextures` so editor scripts can resize or preview PNGs from explicit textures and asset folders without opening the window. Textures process in natural name order ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
 - Add an encoding-aware `DurableFile.TryWriteAllText` overload that preserves the encoding's byte order mark for staged writes.
 
 ### Fixed
 
+- Fix sprite atlas generation losing unsaved config sprite entries while creating an atlas asset ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
+- Fix the Sprite Atlas Generator's Force Uncompressed action so its default-platform compression setting stays uncompressed after reimport ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
+- Fix editor folder discovery and atlas generation so paths with Windows separators work from scripts and batch mode ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
 - Fix `DurableFile` ownership so append, create, and delete operations cannot change a destination during a staged write; competing operations also report failure without crashing Windows IL2CPP players ([#871](https://github.com/Ambiguous-Interactive/unity-helpers/issues/871)).
 - Fix Image Blur and Sprite Sheet Extractor output publication so a competing staged-file writer cannot change the destination during publication ([#871](https://github.com/Ambiguous-Interactive/unity-helpers/issues/871)).
 - Fix Sprite Sheet Animation Creator so declining an import-settings prompt leaves the texture importer unchanged ([#821](https://github.com/Ambiguous-Interactive/unity-helpers/issues/821)).
